@@ -65,24 +65,26 @@ export function latLonToUTM(lat: number, lon: number): UTMResult {
   };
 }
 
-export function fixQualityName(q: number): string {
-  return [
-    'No fix',
-    'Standard GPS',
-    'DGPS / SBAS',
-    'PPS',
-    'RTK Fixed ★',
-    'RTK Float',
-    'Dead Reckoning',
-    'Manual',
-    'Simulator',
-  ][q] ?? 'Unknown';
+interface FixInfo {
+  name: string;
+  desc: string;
+  accuracy: string;
+  color: string;
 }
 
-export function fixQualityColor(q: number): string {
-  if (q === 4) return '#00C853'; // RTK fixed — best
-  if (q === 5) return '#64DD17'; // RTK float — good
-  if (q === 2) return '#FFD600'; // DGPS
-  if (q === 1) return '#FF6D00'; // standard GPS
-  return '#D50000';              // no fix / unknown
+const FIX_INFO: Record<number, FixInfo> = {
+  0: { name: 'No Fix',          desc: 'No satellites locked',                      accuracy: '—',        color: '#D50000' },
+  1: { name: 'Standard GPS',    desc: 'Uncorrected GPS signal',                    accuracy: '~3–5 m',   color: '#FF6D00' },
+  2: { name: 'DGPS / SBAS',     desc: 'Satellite-based differential corrections',  accuracy: '~1–2 m',   color: '#FFD600' },
+  3: { name: 'PPS',             desc: 'Precise Positioning Service',               accuracy: '~1 m',     color: '#FFD600' },
+  4: { name: 'RTK Fixed',       desc: 'Full RTK — integer ambiguity resolved',     accuracy: '< 3 cm',   color: '#00C853' },
+  5: { name: 'RTK Float',       desc: 'RTK converging — ambiguity not yet fixed',  accuracy: '~10–50 cm',color: '#64DD17' },
+  6: { name: 'Dead Reckoning',  desc: 'Estimated from last known position',        accuracy: 'Unknown',  color: '#9E9E9E' },
+};
+
+export function fixQualityInfo(q: number): FixInfo {
+  return FIX_INFO[q] ?? { name: 'Unknown', desc: 'Unknown fix type', accuracy: '—', color: '#9E9E9E' };
 }
+
+export function fixQualityName(q: number): string  { return fixQualityInfo(q).name; }
+export function fixQualityColor(q: number): string { return fixQualityInfo(q).color; }

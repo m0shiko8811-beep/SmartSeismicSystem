@@ -1,7 +1,7 @@
 import React from 'react';
 import { ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useGps } from '../context/GpsContext';
-import { latLonToUTM, hdopToAccuracy, fixQualityName, fixQualityColor } from '../services/calculations';
+import { latLonToUTM, hdopToAccuracy, fixQualityInfo } from '../services/calculations';
 import { C } from '../theme';
 
 function Row({ label, value }: { label: string; value: string | React.ReactNode }) {
@@ -42,6 +42,7 @@ export default function StatusScreen() {
   const acc = hdopToAccuracy(gps.hdop);
   const utm = gps.fix ? latLonToUTM(gps.lat, gps.lon) : null;
   const hdopPct = Math.max(5, Math.min(100, Math.round((1 - (gps.hdop - 0.5) / 4.5) * 100)));
+  const fixInfo = fixQualityInfo(gps.fixQ);
 
   return (
     <ScrollView style={s.scroll} contentContainerStyle={s.container}>
@@ -77,13 +78,18 @@ export default function StatusScreen() {
       )}
 
       <Section title="Signal">
-        <Row label="Satellites" value={gps.sats.toString()} />
-        <Row label="Fix type"   value={
-          <View style={{ backgroundColor: fixQualityColor(gps.fixQ), borderRadius: 6, paddingHorizontal: 8, paddingVertical: 2 }}>
-            <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>{fixQualityName(gps.fixQ)}</Text>
-          </View> as any
-        } />
-        <Row label="HDOP"       value={gps.hdop.toFixed(2)} />
+        {/* Fix quality card */}
+        <View style={[s.fixCard, { borderLeftColor: fixInfo.color }]}>
+          <View style={s.fixTop}>
+            <View style={[s.fixBadge, { backgroundColor: fixInfo.color }]}>
+              <Text style={s.fixBadgeText}>{fixInfo.name}</Text>
+            </View>
+            <Text style={s.fixAccuracy}>{fixInfo.accuracy}</Text>
+          </View>
+          <Text style={s.fixDesc}>{fixInfo.desc}</Text>
+        </View>
+        <Row label="Satellites"    value={gps.sats.toString()} />
+        <Row label="HDOP"          value={gps.hdop.toFixed(2)} />
         <Row label="Est. accuracy" value={acc.toFixed(2) + ' m'} />
         <View style={s.barBg}>
           <View style={[s.barFill, { width: `${hdopPct}%` as any,
@@ -111,6 +117,12 @@ const s = StyleSheet.create({
   row: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 5, borderBottomWidth: 1, borderBottomColor: C.border },
   label: { fontSize: 14, color: C.muted },
   value: { fontSize: 14, color: C.text, fontWeight: '600' },
+  fixCard: { borderLeftWidth: 4, borderRadius: 8, backgroundColor: C.bg, padding: 10, marginBottom: 10 },
+  fixTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
+  fixBadge: { borderRadius: 6, paddingHorizontal: 10, paddingVertical: 3 },
+  fixBadgeText: { color: '#fff', fontWeight: '800', fontSize: 13 },
+  fixAccuracy: { fontSize: 13, fontWeight: '700', color: C.text },
+  fixDesc: { fontSize: 12, color: C.muted },
   barBg: { height: 8, backgroundColor: C.border, borderRadius: 4, marginTop: 10, overflow: 'hidden' },
   barFill: { height: 8, borderRadius: 4 },
   nmea: { fontSize: 10, fontFamily: 'monospace', color: C.accent, marginTop: 4 },

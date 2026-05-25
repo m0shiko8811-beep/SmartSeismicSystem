@@ -3,7 +3,7 @@ import { Alert, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View 
 import * as Haptics from 'expo-haptics';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { useGps } from '../context/GpsContext';
-import { hdopToAccuracy, isAccuracyInRange, haversineDist, bearing, formatDist, fixQualityName, fixQualityColor } from '../services/calculations';
+import { hdopToAccuracy, isAccuracyInRange, haversineDist, bearing, formatDist, fixQualityInfo } from '../services/calculations';
 import { getAccSettings } from '../services/storage';
 import { C } from '../theme';
 
@@ -37,6 +37,7 @@ export default function SurveyScreen() {
   const label = `${line}:${station}`;
   const acc = gps ? hdopToAccuracy(gps.hdop) : 99;
   const inRange = gps?.fix ? isAccuracyInRange(acc, minAcc, maxAcc) : false;
+  const fixInfo = gps ? fixQualityInfo(gps.fixQ) : null;
 
   const distInfo = gps?.fix && gps.dist2last != null
     ? `${formatDist(gps.dist2last)} @ ${bearing(gps.lat, gps.lon, gps.lastWPLat, gps.lastWPLon).toFixed(0)}°`
@@ -90,10 +91,18 @@ export default function SurveyScreen() {
       {/* Accuracy status */}
       <View style={[s.accBadge, { backgroundColor: inRange ? C.green : C.red }]}>
         <Text style={s.badgeText}>
-          {gps?.fix ? `${acc.toFixed(1)} m — ${inRange ? '✓ In range' : '✗ Out of range'}` : 'No GPS fix'}
-          {gps?.fix ? `  •  ${fixQualityName(gps.fixQ)}  •  ${gps.sats} sats` : ''}
+          {gps?.fix ? `${acc.toFixed(1)} m — ${inRange ? '✓ In range' : '✗ Out of range'}  •  ${gps.sats} sats` : 'No GPS fix'}
         </Text>
       </View>
+      {fixInfo && gps?.fix && (
+        <View style={[s.fixRow, { borderLeftColor: fixInfo.color }]}>
+          <View style={[s.fixDot, { backgroundColor: fixInfo.color }]} />
+          <View>
+            <Text style={s.fixName}>{fixInfo.name}</Text>
+            <Text style={s.fixDesc}>{fixInfo.desc}  ·  {fixInfo.accuracy}</Text>
+          </View>
+        </View>
+      )}
 
       {distInfo && (
         <Text style={s.distText}>↗ {distInfo} to last point</Text>
@@ -164,6 +173,10 @@ const s = StyleSheet.create({
   savedText: { fontSize: 13, color: C.green, fontWeight: '600' },
   accBadge: { borderRadius: 10, padding: 12, marginBottom: 8, alignItems: 'center' },
   badgeText: { color: '#fff', fontWeight: '700', fontSize: 13 },
+  fixRow: { flexDirection: 'row', alignItems: 'center', borderLeftWidth: 4, borderRadius: 8, backgroundColor: C.card, padding: 10, marginBottom: 8, gap: 10 },
+  fixDot: { width: 10, height: 10, borderRadius: 5 },
+  fixName: { fontSize: 13, fontWeight: '700', color: C.text },
+  fixDesc: { fontSize: 11, color: C.muted, marginTop: 1 },
   distText: { textAlign: 'center', color: C.muted, fontSize: 13, marginBottom: 12 },
   card: { backgroundColor: C.card, borderRadius: 12, padding: 14, marginBottom: 12 },
   cardTitle: { fontSize: 11, fontWeight: '700', color: C.accent, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 12 },
