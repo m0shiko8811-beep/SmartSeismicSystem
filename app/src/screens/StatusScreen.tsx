@@ -1,14 +1,14 @@
 import React from 'react';
 import { ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useGps } from '../context/GpsContext';
-import { latLonToUTM, hdopToAccuracy, fixQualityName } from '../services/calculations';
+import { latLonToUTM, hdopToAccuracy, fixQualityName, fixQualityColor } from '../services/calculations';
 import { C } from '../theme';
 
-function Row({ label, value }: { label: string; value: string }) {
+function Row({ label, value }: { label: string; value: string | React.ReactNode }) {
   return (
     <View style={s.row}>
       <Text style={s.label}>{label}</Text>
-      <Text style={s.value}>{value}</Text>
+      {typeof value === 'string' ? <Text style={s.value}>{value}</Text> : value}
     </View>
   );
 }
@@ -78,7 +78,11 @@ export default function StatusScreen() {
 
       <Section title="Signal">
         <Row label="Satellites" value={gps.sats.toString()} />
-        <Row label="Fix type"   value={fixQualityName(gps.fixQ)} />
+        <Row label="Fix type"   value={
+          <View style={{ backgroundColor: fixQualityColor(gps.fixQ), borderRadius: 6, paddingHorizontal: 8, paddingVertical: 2 }}>
+            <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>{fixQualityName(gps.fixQ)}</Text>
+          </View> as any
+        } />
         <Row label="HDOP"       value={gps.hdop.toFixed(2)} />
         <Row label="Est. accuracy" value={acc.toFixed(2) + ' m'} />
         <View style={s.barBg}>

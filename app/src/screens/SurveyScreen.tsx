@@ -3,7 +3,7 @@ import { Alert, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View 
 import * as Haptics from 'expo-haptics';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { useGps } from '../context/GpsContext';
-import { hdopToAccuracy, isAccuracyInRange, haversineDist, bearing, formatDist, fixQualityName } from '../services/calculations';
+import { hdopToAccuracy, isAccuracyInRange, haversineDist, bearing, formatDist, fixQualityName, fixQualityColor } from '../services/calculations';
 import { getAccSettings } from '../services/storage';
 import { C } from '../theme';
 
@@ -91,7 +91,7 @@ export default function SurveyScreen() {
       <View style={[s.accBadge, { backgroundColor: inRange ? C.green : C.red }]}>
         <Text style={s.badgeText}>
           {gps?.fix ? `${acc.toFixed(1)} m — ${inRange ? '✓ In range' : '✗ Out of range'}` : 'No GPS fix'}
-          {gps?.fix ? `  (${fixQualityName(gps.fixQ)}, ${gps.sats} sats)` : ''}
+          {gps?.fix ? `  •  ${fixQualityName(gps.fixQ)}  •  ${gps.sats} sats` : ''}
         </Text>
       </View>
 

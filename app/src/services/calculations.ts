@@ -66,6 +66,23 @@ export function latLonToUTM(lat: number, lon: number): UTMResult {
 }
 
 export function fixQualityName(q: number): string {
-  return ['No fix', 'GPS', 'DGPS/SBAS', 'PPS', 'RTK fixed', 'RTK float',
-    'Dead reck.', 'Manual', 'Sim'][q] ?? 'Unknown';
+  return [
+    'No fix',
+    'Standard GPS',
+    'DGPS / SBAS',
+    'PPS',
+    'RTK Fixed ★',
+    'RTK Float',
+    'Dead Reckoning',
+    'Manual',
+    'Simulator',
+  ][q] ?? 'Unknown';
+}
+
+export function fixQualityColor(q: number): string {
+  if (q === 4) return '#00C853'; // RTK fixed — best
+  if (q === 5) return '#64DD17'; // RTK float — good
+  if (q === 2) return '#FFD600'; // DGPS
+  if (q === 1) return '#FF6D00'; // standard GPS
+  return '#D50000';              // no fix / unknown
 }
