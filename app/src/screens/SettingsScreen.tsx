@@ -11,15 +11,16 @@ const NTRIP_PRESETS = [
 ];
 
 export default function SettingsScreen() {
-  const { gps, bleStatus, sendNtripConfig, syncFromDevice, deleteAllWaypoints } = useGps();
+  const { gps, bleStatus, sendCmd, sendNtripConfig, syncFromDevice, deleteAllWaypoints } = useGps();
 
   const [host, setHost] = useState('');
   const [port, setPort] = useState('2101');
   const [mnt,  setMnt]  = useState('');
   const [usr,  setUsr]  = useState('');
   const [pwd,  setPwd]  = useState('');
-  const [minAcc, setMinAccState] = useState('0');
-  const [maxAcc, setMaxAccState] = useState('10');
+  const [minAcc,      setMinAccState]   = useState('0');
+  const [maxAcc,      setMaxAccState]   = useState('10');
+  const [antennaH,    setAntennaH]      = useState('0.000');
 
   useEffect(() => {
     getAccSettings().then(({ minAcc, maxAcc }) => {
@@ -27,6 +28,13 @@ export default function SettingsScreen() {
       setMaxAccState(String(maxAcc));
     });
   }, []);
+
+  // Sync antenna height from device once connected
+  useEffect(() => {
+    if (gps?.cfg?.ant_h != null) {
+      setAntennaH(gps.cfg.ant_h.toFixed(3));
+    }
+  }, [gps?.cfg?.ant_h]);
 
   const bleBadge = bleStatus === 'connected'
     ? { bg: C.green,  text: 'Connected to GPS-Survey' }
@@ -41,6 +49,13 @@ export default function SettingsScreen() {
     }
     sendNtripConfig({ host, port, mnt, usr, pwd });
     Alert.alert('Sent', 'NTRIP config sent to device.');
+  };
+
+  const saveAntennaHeight = () => {
+    const h = parseFloat(antennaH) || 0;
+    setAntennaH(h.toFixed(3));
+    sendCmd({ cmd: 'cfg', ant_h: h });
+    Alert.alert('Saved', `Antenna height set to ${h.toFixed(3)} m`);
   };
 
   const saveAcc = async () => {
@@ -128,6 +143,25 @@ export default function SettingsScreen() {
         <TouchableOpacity style={[s.btn, { backgroundColor: C.accent, marginTop: 8 }]}
           onPress={saveNtripToDevice}>
           <Text style={s.btnText}>Send NTRIP Config to Device</Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* Antenna height */}
+      <View style={s.card}>
+        <Text style={s.cardTitle}>ANTENNA HEIGHT</Text>
+        <Text style={s.hint}>Pole height in metres. Subtracted from GPS altitude when saving waypoints.</Text>
+        <View style={s.field}>
+          <Text style={s.fieldLabel}>Height (m)</Text>
+          <TextInput
+            style={[s.input, { fontSize: 20, fontWeight: '700', textAlign: 'center' }]}
+            value={antennaH}
+            onChangeText={setAntennaH}
+            keyboardType="decimal-pad"
+            placeholder="0.000"
+          />
+        </View>
+        <TouchableOpacity style={[s.btn, { backgroundColor: C.accent }]} onPress={saveAntennaHeight}>
+          <Text style={s.btnText}>Set Antenna Height</Text>
         </TouchableOpacity>
       </View>
 

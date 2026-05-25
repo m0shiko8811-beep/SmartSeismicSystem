@@ -99,6 +99,10 @@ export default function SurveyScreen() {
         <Text style={s.distText}>↗ {distInfo} to last point</Text>
       )}
 
+      {gps?.cfg?.ant_h != null && gps.cfg.ant_h > 0 && (
+        <Text style={s.distText}>Antenna height: {gps.cfg.ant_h.toFixed(3)} m</Text>
+      )}
+
       {/* Config */}
       <View style={s.card}>
         <Text style={s.cardTitle}>NUMBERING</Text>

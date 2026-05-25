@@ -26,6 +26,7 @@ export interface GpsMessage {
     sta: number;
     step: number;
     up: boolean;
+    ant_h: number;
   };
 }
 
