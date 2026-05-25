@@ -29,9 +29,9 @@ async function requestBlePermissions(): Promise<boolean> {
   return r === PermissionsAndroid.RESULTS.GRANTED;
 }
 
-// base64 encode/decode for BLE values
-const b64encode = (str: string): string => btoa(unescape(encodeURIComponent(str)));
-const b64decode = (b64: string): string => decodeURIComponent(escape(atob(b64)));
+// GPS JSON and commands are pure ASCII — plain btoa/atob is sufficient
+const b64encode = (str: string): string => btoa(str);
+const b64decode = (b64: string): string => atob(b64);
 
 interface GpsContextValue {
   gps: GpsMessage | null;
@@ -86,8 +86,15 @@ export function GpsProvider({ children }: { children: React.ReactNode }) {
         nmea: '', gsa: '', rmc: '',
       };
       setWaypoints(prev => {
-        if (prev.find(w => w.label === wp.label && w.ts === wp.ts)) return prev;
-        const updated = [...prev, wp];
+        const idx = prev.findIndex(w => w.label === wp.label);
+        let updated: Waypoint[];
+        if (idx >= 0) {
+          // Update existing entry with device's GPS timestamp and accuracy
+          updated = [...prev];
+          updated[idx] = { ...updated[idx], ts: wp.ts, hdop: wp.hdop, fixQ: wp.fixQ };
+        } else {
+          updated = [...prev, wp];
+        }
         saveWaypoints(updated).catch(() => {});
         return updated;
       });
@@ -99,7 +106,8 @@ export function GpsProvider({ children }: { children: React.ReactNode }) {
   const connectToDevice = useCallback(async (device: Device) => {
     try {
       setBleStatus('connecting');
-      const connected = await device.connect({ requestMTU: 512 });
+      const connected = await device.connect();
+      await connected.requestMTU(512);
       await connected.discoverAllServicesAndCharacteristics();
       deviceRef.current = connected;
       setBleStatus('connected');
