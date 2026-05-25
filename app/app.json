@@ -23,7 +23,8 @@
         "android.permission.BLUETOOTH_CONNECT",
         "android.permission.BLUETOOTH_ADMIN",
         "android.permission.ACCESS_FINE_LOCATION",
-        "android.permission.ACCESS_COARSE_LOCATION"
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.BLUETOOTH"
       ]
     },
     "web": {
@@ -34,10 +35,17 @@
         "react-native-ble-plx",
         {
           "isBackgroundEnabled": false,
-          "modes": ["central"],
+          "modes": [
+            "central"
+          ],
           "bluetoothAlwaysPermission": "Allow GPS Survey to connect to the GPS device"
         }
       ]
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "94c3085b-473d-46a8-bbf4-7633a6a2312f"
+      }
+    }
   }
 }
