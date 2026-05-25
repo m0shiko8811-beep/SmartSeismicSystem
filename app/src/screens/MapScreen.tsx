@@ -1,6 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
-import MapView, { Circle, Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
+import MapView, { Circle, Marker, Polyline, PROVIDER_OSM } from 'react-native-maps';
 import { useGps } from '../context/GpsContext';
 import { hdopToAccuracy } from '../services/calculations';
 import { C } from '../theme';
@@ -26,7 +26,7 @@ export default function MapScreen() {
       <MapView
         ref={mapRef}
         style={s.map}
-        provider={PROVIDER_GOOGLE}
+        provider={PROVIDER_OSM}
         initialRegion={DEFAULT_REGION}
         showsUserLocation={false}
         showsMyLocationButton={false}
