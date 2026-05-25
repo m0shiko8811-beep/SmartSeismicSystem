@@ -77,6 +77,7 @@ export default function MapScreen() {
 
   useEffect(() => {
     if (!webRef.current || !gps) return;
+    if (!Number.isFinite(gps.lat) || !Number.isFinite(gps.lon)) return;
     const acc = gps.hdop * 2.5;
     webRef.current.injectJavaScript(
       `window.updateGps(${gps.lat},${gps.lon},${acc},${gps.fix});true;`

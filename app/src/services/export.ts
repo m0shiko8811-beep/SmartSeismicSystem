@@ -9,7 +9,7 @@ function timestamp(): string {
 }
 
 export function generateCSV(waypoints: Waypoint[]): string {
-  const header = 'Label,Latitude,Longitude,Altitude_m,UTM_Zone,UTM_E,UTM_N,DateTime,Est_Acc_m,HDOP,Fix_Quality,Raw_GGA,Raw_GSA,Raw_RMC';
+  const header = 'Label,Latitude,Longitude,Altitude_m,UTM_Zone,UTM_E,UTM_N,DateTime,Est_Acc_m,HDOP,Fix_Quality';
   const rows = waypoints.map(wp => {
     const utm = latLonToUTM(wp.lat, wp.lon);
     const acc = hdopToAccuracy(wp.hdop).toFixed(2);
@@ -18,7 +18,6 @@ export function generateCSV(waypoints: Waypoint[]): string {
       wp.label, wp.lat.toFixed(7), wp.lon.toFixed(7), wp.alt.toFixed(2),
       utm.label, utm.easting, utm.northing,
       wp.ts, acc, wp.hdop.toFixed(2), fq,
-      `"${wp.nmea}"`, `"${wp.gsa}"`, `"${wp.rmc}"`
     ].join(',');
   });
   return [header, ...rows].join('\n');

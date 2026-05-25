@@ -7,6 +7,7 @@ export interface GpsMessage {
   fix: boolean;
   hdop: number;
   fixQ: number;
+  age: number;
   nmea: string;
   gsa: string;
   rmc: string;
@@ -30,6 +31,13 @@ export interface GpsMessage {
   };
 }
 
+export interface NmeaMessage {
+  type: 'nmea';
+  gga: string;
+  gsa: string;
+  rmc: string;
+}
+
 export interface AvgResult {
   label: string;
   lat: number;
@@ -50,9 +58,6 @@ export interface Waypoint {
   hdop: number;
   fixQ: number;
   ts: string;
-  nmea: string;
-  gsa: string;
-  rmc: string;
 }
 
 export interface NtripConfig {

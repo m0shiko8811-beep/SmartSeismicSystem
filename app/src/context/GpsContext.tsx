@@ -1,7 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { PermissionsAndroid, Platform } from 'react-native';
 import { BleManager, Device, State as BleState } from 'react-native-ble-plx';
-import { GpsMessage, Waypoint, WsStatus } from '../types/gps';
+import { GpsMessage, NmeaMessage, Waypoint, WsStatus } from '../types/gps';
 import { appendWaypoint, clearWaypoints, loadWaypoints, saveWaypoints } from '../services/storage';
 
 // ── BLE constants ─────────────────────────────────────
@@ -57,6 +57,7 @@ export function GpsProvider({ children }: { children: React.ReactNode }) {
   const deviceRef      = useRef<Device | null>(null);
   const scanningRef    = useRef(false);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const monitorRef     = useRef<{ remove: () => void } | null>(null);
 
   // ── Send a JSON command over CMD_CHAR ──────────────
   const sendCmd = useCallback((cmd: object) => {
@@ -75,7 +76,10 @@ export function GpsProvider({ children }: { children: React.ReactNode }) {
     try { msg = JSON.parse(json); } catch { return; }
 
     if (msg.type === 'gps') {
-      setGps(msg as GpsMessage);
+      setGps(prev => ({ ...(prev ?? {}), ...msg } as GpsMessage));
+    } else if (msg.type === 'nmea') {
+      const nmea = msg as NmeaMessage;
+      setGps(prev => prev ? { ...prev, nmea: nmea.gga, gsa: nmea.gsa, rmc: nmea.rmc } : prev);
     } else if (msg.type === 'wp') {
       // Waypoint received from device wp list sync
       const wp: Waypoint = {
@@ -83,7 +87,6 @@ export function GpsProvider({ children }: { children: React.ReactNode }) {
         label: msg.label,
         lat:   msg.lat,  lon: msg.lon, alt: msg.alt,
         hdop:  msg.hdop, fixQ: msg.fixQ, ts: msg.ts,
-        nmea: '', gsa: '', rmc: '',
       };
       setWaypoints(prev => {
         const idx = prev.findIndex(w => w.label === wp.label);
@@ -113,7 +116,7 @@ export function GpsProvider({ children }: { children: React.ReactNode }) {
       setBleStatus('connected');
       scanningRef.current = false;
 
-      connected.monitorCharacteristicForService(
+      monitorRef.current = connected.monitorCharacteristicForService(
         SERVICE_UUID, GPS_CHAR_UUID,
         (err, char) => {
           if (err) { console.log('[BLE] monitor error:', err.message); return; }
@@ -123,6 +126,8 @@ export function GpsProvider({ children }: { children: React.ReactNode }) {
 
       // On disconnect: clean up and restart scan
       connected.onDisconnected(() => {
+        monitorRef.current?.remove();
+        monitorRef.current = null;
         deviceRef.current = null;
         setBleStatus('disconnected');
         setGps(null);
@@ -181,6 +186,7 @@ export function GpsProvider({ children }: { children: React.ReactNode }) {
     startScan();
     return () => {
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+      monitorRef.current?.remove();
       bleManager.stopDeviceScan();
       deviceRef.current?.cancelConnection().catch(() => {});
     };
@@ -194,7 +200,6 @@ export function GpsProvider({ children }: { children: React.ReactNode }) {
       lat: gps.lat, lon: gps.lon, alt: gps.alt,
       hdop: gps.hdop, fixQ: gps.fixQ,
       ts: new Date().toISOString(),
-      nmea: '', gsa: '', rmc: '',
     };
     const updated = await appendWaypoint(wp);
     setWaypoints(updated);

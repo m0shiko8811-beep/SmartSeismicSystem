@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Alert, FlatList, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Alert, FlatList, Share, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { useGps } from '../context/GpsContext';
 import { exportAndShare } from '../services/export';
 import { hdopToAccuracy, fixQualityName } from '../services/calculations';
@@ -60,15 +60,11 @@ export default function LogScreen() {
       <View style={s.exportRow}>
         <TouchableOpacity style={[s.exportBtn, { backgroundColor: C.accent }]}
           onPress={() => handleExport('csv')} disabled={exporting}>
-          <Text style={s.exportBtnText}>CSV</Text>
+          <Text style={s.exportBtnText}>{exporting ? '…' : 'Export CSV'}</Text>
         </TouchableOpacity>
         <TouchableOpacity style={[s.exportBtn, { backgroundColor: '#7B3F9E' }]}
           onPress={() => handleExport('kml')} disabled={exporting}>
-          <Text style={s.exportBtnText}>KML</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={[s.exportBtn, { backgroundColor: '#25D366' }]}
-          onPress={() => handleExport('csv')} disabled={exporting}>
-          <Text style={s.exportBtnText}>WhatsApp</Text>
+          <Text style={s.exportBtnText}>{exporting ? '…' : 'Export KML'}</Text>
         </TouchableOpacity>
       </View>
 

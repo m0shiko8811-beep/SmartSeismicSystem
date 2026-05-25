@@ -45,7 +45,12 @@ export default function SettingsScreen() {
       Alert.alert('Missing fields', 'Fill in Host and Mount point.');
       return;
     }
-    sendNtripConfig({ host, port, mnt, usr, pwd });
+    const portNum = parseInt(port, 10);
+    if (!portNum || portNum < 1 || portNum > 65535) {
+      Alert.alert('Invalid port', 'Port must be a number between 1 and 65535.');
+      return;
+    }
+    sendNtripConfig({ host, port: String(portNum), mnt, usr, pwd });
     Alert.alert('Sent', 'NTRIP config sent to device.');
   };
 
@@ -88,6 +93,10 @@ export default function SettingsScreen() {
 
   const saveAntennaHeight = () => {
     const h = parseFloat(antennaH) || 0;
+    if (h < 0 || h > 10) {
+      Alert.alert('Invalid', 'Antenna height must be between 0 and 10 m.');
+      return;
+    }
     setAntennaH(h.toFixed(3));
     sendCmd({ cmd: 'cfg', ant_h: h });
     Alert.alert('Saved', `Antenna height set to ${h.toFixed(3)} m`);
