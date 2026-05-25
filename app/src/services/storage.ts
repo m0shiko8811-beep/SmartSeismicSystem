@@ -37,3 +37,27 @@ export async function setAccSettings(minAcc: number, maxAcc: number): Promise<vo
   await AsyncStorage.setItem('minAcc', String(minAcc));
   await AsyncStorage.setItem('maxAcc', String(maxAcc));
 }
+
+const NTRIP_KEY = 'ntrip_configs';
+
+export interface NtripSavedConfig {
+  name: string;
+  host: string;
+  port: string;
+  mnt: string;
+  usr: string;
+  pwd: string;
+}
+
+export async function loadNtripConfigs(): Promise<NtripSavedConfig[]> {
+  try {
+    const raw = await AsyncStorage.getItem(NTRIP_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function saveNtripConfigs(configs: NtripSavedConfig[]): Promise<void> {
+  await AsyncStorage.setItem(NTRIP_KEY, JSON.stringify(configs));
+}

@@ -1,14 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { Alert, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { useGps } from '../context/GpsContext';
-import { getAccSettings, setAccSettings } from '../services/storage';
+import { getAccSettings, setAccSettings, loadNtripConfigs, saveNtripConfigs, NtripSavedConfig } from '../services/storage';
 import { C } from '../theme';
-
-const NTRIP_PRESETS = [
-  { name: 'MABAT Israel (free)', host: 'ntrip.survey.gov.il', port: '2101', mnt: '' },
-  { name: 'RTK2go (free)',       host: 'rtk2go.com',          port: '2101', mnt: '' },
-  { name: 'IGS (global)',        host: 'ntrip.igs-ip.net',    port: '2101', mnt: '' },
-];
 
 export default function SettingsScreen() {
   const { gps, bleStatus, sendCmd, sendNtripConfig, syncFromDevice, deleteAllWaypoints } = useGps();
@@ -21,12 +15,16 @@ export default function SettingsScreen() {
   const [minAcc,      setMinAccState]   = useState('0');
   const [maxAcc,      setMaxAccState]   = useState('10');
   const [antennaH,    setAntennaH]      = useState('0.000');
+  const [savedConfigs, setSavedConfigs] = useState<NtripSavedConfig[]>([]);
+  const [savingName,   setSavingName]   = useState('');
+  const [showSaveInput, setShowSaveInput] = useState(false);
 
   useEffect(() => {
     getAccSettings().then(({ minAcc, maxAcc }) => {
       setMinAccState(String(minAcc));
       setMaxAccState(String(maxAcc));
     });
+    loadNtripConfigs().then(setSavedConfigs);
   }, []);
 
   // Sync antenna height from device once connected
@@ -49,6 +47,43 @@ export default function SettingsScreen() {
     }
     sendNtripConfig({ host, port, mnt, usr, pwd });
     Alert.alert('Sent', 'NTRIP config sent to device.');
+  };
+
+  const handleSaveConfig = () => {
+    if (!host) { Alert.alert('Missing', 'Enter a host first.'); return; }
+    setSavingName(`${host}/${mnt || '*'}`);
+    setShowSaveInput(true);
+  };
+
+  const confirmSaveConfig = () => {
+    const name = savingName.trim();
+    if (!name) return;
+    const cfg: NtripSavedConfig = { name, host, port, mnt, usr, pwd };
+    const updated = [...savedConfigs.filter(c => c.name !== name), cfg];
+    setSavedConfigs(updated);
+    saveNtripConfigs(updated);
+    setShowSaveInput(false);
+  };
+
+  const handleLoadConfig = (cfg: NtripSavedConfig) => {
+    setHost(cfg.host);
+    setPort(cfg.port);
+    setMnt(cfg.mnt);
+    setUsr(cfg.usr);
+    setPwd(cfg.pwd);
+  };
+
+  const handleDeleteConfig = (name: string) => {
+    Alert.alert('Delete config?', `Remove "${name}"?`, [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete', style: 'destructive', onPress: () => {
+          const updated = savedConfigs.filter(c => c.name !== name);
+          setSavedConfigs(updated);
+          saveNtripConfigs(updated);
+        },
+      },
+    ]);
   };
 
   const saveAntennaHeight = () => {
@@ -115,14 +150,40 @@ export default function SettingsScreen() {
       <View style={s.card}>
         <Text style={s.cardTitle}>NTRIP CONFIG</Text>
         <Text style={s.hint}>Config is sent over BLE to the device. Phone handles the TCP connection.</Text>
-        <View style={s.presets}>
-          {NTRIP_PRESETS.map(p => (
-            <TouchableOpacity key={p.name} style={s.preset}
-              onPress={() => { setHost(p.host); setPort(p.port); if (p.mnt) setMnt(p.mnt); }}>
-              <Text style={s.presetText}>{p.name}</Text>
-            </TouchableOpacity>
-          ))}
-        </View>
+
+        {/* Saved configs */}
+        {savedConfigs.length > 0 && (
+          <View style={s.savedList}>
+            {savedConfigs.map(cfg => (
+              <View key={cfg.name} style={s.savedItem}>
+                <TouchableOpacity style={s.savedLoad} onPress={() => handleLoadConfig(cfg)}>
+                  <Text style={s.savedName} numberOfLines={1}>{cfg.name}</Text>
+                  <Text style={s.savedSub} numberOfLines={1}>{cfg.host}:{cfg.port}/{cfg.mnt}</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={s.savedDel} onPress={() => handleDeleteConfig(cfg.name)}>
+                  <Text style={s.savedDelText}>✕</Text>
+                </TouchableOpacity>
+              </View>
+            ))}
+          </View>
+        )}
+
+        {showSaveInput && (
+          <View style={s.saveBox}>
+            <Text style={s.fieldLabel}>Config name</Text>
+            <TextInput style={[s.input, { marginBottom: 8 }]} value={savingName}
+              onChangeText={setSavingName} autoCapitalize="none" autoCorrect={false} autoFocus />
+            <View style={s.row}>
+              <TouchableOpacity style={[s.btn, { backgroundColor: C.accent }]} onPress={confirmSaveConfig}>
+                <Text style={s.btnText}>Save</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[s.btn, { backgroundColor: C.border }]} onPress={() => setShowSaveInput(false)}>
+                <Text style={[s.btnText, { color: C.text }]}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
+
         {([
           { label: 'Host',        val: host, set: setHost },
           { label: 'Port',        val: port, set: setPort },
@@ -140,10 +201,14 @@ export default function SettingsScreen() {
           <TextInput style={s.input} value={pwd} onChangeText={setPwd}
             secureTextEntry autoCapitalize="none" autoCorrect={false} />
         </View>
-        <TouchableOpacity style={[s.btn, { backgroundColor: C.accent, marginTop: 8 }]}
-          onPress={saveNtripToDevice}>
-          <Text style={s.btnText}>Send NTRIP Config to Device</Text>
-        </TouchableOpacity>
+        <View style={s.row}>
+          <TouchableOpacity style={[s.btn, { backgroundColor: C.accent }]} onPress={handleSaveConfig}>
+            <Text style={s.btnText}>Save Config</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={[s.btn, { backgroundColor: C.green }]} onPress={saveNtripToDevice}>
+            <Text style={s.btnText}>Send to Device</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       {/* Antenna height */}
@@ -199,9 +264,14 @@ const s = StyleSheet.create({
   row: { flexDirection: 'row', gap: 8, marginTop: 8 },
   btn: { flex: 1, borderRadius: 10, padding: 12, alignItems: 'center' },
   btnText: { color: '#fff', fontWeight: '700', fontSize: 13 },
-  presets: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 12 },
-  preset: { backgroundColor: C.bg, borderRadius: 8, paddingVertical: 6, paddingHorizontal: 10, borderWidth: 1, borderColor: C.border },
-  presetText: { fontSize: 11, color: C.accent, fontWeight: '600' },
+  saveBox: { backgroundColor: C.bg, borderRadius: 8, padding: 10, marginBottom: 12, borderWidth: 1, borderColor: C.accent },
+  savedList: { marginBottom: 12, gap: 6 },
+  savedItem: { flexDirection: 'row', alignItems: 'center', backgroundColor: C.bg, borderRadius: 8, borderWidth: 1, borderColor: C.border, overflow: 'hidden' },
+  savedLoad: { flex: 1, paddingVertical: 8, paddingHorizontal: 10 },
+  savedName: { fontSize: 13, fontWeight: '700', color: C.text },
+  savedSub:  { fontSize: 11, color: C.muted, marginTop: 1 },
+  savedDel:  { paddingHorizontal: 14, paddingVertical: 8, backgroundColor: C.red },
+  savedDelText: { color: '#fff', fontWeight: '700', fontSize: 13 },
   field: { marginBottom: 10 },
   fieldHalf: { flex: 1 },
   fieldLabel: { fontSize: 11, color: C.muted, marginBottom: 4 },
