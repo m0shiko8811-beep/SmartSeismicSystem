@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "survey-gps",
+    "name": "GPS Survey",
     "slug": "survey-gps",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -10,16 +10,34 @@
       "supportsTablet": true
     },
     "android": {
+      "package": "com.gii.surveygps",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.BLUETOOTH_SCAN",
+        "android.permission.BLUETOOTH_CONNECT",
+        "android.permission.BLUETOOTH_ADMIN",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      [
+        "react-native-ble-plx",
+        {
+          "isBackgroundEnabled": false,
+          "modes": ["central"],
+          "bluetoothAlwaysPermission": "Allow GPS Survey to connect to the GPS device"
+        }
+      ]
+    ]
   }
 }
