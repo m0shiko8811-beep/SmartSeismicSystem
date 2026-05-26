@@ -21,9 +21,9 @@ const LEAFLET_HTML = `<!DOCTYPE html>
 <body>
 <div id="map"></div>
 <script>
-var map = L.map('map',{zoomControl:true}).setView([31.7683,35.2137],13);
+var map = L.map('map',{zoomControl:true,maxZoom:21}).setView([31.7683,35.2137],13);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
-  attribution:'© OpenStreetMap',maxZoom:19
+  attribution:'© OpenStreetMap',maxZoom:21,maxNativeZoom:19
 }).addTo(map);
 
 var posMarker = null;
