@@ -1,7 +1,13 @@
 import { UTMResult } from '../types/gps';
 
-export function hdopToAccuracy(hdop: number): number {
-  return hdop * 2.5;
+export function hdopToAccuracy(hdop: number, fixQ: number = 1): number {
+  // UERE (User Equivalent Range Error) per fix type
+  const uere = fixQ === 4 ? 0.03   // RTK Fixed: centimeter-level
+             : fixQ === 5 ? 0.30   // RTK Float: sub-meter
+             : fixQ === 2 ? 1.5    // DGPS / SBAS: differential corrections
+             : fixQ === 1 ? 3.0    // Standard GPS: uncorrected
+             : 5.0;                // No fix / unknown
+  return hdop * uere;
 }
 
 export function isAccuracyInRange(acc: number, minAcc: number, maxAcc: number): boolean {

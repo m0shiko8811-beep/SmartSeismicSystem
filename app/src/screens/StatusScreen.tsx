@@ -39,7 +39,7 @@ export default function StatusScreen() {
     );
   }
 
-  const acc = hdopToAccuracy(gps.hdop);
+  const acc = hdopToAccuracy(gps.hdop, gps.fixQ);
   const utm = gps.fix ? latLonToUTM(gps.lat, gps.lon) : null;
   const hdopPct = Math.max(5, Math.min(100, Math.round((1 - (gps.hdop - 0.5) / 4.5) * 100)));
   const fixInfo = fixQualityInfo(gps.fixQ);

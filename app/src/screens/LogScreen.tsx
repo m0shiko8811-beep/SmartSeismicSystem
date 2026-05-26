@@ -7,7 +7,7 @@ import { Waypoint } from '../types/gps';
 import { C } from '../theme';
 
 function WaypointItem({ wp }: { wp: Waypoint }) {
-  const acc = hdopToAccuracy(wp.hdop);
+  const acc = hdopToAccuracy(wp.hdop, wp.fixQ);
   const color = acc < 2 ? C.green : acc < 5 ? C.amber : C.red;
   return (
     <View style={s.item}>

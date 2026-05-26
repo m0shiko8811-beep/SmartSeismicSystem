@@ -35,7 +35,7 @@ export default function SurveyScreen() {
   }, [gps?.cfg?.line, gps?.cfg?.sta]);
 
   const label = `${line}:${station}`;
-  const acc = gps ? hdopToAccuracy(gps.hdop) : 99;
+  const acc = gps ? hdopToAccuracy(gps.hdop, gps.fixQ) : 99;
   const inRange = gps?.fix ? isAccuracyInRange(acc, minAcc, maxAcc) : false;
   const fixInfo = gps ? fixQualityInfo(gps.fixQ) : null;
 
@@ -94,6 +94,20 @@ export default function SurveyScreen() {
           {gps?.fix ? `${acc.toFixed(1)} m — ${inRange ? '✓ In range' : '✗ Out of range'}  •  ${gps.sats} sats` : 'No GPS fix'}
         </Text>
       </View>
+      {/* NTRIP status */}
+      <View style={[s.ntripRow, {
+        backgroundColor: gps?.ntripState === 'streaming' ? '#1B5E20' :
+                         gps?.ntripState === 'connecting' ? '#E65100' : C.card
+      }]}>
+        <Text style={s.ntripText}>
+          {gps?.ntripState === 'streaming'
+            ? `NTRIP ✓  ${(gps.ntripBytes / 1024).toFixed(1)} KB received`
+            : gps?.ntripState === 'connecting'
+            ? 'NTRIP connecting…'
+            : 'NTRIP idle'}
+        </Text>
+      </View>
+
       {fixInfo && gps?.fix && (
         <View style={[s.fixRow, { borderLeftColor: fixInfo.color }]}>
           <View style={[s.fixDot, { backgroundColor: fixInfo.color }]} />
@@ -173,6 +187,8 @@ const s = StyleSheet.create({
   savedText: { fontSize: 13, color: C.green, fontWeight: '600' },
   accBadge: { borderRadius: 10, padding: 12, marginBottom: 8, alignItems: 'center' },
   badgeText: { color: '#fff', fontWeight: '700', fontSize: 13 },
+  ntripRow: { borderRadius: 8, paddingVertical: 6, paddingHorizontal: 12, marginBottom: 8, alignItems: 'center' },
+  ntripText: { fontSize: 12, fontWeight: '700', color: '#fff' },
   fixRow: { flexDirection: 'row', alignItems: 'center', borderLeftWidth: 4, borderRadius: 8, backgroundColor: C.card, padding: 10, marginBottom: 8, gap: 10 },
   fixDot: { width: 10, height: 10, borderRadius: 5 },
   fixName: { fontSize: 13, fontWeight: '700', color: C.text },

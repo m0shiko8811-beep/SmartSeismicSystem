@@ -12,7 +12,7 @@ export function generateCSV(waypoints: Waypoint[]): string {
   const header = 'Label,Latitude,Longitude,Altitude_m,UTM_Zone,UTM_E,UTM_N,DateTime,Est_Acc_m,HDOP,Fix_Quality';
   const rows = waypoints.map(wp => {
     const utm = latLonToUTM(wp.lat, wp.lon);
-    const acc = hdopToAccuracy(wp.hdop).toFixed(2);
+    const acc = hdopToAccuracy(wp.hdop, wp.fixQ).toFixed(2);
     const fq = fixQualityName(wp.fixQ);
     return [
       wp.label, wp.lat.toFixed(7), wp.lon.toFixed(7), wp.alt.toFixed(2),

@@ -2,6 +2,7 @@ import React, { useEffect, useRef } from 'react';
 import { StyleSheet, View } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { useGps } from '../context/GpsContext';
+import { hdopToAccuracy } from '../services/calculations';
 
 const LEAFLET_HTML = `<!DOCTYPE html>
 <html>
@@ -16,10 +17,15 @@ const LEAFLET_HTML = `<!DOCTYPE html>
     padding:2px 5px;font-size:11px;font-weight:800;white-space:nowrap}
   .pos-dot{width:16px;height:16px;border-radius:50%;background:#1565C0;
     border:3px solid #fff;box-shadow:0 0 6px rgba(0,0,0,0.5)}
+  #followBtn{position:absolute;bottom:30px;right:10px;z-index:1000;
+    background:#fff;border:2px solid #ccc;border-radius:8px;
+    padding:8px 12px;font-size:20px;cursor:pointer;line-height:1}
+  #followBtn.active{border-color:#1565C0;background:#E3F2FD}
 </style>
 </head>
 <body>
 <div id="map"></div>
+<button id="followBtn" class="active" onclick="toggleFollow()">🎯</button>
 <script>
 var map = L.map('map',{zoomControl:true,maxZoom:21}).setView([31.7683,35.2137],13);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
@@ -29,8 +35,17 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
 var posMarker = null;
 var posCircle = null;
 var wpMarkers = [];
-var wpLine   = null;
-var centered = false;
+var wpLine    = null;
+var follow    = true;
+var hasPos    = false;
+
+function setFollow(v){
+  follow = v;
+  document.getElementById('followBtn').className = v ? 'active' : '';
+}
+function toggleFollow(){ setFollow(!follow); }
+
+map.on('dragstart', function(){ setFollow(false); });
 
 function posIcon(){
   return L.divIcon({className:'',html:'<div class="pos-dot"></div>',iconSize:[16,16],iconAnchor:[8,8]});
@@ -51,7 +66,8 @@ window.updateGps = function(lat,lon,acc,fix){
   } else {
     posCircle.setLatLng([lat,lon]).setRadius(acc);
   }
-  if(!centered){ map.setView([lat,lon],16); centered=true; }
+  if(!hasPos){ map.setView([lat,lon],17); hasPos=true; }
+  else if(follow){ map.panTo([lat,lon]); }
 };
 
 window.updateWaypoints = function(wps){
@@ -78,7 +94,7 @@ export default function MapScreen() {
   useEffect(() => {
     if (!webRef.current || !gps) return;
     if (!Number.isFinite(gps.lat) || !Number.isFinite(gps.lon)) return;
-    const acc = gps.hdop * 2.5;
+    const acc = hdopToAccuracy(gps.hdop, gps.fixQ);
     webRef.current.injectJavaScript(
       `window.updateGps(${gps.lat},${gps.lon},${acc},${gps.fix});true;`
     );
@@ -92,6 +108,22 @@ export default function MapScreen() {
     webRef.current.injectJavaScript(`window.updateWaypoints(${json});true;`);
   }, [waypoints]);
 
+  const pushState = () => {
+    if (!webRef.current) return;
+    if (gps?.fix && Number.isFinite(gps.lat) && Number.isFinite(gps.lon)) {
+      const acc = hdopToAccuracy(gps.hdop, gps.fixQ);
+      webRef.current.injectJavaScript(
+        `window.updateGps(${gps.lat},${gps.lon},${acc},${gps.fix});true;`
+      );
+    }
+    if (waypoints.length > 0) {
+      const json = JSON.stringify(waypoints.map(w => ({
+        lat: w.lat, lon: w.lon, alt: w.alt, label: w.label
+      })));
+      webRef.current.injectJavaScript(`window.updateWaypoints(${json});true;`);
+    }
+  };
+
   return (
     <View style={s.container}>
       <WebView
@@ -101,21 +133,7 @@ export default function MapScreen() {
         originWhitelist={['*']}
         javaScriptEnabled
         domStorageEnabled
-        onLoad={() => {
-          // Push current state into map once loaded
-          if (gps?.fix && webRef.current) {
-            const acc = gps.hdop * 2.5;
-            webRef.current.injectJavaScript(
-              `window.updateGps(${gps.lat},${gps.lon},${acc},${gps.fix});true;`
-            );
-          }
-          if (waypoints.length > 0 && webRef.current) {
-            const json = JSON.stringify(waypoints.map(w => ({
-              lat: w.lat, lon: w.lon, alt: w.alt, label: w.label
-            })));
-            webRef.current.injectJavaScript(`window.updateWaypoints(${json});true;`);
-          }
-        }}
+        onLoad={pushState}
       />
     </View>
   );
