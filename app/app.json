@@ -2,7 +2,7 @@
   "expo": {
     "name": "GPS Survey",
     "slug": "survey-gps",
-    "version": "1.0.0",
+    "version": "2.7.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -11,6 +11,7 @@
     },
     "android": {
       "package": "com.gii.surveygps",
+      "versionCode": 270,
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -40,7 +41,8 @@
           ],
           "bluetoothAlwaysPermission": "Allow GPS Survey to connect to the GPS device"
         }
-      ]
+      ],
+      "expo-sharing"
     ],
     "extra": {
       "eas": {

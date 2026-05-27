@@ -1,11 +1,13 @@
 import React, { useEffect, useState } from 'react';
-import { Alert, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { Alert, ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { useGps } from '../context/GpsContext';
 import { getAccSettings, setAccSettings, loadNtripConfigs, saveNtripConfigs, NtripSavedConfig } from '../services/storage';
 import { C } from '../theme';
 
 export default function SettingsScreen() {
-  const { gps, bleStatus, sendCmd, sendNtripConfig, syncFromDevice, deleteAllWaypoints } = useGps();
+  const { gps, bleStatus, sendCmd, sendNtripConfig, syncFromDevice, deleteAllWaypoints,
+          accFilterEnabled, setAccFilterEnabled,
+          ntripConnState, ntripKB, ntripError, startNtrip, stopNtrip } = useGps();
 
   const [host, setHost] = useState('');
   const [port, setPort] = useState('2101');
@@ -40,7 +42,7 @@ export default function SettingsScreen() {
     ? { bg: C.amber,  text: 'Scanning…' }
     : { bg: C.red,    text: 'Not connected' };
 
-  const saveNtripToDevice = () => {
+  const handleNtripConnect = () => {
     if (!host || !mnt) {
       Alert.alert('Missing fields', 'Fill in Host and Mount point.');
       return;
@@ -50,8 +52,9 @@ export default function SettingsScreen() {
       Alert.alert('Invalid port', 'Port must be a number between 1 and 65535.');
       return;
     }
-    sendNtripConfig({ host, port: String(portNum), mnt, usr, pwd });
-    Alert.alert('Sent', 'NTRIP config sent to device.');
+    const cfg = { host, port: String(portNum), mnt, usr, pwd };
+    sendNtripConfig(cfg);
+    startNtrip(cfg);
   };
 
   const handleSaveConfig = () => {
@@ -105,7 +108,7 @@ export default function SettingsScreen() {
   const saveAcc = async () => {
     const mn = parseFloat(minAcc) || 0;
     const mx = parseFloat(maxAcc) || 10;
-    await setAccSettings(mn, mx);
+    await setAccSettings(mn, mx, accFilterEnabled);
     Alert.alert('Saved', 'Accuracy filter updated.');
   };
 
@@ -135,16 +138,14 @@ export default function SettingsScreen() {
           <Text style={s.badgeText}>{bleBadge.text}</Text>
         </View>
         <Text style={s.info}>GPS module: u-blox NEO-M9N</Text>
-        {gps && (
-          <>
-            <Text style={s.info}>Waypoints on device: {gps.wpCount}</Text>
-            <Text style={s.info}>
-              NTRIP: {gps.ntripState === 'streaming'
-                ? `Streaming — ${(gps.ntripBytes / 1024).toFixed(1)} KB`
-                : gps.ntripState === 'connecting' ? 'Connecting…' : 'Idle'}
-            </Text>
-          </>
-        )}
+        {gps && <Text style={s.info}>Waypoints on device: {gps.wpCount}</Text>}
+        <Text style={s.info}>
+          NTRIP: {ntripConnState === 'streaming'
+            ? `● Streaming — ${ntripKB.toFixed(1)} KB received`
+            : ntripConnState === 'connecting' ? '◌ Connecting…'
+            : ntripConnState === 'error'      ? `✗ Failed: ${ntripError ?? 'unknown error'}`
+            : '○ Not connected'}
+        </Text>
         <View style={s.row}>
           <TouchableOpacity style={[s.btn, { backgroundColor: C.accent }]} onPress={handleSync}>
             <Text style={s.btnText}>Sync Waypoints</Text>
@@ -158,7 +159,7 @@ export default function SettingsScreen() {
       {/* NTRIP config */}
       <View style={s.card}>
         <Text style={s.cardTitle}>NTRIP CONFIG</Text>
-        <Text style={s.hint}>Config is sent over BLE to the device. Phone handles the TCP connection.</Text>
+        <Text style={s.hint}>Phone connects to caster via TCP and streams RTCM corrections to the device over BLE.</Text>
 
         {/* Saved configs */}
         {savedConfigs.length > 0 && (
@@ -214,9 +215,19 @@ export default function SettingsScreen() {
           <TouchableOpacity style={[s.btn, { backgroundColor: C.accent }]} onPress={handleSaveConfig}>
             <Text style={s.btnText}>Save Config</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={[s.btn, { backgroundColor: C.green }]} onPress={saveNtripToDevice}>
-            <Text style={s.btnText}>Send to Device</Text>
-          </TouchableOpacity>
+          {ntripConnState === 'idle' || ntripConnState === 'error' ? (
+            <TouchableOpacity style={[s.btn, { backgroundColor: C.green }]} onPress={handleNtripConnect}>
+              <Text style={s.btnText}>
+                {ntripConnState === 'error' ? 'Retry Connect' : 'Apply & Connect'}
+              </Text>
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity style={[s.btn, { backgroundColor: C.red }]} onPress={stopNtrip}>
+              <Text style={s.btnText}>
+                {ntripConnState === 'connecting' ? 'Connecting… (tap to stop)' : 'Disconnect NTRIP'}
+              </Text>
+            </TouchableOpacity>
+          )}
         </View>
       </View>
 
@@ -239,20 +250,34 @@ export default function SettingsScreen() {
         </TouchableOpacity>
       </View>
 
+      {/* App version */}
+      <Text style={s.version}>GPS Survey v2.7.0 (build 270)</Text>
+
       {/* Accuracy filter */}
       <View style={s.card}>
         <Text style={s.cardTitle}>ACCURACY FILTER</Text>
-        <View style={s.row}>
-          <View style={s.fieldHalf}>
-            <Text style={s.fieldLabel}>Min (m) — 0 = off</Text>
-            <TextInput style={s.input} value={minAcc} onChangeText={setMinAccState} keyboardType="decimal-pad" />
-          </View>
-          <View style={s.fieldHalf}>
-            <Text style={s.fieldLabel}>Max (m) — 0 = no limit</Text>
-            <TextInput style={s.input} value={maxAcc} onChangeText={setMaxAccState} keyboardType="decimal-pad" />
-          </View>
+        <View style={[s.row, { alignItems: 'center', marginBottom: 10 }]}>
+          <Text style={[s.fieldLabel, { flex: 1, marginBottom: 0 }]}>Enable accuracy filter</Text>
+          <Switch
+            value={accFilterEnabled}
+            onValueChange={setAccFilterEnabled}
+            thumbColor={accFilterEnabled ? C.accent : C.muted}
+            trackColor={{ false: C.border, true: C.accent + '66' }}
+          />
         </View>
-        <TouchableOpacity style={[s.btn, { backgroundColor: C.accent }]} onPress={saveAcc}>
+        {accFilterEnabled && (
+          <View style={s.row}>
+            <View style={s.fieldHalf}>
+              <Text style={s.fieldLabel}>Min (m) — 0 = off</Text>
+              <TextInput style={s.input} value={minAcc} onChangeText={setMinAccState} keyboardType="decimal-pad" />
+            </View>
+            <View style={s.fieldHalf}>
+              <Text style={s.fieldLabel}>Max (m) — 0 = no limit</Text>
+              <TextInput style={s.input} value={maxAcc} onChangeText={setMaxAccState} keyboardType="decimal-pad" />
+            </View>
+          </View>
+        )}
+        <TouchableOpacity style={[s.btn, { backgroundColor: C.accent, marginTop: accFilterEnabled ? 0 : 4 }]} onPress={saveAcc}>
           <Text style={s.btnText}>Save Filter</Text>
         </TouchableOpacity>
       </View>
@@ -284,5 +309,6 @@ const s = StyleSheet.create({
   field: { marginBottom: 10 },
   fieldHalf: { flex: 1 },
   fieldLabel: { fontSize: 11, color: C.muted, marginBottom: 4 },
-  input: { backgroundColor: C.bg, borderRadius: 8, padding: 10, fontSize: 14, color: C.text, borderWidth: 1, borderColor: C.border },
+  input:   { backgroundColor: C.bg, borderRadius: 8, padding: 10, fontSize: 14, color: C.text, borderWidth: 1, borderColor: C.border },
+  version: { textAlign: 'center', fontSize: 11, color: C.muted, marginBottom: 12 },
 });

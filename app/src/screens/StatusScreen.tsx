@@ -1,7 +1,7 @@
 import React from 'react';
 import { ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useGps } from '../context/GpsContext';
-import { latLonToUTM, hdopToAccuracy, fixQualityInfo } from '../services/calculations';
+import { latLonToUTM, latLonToITM, hdopToAccuracy, fixQualityInfo, correctionSource } from '../services/calculations';
 import { C } from '../theme';
 
 function Row({ label, value }: { label: string; value: string | React.ReactNode }) {
@@ -23,7 +23,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 export default function StatusScreen() {
-  const { gps, bleStatus } = useGps();
+  const { gps, bleStatus, ntripConnState, ntripKB } = useGps();
 
   const wsBadge = bleStatus === 'connected' ? { bg: C.green, text: 'BLE Connected' }
     : bleStatus === 'connecting' ? { bg: C.amber, text: 'Scanning for GPS-Survey…' }
@@ -41,8 +41,17 @@ export default function StatusScreen() {
 
   const acc = hdopToAccuracy(gps.hdop, gps.fixQ);
   const utm = gps.fix ? latLonToUTM(gps.lat, gps.lon) : null;
+  const itm = gps.fix ? latLonToITM(gps.lat, gps.lon) : null;
   const hdopPct = Math.max(5, Math.min(100, Math.round((1 - (gps.hdop - 0.5) / 4.5) * 100)));
   const fixInfo = fixQualityInfo(gps.fixQ);
+  const ntripBg = ntripConnState === 'streaming' ? C.green
+                : ntripConnState === 'connecting' ? C.amber
+                : '#374151';
+  const ntripText = ntripConnState === 'streaming'
+    ? `● NTRIP ACTIVE — ${ntripKB.toFixed(1)} KB received`
+    : ntripConnState === 'connecting'
+    ? '◌ NTRIP connecting…'
+    : '○ NTRIP — not connected';
 
   return (
     <ScrollView style={s.scroll} contentContainerStyle={s.container}>
@@ -51,17 +60,10 @@ export default function StatusScreen() {
         <Text style={s.badgeText}>{wsBadge.text}</Text>
       </View>
 
-      {/* NTRIP status */}
-      {gps.ntripState === 'streaming' && (
-        <View style={[s.badge, { backgroundColor: C.green }]}>
-          <Text style={s.badgeText}>RTK corrections active — {(gps.ntripBytes / 1024).toFixed(1)} KB received</Text>
-        </View>
-      )}
-      {gps.ntripState === 'connecting' && (
-        <View style={[s.badge, { backgroundColor: C.amber }]}>
-          <Text style={s.badgeText}>NTRIP connecting…</Text>
-        </View>
-      )}
+      {/* NTRIP status — always visible */}
+      <View style={[s.badge, { backgroundColor: ntripBg }]}>
+        <Text style={s.badgeText}>{ntripText}</Text>
+      </View>
 
       <Section title="Position">
         <Row label="Latitude"  value={gps.fix ? gps.lat.toFixed(7) + '°' : '—'} />
@@ -70,10 +72,17 @@ export default function StatusScreen() {
       </Section>
 
       {utm && (
-        <Section title="UTM">
+        <Section title="UTM (WGS84)">
           <Row label="Zone"     value={utm.label} />
           <Row label="Easting"  value={utm.easting.toString()} />
           <Row label="Northing" value={utm.northing.toString()} />
+        </Section>
+      )}
+
+      {itm && (
+        <Section title="ITM (Israel)">
+          <Row label="Easting"  value={itm.easting.toString()} />
+          <Row label="Northing" value={itm.northing.toString()} />
         </Section>
       )}
 
@@ -87,10 +96,11 @@ export default function StatusScreen() {
             <Text style={s.fixAccuracy}>{fixInfo.accuracy}</Text>
           </View>
           <Text style={s.fixDesc}>{fixInfo.desc}</Text>
+          <Text style={s.corrSrc}>{correctionSource(gps.fixQ, ntripConnState)}</Text>
         </View>
-        <Row label="Satellites"    value={gps.sats.toString()} />
+        <Row label="Satellites"    value={`${gps.sats} (used in fix)`} />
         <Row label="HDOP"          value={gps.hdop.toFixed(2)} />
-        <Row label="Est. accuracy" value={acc.toFixed(2) + ' m'} />
+        <Row label="Est. accuracy" value={acc.toFixed(2) + ' m (est.)'} />
         <View style={s.barBg}>
           <View style={[s.barFill, { width: `${hdopPct}%` as any,
             backgroundColor: hdopPct > 60 ? C.green : hdopPct > 30 ? C.amber : C.red }]} />
@@ -123,6 +133,7 @@ const s = StyleSheet.create({
   fixBadgeText: { color: '#fff', fontWeight: '800', fontSize: 13 },
   fixAccuracy: { fontSize: 13, fontWeight: '700', color: C.text },
   fixDesc: { fontSize: 12, color: C.muted },
+  corrSrc: { fontSize: 11, color: C.accent, fontWeight: '600', marginTop: 4 },
   barBg: { height: 8, backgroundColor: C.border, borderRadius: 4, marginTop: 10, overflow: 'hidden' },
   barFill: { height: 8, borderRadius: 4 },
   nmea: { fontSize: 10, fontFamily: 'monospace', color: C.accent, marginTop: 4 },
