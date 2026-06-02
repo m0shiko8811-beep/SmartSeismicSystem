@@ -111,21 +111,30 @@ $mb = [math]::Round((Get-Item $APK).Length / 1MB, 1)
 Write-Host "         $mb MB" -ForegroundColor DarkGray
 
 # Step 5: Install
+# MIUI-safe: start the adb server first so its harmless "daemon not running"
+# notice (stderr) doesn't trip -ErrorActionPreference Stop; and fall back to
+# `adb push` + `pm install -r` because MIUI blocks streamed `adb install`
+# (INSTALL_FAILED_USER_RESTRICTED).
 if (-not $NoInstall) {
-    $devices = & $ADB devices 2>&1 | Select-String "device$"
-    if ($devices) {
+    $eap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    & $ADB start-server 2>$null | Out-Null
+    $devices = @(& $ADB devices | Where-Object { $_ -match 'device$' })
+    if ($devices.Count -gt 0) {
         Write-Host "  [5/5] Installing on phone..." -ForegroundColor Yellow
-        & $ADB install -r $APK 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            & $ADB uninstall com.gii.surveygps 2>&1 | Out-Null
-            & $ADB install $APK
+        $r = & $ADB install -r $APK
+        if ("$r" -notmatch 'Success') {
+            Write-Host "         streamed install blocked - using push + pm install" -ForegroundColor DarkGray
+            & $ADB push $APK /data/local/tmp/sgps.apk | Out-Null
+            $r = & $ADB shell pm install -r /data/local/tmp/sgps.apk
+            & $ADB shell rm -f /data/local/tmp/sgps.apk 2>$null | Out-Null
         }
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "         Installed OK" -ForegroundColor DarkGray
-        }
+        if ("$r" -match 'Success') { Write-Host "         Installed OK" -ForegroundColor Green }
+        else { Write-Host "         Install FAILED: $r" -ForegroundColor Red }
     } else {
         Write-Host "  [5/5] No phone connected -- APK saved at $APK" -ForegroundColor DarkGray
     }
+    $ErrorActionPreference = $eap
 }
 
 $elapsed = [math]::Round(((Get-Date) - $t0).TotalSeconds, 0)
