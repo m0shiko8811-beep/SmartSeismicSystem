@@ -10,7 +10,15 @@ $PSCP    = 'C:\Program Files\PuTTY\pscp.exe'
 $ADB     = 'C:\Program Files (x86)\Android\android-sdk\platform-tools\adb.exe'
 $HOSTKEY = 'SHA256:Pk744LC4EAdU7CDYt2zQVjDFJ++fgKX7ThJqorg+i9Y'
 $SERVER  = 'bosman67@10.2.20.38'
-$PW      = 'REDACTED'
+# Server SSH password — never hardcode. Provide via $env:SGPS_PW, otherwise you
+# are prompted (input hidden). NOTE: the old password was previously committed to
+# this repo — rotate it on the server and scrub it from git history.
+$PW = $env:SGPS_PW
+if (-not $PW) {
+    $sec = Read-Host 'Server SSH password' -AsSecureString
+    $PW  = [Runtime.InteropServices.Marshal]::PtrToStringBSTR(
+             [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec))
+}
 $PROJECT = Split-Path $MyInvocation.MyCommand.Path
 $TAR     = "$env:TEMP\survey-gps.tar.gz"
 $APK     = "$env:TEMP\app-release.apk"

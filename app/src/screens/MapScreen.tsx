@@ -683,7 +683,10 @@ export default function MapScreen() {
           ref={webRef}
           style={StyleSheet.absoluteFill}
           source={{ html: LEAFLET_HTML, baseUrl: 'https://localhost' }}
-          originWhitelist={['*']}
+          originWhitelist={['https://localhost']}
+          setSupportMultipleWindows={false}
+          onShouldStartLoadWithRequest={(req) =>
+            req.url.startsWith('https://localhost') || req.url === 'about:blank'}
           javaScriptEnabled
           domStorageEnabled
           onLoad={pushState}

@@ -14,6 +14,7 @@
     "expo-haptics": "~56.0.3",
     "expo-image-picker": "^56.0.14",
     "expo-keep-awake": "~56.0.3",
+    "expo-secure-store": "~56.0.4",
     "expo-sharing": "~56.0.14",
     "expo-speech": "~56.0.3",
     "expo-status-bar": "~56.0.4",
