@@ -25,6 +25,7 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
+#include <BLESecurity.h>
 #include "trigger.h"
 
 // ── BLE UUIDs ─────────────────────────────────────────
@@ -768,6 +769,20 @@ void setup() {
   BLEDevice::init("GPS-Survey");
   BLEDevice::setMTU(512);
 
+  // ── BLE security ──────────────────────────────────
+  // Require bonding + encryption so the command/RTCM/telemetry characteristics
+  // are NOT an open, unauthenticated interface (otherwise any device in BLE
+  // range could send wp_clear / shot_clear / shot_cfg or inject RTCM). On first
+  // connect the phone prompts to pair using this static passkey.
+  // ⚠ Flashing this requires re-pairing the phone once (enter the passkey);
+  //   verify the app still connects after pairing before relying on it in the field.
+  const uint32_t blePasskey = 471129;   // change to your own 6-digit PIN
+  BLESecurity* pSecurity = new BLESecurity();
+  pSecurity->setStaticPIN(blePasskey);
+  pSecurity->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_BOND);
+  pSecurity->setCapability(ESP_IO_CAP_OUT);
+  pSecurity->setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
+
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new ServerCallbacks());
 
@@ -777,6 +792,7 @@ void setup() {
     GPS_CHAR_UUID,
     BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
   );
+  pGpsChar->setAccessPermissions(ESP_GATT_PERM_READ_ENCRYPTED);
   pGpsChar->addDescriptor(new BLE2902());
   pGpsChar->setValue("{}");
 
@@ -784,12 +800,14 @@ void setup() {
     CMD_CHAR_UUID,
     BLECharacteristic::PROPERTY_WRITE
   );
+  pCmdChar->setAccessPermissions(ESP_GATT_PERM_WRITE_ENCRYPTED);
   pCmdChar->setCallbacks(new CmdCallbacks());
 
   BLECharacteristic* pRtcmChar = pSvc->createCharacteristic(
     RTCM_CHAR_UUID,
     BLECharacteristic::PROPERTY_WRITE_NR
   );
+  pRtcmChar->setAccessPermissions(ESP_GATT_PERM_WRITE_ENCRYPTED);
   pRtcmChar->setCallbacks(new RtcmCallbacks());
 
   pSvc->start();
