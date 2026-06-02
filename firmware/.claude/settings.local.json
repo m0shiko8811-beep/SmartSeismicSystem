@@ -23,7 +23,9 @@
       "Bash(\"C:\\\\Program Files\\\\Python312\\\\python.exe\" \"C:\\\\Users\\\\moshef.GII\\\\OneDrive - The Geophysical Institute Of Israel\\\\Desktop\\\\Secret\\\\GPS_PCB_v2_ESP32S3_mosaicX5\\\\generate_schematic_v2.py\")",
       "WebFetch(domain:www.ardusimple.com)",
       "Bash(python3 *)",
-      "Bash(npx eas *)"
+      "Bash(npx eas *)",
+      "Bash(adb devices *)",
+      "Bash(adb *)"
     ]
   }
 }
