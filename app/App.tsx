@@ -4,47 +4,55 @@ import { StatusBar } from 'expo-status-bar';
 import { NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Text } from 'react-native';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 
 import { GpsProvider } from './src/context/GpsContext';
+// AudioProvider temporarily disabled — testing whether its WebView blocks the map's WebView touch
+// import AudioProvider  from './src/services/AudioProvider';
 import StatusScreen   from './src/screens/StatusScreen';
 import MapScreen      from './src/screens/MapScreen';
 import SurveyScreen   from './src/screens/SurveyScreen';
 import LogScreen      from './src/screens/LogScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
+import ShotsScreen    from './src/shots/ShotsScreen';
 import { C } from './src/theme';
 
 const Tab = createBottomTabNavigator();
 
 function Icon({ label, focused }: { label: string; focused: boolean }) {
   const icons: Record<string, string> = {
-    Status: '📡', Map: '🗺', Survey: '📍', Log: '📋', Settings: '⚙️',
+    Status: '📡', Map: '🗺', Survey: '📍', Shots: '⭐', Log: '📋', Settings: '⚙️',
   };
   return <Text style={{ fontSize: focused ? 22 : 18 }}>{icons[label] ?? '●'}</Text>;
 }
 
 export default function App() {
   return (
-    <GpsProvider>
-      <NavigationContainer>
-        <StatusBar style="dark" />
-        <Tab.Navigator
-          screenOptions={({ route }) => ({
-            tabBarIcon: ({ focused }) => <Icon label={route.name} focused={focused} />,
-            tabBarActiveTintColor: C.accent,
-            tabBarInactiveTintColor: C.muted,
-            tabBarStyle: { backgroundColor: C.card, borderTopColor: C.border },
-            headerStyle: { backgroundColor: C.card },
-            headerTintColor: C.accent,
-            headerTitleStyle: { fontWeight: '800' },
-          })}
-        >
-          <Tab.Screen name="Status"   component={StatusScreen}   options={{ title: 'GPS Status' }} />
-          <Tab.Screen name="Map"      component={MapScreen}      options={{ title: 'Map' }} />
-          <Tab.Screen name="Survey"   component={SurveyScreen}   options={{ title: 'Survey' }} />
-          <Tab.Screen name="Log"      component={LogScreen}      options={{ title: 'Log' }} />
-          <Tab.Screen name="Settings" component={SettingsScreen} options={{ title: 'Settings' }} />
-        </Tab.Navigator>
-      </NavigationContainer>
-    </GpsProvider>
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      {/* <AudioProvider /> temporarily disabled to test map touch */}
+      <GpsProvider>
+        <NavigationContainer>
+          <StatusBar style="dark" />
+          <Tab.Navigator
+            screenOptions={({ route }) => ({
+              tabBarIcon: ({ focused }) => <Icon label={route.name} focused={focused} />,
+              tabBarActiveTintColor: C.accent,
+              tabBarInactiveTintColor: C.muted,
+              tabBarStyle: { backgroundColor: C.card, borderTopColor: C.border },
+              headerStyle: { backgroundColor: C.card },
+              headerTintColor: C.accent,
+              headerTitleStyle: { fontWeight: '800' },
+            })}
+          >
+            <Tab.Screen name="Status"   component={StatusScreen}   options={{ title: 'GPS Status' }} />
+            <Tab.Screen name="Map"      component={MapScreen}      options={{ title: 'Map' }} />
+            <Tab.Screen name="Survey"   component={SurveyScreen}   options={{ title: 'Survey' }} />
+            <Tab.Screen name="Shots"    component={ShotsScreen}    options={{ title: 'Shots' }} />
+            <Tab.Screen name="Log"      component={LogScreen}      options={{ title: 'Log' }} />
+            <Tab.Screen name="Settings" component={SettingsScreen} options={{ title: 'Settings' }} />
+          </Tab.Navigator>
+        </NavigationContainer>
+      </GpsProvider>
+    </GestureHandlerRootView>
   );
 }

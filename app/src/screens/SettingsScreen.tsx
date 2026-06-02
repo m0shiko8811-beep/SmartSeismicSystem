@@ -1,13 +1,17 @@
 import React, { useEffect, useState } from 'react';
 import { Alert, ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import * as DocumentPicker from 'expo-document-picker';
+import * as FileSystem from 'expo-file-system/legacy';
 import { useGps } from '../context/GpsContext';
-import { getAccSettings, setAccSettings, loadNtripConfigs, saveNtripConfigs, NtripSavedConfig } from '../services/storage';
+import { getAccSettings, setAccSettings, loadNtripConfigs, saveNtripConfigs, NtripSavedConfig, BUILTIN_NTRIP_SERVICES, BuiltinNtripService } from '../services/storage';
 import { C } from '../theme';
 
 export default function SettingsScreen() {
   const { gps, bleStatus, sendCmd, sendNtripConfig, syncFromDevice, deleteAllWaypoints,
           accFilterEnabled, setAccFilterEnabled,
-          ntripConnState, ntripKB, ntripError, startNtrip, stopNtrip } = useGps();
+          ntripConnState, ntripKB, ntripRetryIn, startNtrip, stopNtrip,
+          voiceEnabled, setVoiceEnabled,
+          refPoints, loadRefPointsFromCSV, clearRefPoints } = useGps();
 
   const [host, setHost] = useState('');
   const [port, setPort] = useState('2101');
@@ -41,6 +45,14 @@ export default function SettingsScreen() {
     : bleStatus === 'connecting'
     ? { bg: C.amber,  text: 'Scanning…' }
     : { bg: C.red,    text: 'Not connected' };
+
+  const handleLoadBuiltin = (svc: BuiltinNtripService) => {
+    setHost(svc.host);
+    setPort(svc.port);
+    setMnt(svc.mnt);
+    setUsr(svc.usr);
+    setPwd(svc.pwd);
+  };
 
   const handleNtripConnect = () => {
     if (!host || !mnt) {
@@ -128,6 +140,18 @@ export default function SettingsScreen() {
     ]);
   };
 
+  const handleImportRefCSV = async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({ type: ['text/csv', 'text/plain', '*/*'] });
+      if (result.canceled || !result.assets?.[0]) return;
+      const csv = await FileSystem.readAsStringAsync(result.assets[0].uri, { encoding: FileSystem.EncodingType.UTF8 });
+      loadRefPointsFromCSV(csv);
+      Alert.alert('Reference layer loaded', `${refPoints.length || '?'} points imported onto map.`);
+    } catch (e: any) {
+      Alert.alert('Import failed', e.message);
+    }
+  };
+
   return (
     <ScrollView style={s.scroll} contentContainerStyle={s.container}>
 
@@ -142,8 +166,8 @@ export default function SettingsScreen() {
         <Text style={s.info}>
           NTRIP: {ntripConnState === 'streaming'
             ? `● Streaming — ${ntripKB.toFixed(1)} KB received`
-            : ntripConnState === 'connecting' ? '◌ Connecting…'
-            : ntripConnState === 'error'      ? `✗ Failed: ${ntripError ?? 'unknown error'}`
+            : ntripConnState === 'connecting'
+              ? ntripRetryIn != null ? `↻ Reconnecting in ${ntripRetryIn}s…` : '◌ Connecting…'
             : '○ Not connected'}
         </Text>
         <View style={s.row}>
@@ -160,6 +184,21 @@ export default function SettingsScreen() {
       <View style={s.card}>
         <Text style={s.cardTitle}>NTRIP CONFIG</Text>
         <Text style={s.hint}>Phone connects to caster via TCP and streams RTCM corrections to the device over BLE.</Text>
+
+        {/* Built-in services */}
+        <Text style={s.builtinTitle}>Built-in services</Text>
+        {BUILTIN_NTRIP_SERVICES.map(svc => (
+          <TouchableOpacity key={svc.name} style={s.builtinItem} onPress={() => handleLoadBuiltin(svc)}>
+            <View style={s.builtinLeft}>
+              <Text style={s.builtinName}>{svc.name}</Text>
+              <Text style={s.builtinDetail}>{svc.detail}</Text>
+              {svc.usrPlaceholder ? (
+                <Text style={s.builtinWarn}>⚠ Enter your email as username before connecting</Text>
+              ) : null}
+            </View>
+            <Text style={s.builtinArrow}>→</Text>
+          </TouchableOpacity>
+        ))}
 
         {/* Saved configs */}
         {savedConfigs.length > 0 && (
@@ -215,16 +254,16 @@ export default function SettingsScreen() {
           <TouchableOpacity style={[s.btn, { backgroundColor: C.accent }]} onPress={handleSaveConfig}>
             <Text style={s.btnText}>Save Config</Text>
           </TouchableOpacity>
-          {ntripConnState === 'idle' || ntripConnState === 'error' ? (
+          {ntripConnState === 'idle' ? (
             <TouchableOpacity style={[s.btn, { backgroundColor: C.green }]} onPress={handleNtripConnect}>
-              <Text style={s.btnText}>
-                {ntripConnState === 'error' ? 'Retry Connect' : 'Apply & Connect'}
-              </Text>
+              <Text style={s.btnText}>Apply & Connect</Text>
             </TouchableOpacity>
           ) : (
             <TouchableOpacity style={[s.btn, { backgroundColor: C.red }]} onPress={stopNtrip}>
               <Text style={s.btnText}>
-                {ntripConnState === 'connecting' ? 'Connecting… (tap to stop)' : 'Disconnect NTRIP'}
+                {ntripConnState === 'connecting'
+                  ? ntripRetryIn != null ? `↻ Retry in ${ntripRetryIn}s (tap to stop)` : 'Connecting… (tap to stop)'
+                  : 'Disconnect NTRIP'}
               </Text>
             </TouchableOpacity>
           )}
@@ -250,8 +289,47 @@ export default function SettingsScreen() {
         </TouchableOpacity>
       </View>
 
+      {/* Voice announcements */}
+      <View style={s.card}>
+        <Text style={s.cardTitle}>VOICE ANNOUNCEMENTS</Text>
+        <Text style={s.hint}>Speaks the waypoint label and fix quality when a point is saved.</Text>
+        <View style={[s.row, { alignItems: 'center', marginBottom: 0, marginTop: 0 }]}>
+          <Text style={[s.fieldLabel, { flex: 1, marginBottom: 0 }]}>Speak on save</Text>
+          <Switch
+            value={voiceEnabled}
+            onValueChange={setVoiceEnabled}
+            thumbColor={voiceEnabled ? C.accent : C.muted}
+            trackColor={{ false: C.border, true: C.accent + '66' }}
+          />
+        </View>
+      </View>
+
+      {/* Reference layer */}
+      <View style={s.card}>
+        <Text style={s.cardTitle}>REFERENCE LAYER</Text>
+        <Text style={s.hint}>Load a CSV of planned points (Label,Lat,Lon) as a read-only overlay on the map.</Text>
+        <View style={s.row}>
+          <TouchableOpacity style={[s.btn, { backgroundColor: C.accent }]} onPress={handleImportRefCSV}>
+            <Text style={s.btnText}>Import CSV</Text>
+          </TouchableOpacity>
+          {refPoints.length > 0 && (
+            <TouchableOpacity style={[s.btn, { backgroundColor: C.red }]} onPress={() => {
+              Alert.alert('Clear reference layer?', `Remove ${refPoints.length} planned points from map?`, [
+                { text: 'Cancel', style: 'cancel' },
+                { text: 'Clear', style: 'destructive', onPress: clearRefPoints },
+              ]);
+            }}>
+              <Text style={s.btnText}>Clear ({refPoints.length})</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+        {refPoints.length > 0 && (
+          <Text style={s.info}>{refPoints.length} reference points on map</Text>
+        )}
+      </View>
+
       {/* App version */}
-      <Text style={s.version}>GPS Survey v2.7.0 (build 270)</Text>
+      <Text style={s.version}>GPS Survey v2.8.1 (build 281)</Text>
 
       {/* Accuracy filter */}
       <View style={s.card}>
@@ -282,6 +360,13 @@ export default function SettingsScreen() {
         </TouchableOpacity>
       </View>
 
+      {/* ── About ─────────────────────────────────── */}
+      <View style={s.aboutCard}>
+        <Text style={s.aboutTitle}>GPS Field Survey</Text>
+        <Text style={s.aboutDev}>Developed by Moshe Fridin</Text>
+        <Text style={s.aboutVersion}>v1.0.0</Text>
+      </View>
+
     </ScrollView>
   );
 }
@@ -299,6 +384,13 @@ const s = StyleSheet.create({
   btn: { flex: 1, borderRadius: 10, padding: 12, alignItems: 'center' },
   btnText: { color: '#fff', fontWeight: '700', fontSize: 13 },
   saveBox: { backgroundColor: C.bg, borderRadius: 8, padding: 10, marginBottom: 12, borderWidth: 1, borderColor: C.accent },
+  builtinTitle: { fontSize: 11, fontWeight: '700', color: C.muted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8, marginTop: 4 },
+  builtinItem:  { flexDirection: 'row', alignItems: 'center', backgroundColor: C.bg, borderRadius: 10, borderWidth: 1, borderColor: C.accent + '55', padding: 10, marginBottom: 8 },
+  builtinLeft:  { flex: 1 },
+  builtinName:  { fontSize: 13, fontWeight: '800', color: C.accent },
+  builtinDetail:{ fontSize: 11, color: C.muted, marginTop: 2, lineHeight: 16 },
+  builtinWarn:  { fontSize: 11, color: C.amber, fontWeight: '600', marginTop: 4 },
+  builtinArrow: { fontSize: 18, color: C.accent, paddingLeft: 8 },
   savedList: { marginBottom: 12, gap: 6 },
   savedItem: { flexDirection: 'row', alignItems: 'center', backgroundColor: C.bg, borderRadius: 8, borderWidth: 1, borderColor: C.border, overflow: 'hidden' },
   savedLoad: { flex: 1, paddingVertical: 8, paddingHorizontal: 10 },
@@ -311,4 +403,8 @@ const s = StyleSheet.create({
   fieldLabel: { fontSize: 11, color: C.muted, marginBottom: 4 },
   input:   { backgroundColor: C.bg, borderRadius: 8, padding: 10, fontSize: 14, color: C.text, borderWidth: 1, borderColor: C.border },
   version: { textAlign: 'center', fontSize: 11, color: C.muted, marginBottom: 12 },
+  aboutCard:    { alignItems: 'center', paddingVertical: 24, marginTop: 8, marginBottom: 8 },
+  aboutTitle:   { fontSize: 16, fontWeight: '800', color: C.accent, letterSpacing: 0.5 },
+  aboutDev:     { fontSize: 13, color: C.text, marginTop: 6, fontWeight: '600' },
+  aboutVersion: { fontSize: 11, color: C.muted, marginTop: 4 },
 });

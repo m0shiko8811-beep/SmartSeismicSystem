@@ -1,5 +1,6 @@
 export interface GpsMessage {
   type: 'gps';
+  satellites?: SatInfo[];
   lat: number;
   lon: number;
   alt: number;
@@ -58,6 +59,23 @@ export interface Waypoint {
   hdop: number;
   fixQ: number;
   ts: string;
+  session?: string;
+  notes?: string;
+  photoUri?: string;
+}
+
+export interface RefPoint {
+  label: string;
+  lat: number;
+  lon: number;
+}
+
+export interface SatInfo {
+  prn: number;
+  elev: number;
+  azim: number;
+  snr: number;
+  system: string;
 }
 
 export interface NtripConfig {
@@ -77,3 +95,11 @@ export interface UTMResult {
 }
 
 export type WsStatus = 'connecting' | 'connected' | 'disconnected';
+
+export interface GsvMessage {
+  type: 'gsv';
+  sentences: string[];
+}
+
+// Shot types live in src/shots/types.ts
+export type { ShotRecord, ShotConfig } from '../shots/types';

@@ -61,7 +61,7 @@ export default class NtripClient {
     ].join('\r\n');
 
     this.socket = TcpSocket.createConnection(
-      { host: this.cfg.host, port: this.cfg.port, noDelay: true },
+      { host: this.cfg.host, port: this.cfg.port, noDelay: true } as any,
       () => {
         this.cfg.onTcpConnected?.();
         // Use write callback to confirm data was handed to the kernel

@@ -2,7 +2,7 @@
   "expo": {
     "name": "GPS Survey",
     "slug": "survey-gps",
-    "version": "2.7.0",
+    "version": "2.8.1",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -11,7 +11,7 @@
     },
     "android": {
       "package": "com.gii.surveygps",
-      "versionCode": 270,
+      "versionCode": 281,
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",

@@ -40,3 +40,36 @@ export async function loadNtripConfigs(): Promise<NtripSavedConfig[]> {
 export async function saveNtripConfigs(configs: NtripSavedConfig[]): Promise<void> {
   await AsyncStorage.setItem(NTRIP_KEY, JSON.stringify(configs));
 }
+
+export interface BuiltinNtripService {
+  name: string;
+  detail: string;
+  host: string;
+  port: string;
+  mnt: string;
+  usr: string;
+  pwd: string;
+  usrPlaceholder?: string;
+}
+
+export const BUILTIN_NTRIP_SERVICES: BuiltinNtripService[] = [
+  {
+    name: 'Centipede RTK — ARKG',
+    detail: 'crtk.net · Israel (Kfar Misgav, 32.65°N 35.29°E) · RTCM3 GAL+BDS L1/L2',
+    host: 'crtk.net', port: '2101', mnt: 'ARKG',
+    usr: 'centipede', pwd: 'centipede',
+  },
+  {
+    name: 'Centipede RTK — NEAR',
+    detail: 'crtk.net · Auto-selects nearest base station · Login: centipede / centipede',
+    host: 'crtk.net', port: '2101', mnt: 'NEAR',
+    usr: 'centipede', pwd: 'centipede',
+  },
+  {
+    name: 'RTK2Go — Misgav Dov',
+    detail: 'rtk2go.com · Free public caster · Use your email as username, password: none',
+    host: 'rtk2go.com', port: '2101', mnt: 'MisgavDov',
+    usr: '', pwd: 'none',
+    usrPlaceholder: 'your-email@example.com',
+  },
+];

@@ -1,4 +1,4 @@
-import { UTMResult } from '../types/gps';
+import { UTMResult, SatInfo } from '../types/gps';
 
 export function hdopToAccuracy(hdop: number, fixQ: number = 1): number {
   // RTK accuracy is determined by ambiguity resolution, not satellite geometry (HDOP)
@@ -141,3 +141,42 @@ export function fixQualityInfo(q: number): FixInfo {
 
 export function fixQualityName(q: number): string  { return fixQualityInfo(q).name; }
 export function fixQualityColor(q: number): string { return fixQualityInfo(q).color; }
+
+// Destination point given start, bearing (degrees), and distance (metres)
+export function destinationPoint(lat: number, lon: number, bearingDeg: number, distM: number): { lat: number; lon: number } {
+  const R = 6371000;
+  const δ = distM / R;
+  const θ = bearingDeg * Math.PI / 180;
+  const φ1 = lat * Math.PI / 180;
+  const λ1 = lon * Math.PI / 180;
+  const φ2 = Math.asin(Math.sin(φ1) * Math.cos(δ) + Math.cos(φ1) * Math.sin(δ) * Math.cos(θ));
+  const λ2 = λ1 + Math.atan2(Math.sin(θ) * Math.sin(δ) * Math.cos(φ1), Math.cos(δ) - Math.sin(φ1) * Math.sin(φ2));
+  return { lat: φ2 * 180 / Math.PI, lon: ((λ2 * 180 / Math.PI) + 540) % 360 - 180 };
+}
+
+// Parse NMEA GSV sentences into SatInfo array
+export function parseGSV(sentences: string[]): SatInfo[] {
+  const sats: SatInfo[] = [];
+  for (const sentence of sentences) {
+    // $GNGSV,4,1,14,01,79,019,42,03,57,282,40,...*checksum
+    const raw = sentence.split('*')[0];
+    const parts = raw.split(',');
+    if (parts.length < 4) continue;
+    const talker = parts[0].substring(1, 3); // GP, GL, GA, GB, GN...
+    let system = 'GPS';
+    if (talker === 'GL') system = 'GLONASS';
+    else if (talker === 'GA') system = 'Galileo';
+    else if (talker === 'GB' || talker === 'BD') system = 'BeiDou';
+    else if (talker === 'GQ') system = 'QZSS';
+    // Each sentence has up to 4 satellite blocks starting at index 4
+    for (let i = 4; i + 3 < parts.length; i += 4) {
+      const prn  = parseInt(parts[i],     10);
+      const elev = parseInt(parts[i + 1], 10);
+      const azim = parseInt(parts[i + 2], 10);
+      const snr  = parseInt(parts[i + 3], 10);
+      if (isNaN(prn) || prn <= 0) continue;
+      sats.push({ prn, elev: isNaN(elev) ? 0 : elev, azim: isNaN(azim) ? 0 : azim, snr: isNaN(snr) ? 0 : snr, system });
+    }
+  }
+  return sats;
+}

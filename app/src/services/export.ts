@@ -1,7 +1,14 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import { Waypoint } from '../types/gps';
+// jszip loaded lazily so bundle stays small when feature not used
+let JSZip: any = null;
+async function getJSZip() {
+  if (!JSZip) { JSZip = (await import('jszip')).default; }
+  return JSZip;
+}
 import { latLonToUTM, latLonToITM, hdopToAccuracy, fixQualityName } from './calculations';
+import { ShotRecord } from '../types/gps';
 
 // ── Coordinate projection ─────────────────────────────────────────────────────
 
@@ -89,32 +96,36 @@ function timestamp(): string {
 }
 
 export function generateCSV(waypoints: Waypoint[]): string {
-  const header = 'Label,Latitude,Longitude,Altitude_m,UTM_Zone,UTM_E,UTM_N,ITM_E,ITM_N,DateTime,Est_Acc_m,HDOP,Fix_Quality';
+  const header = 'Label,Session,Notes,Latitude,Longitude,Altitude_m,UTM_Zone,UTM_E,UTM_N,ITM_E,ITM_N,DateTime,Est_Acc_m,HDOP,Fix_Quality,Photo';
   const rows = waypoints.map(wp => {
     const utm = latLonToUTM(wp.lat, wp.lon);
     const itm = latLonToITM(wp.lat, wp.lon);
     const acc = hdopToAccuracy(wp.hdop, wp.fixQ).toFixed(2);
     const fq = fixQualityName(wp.fixQ);
+    const photoFile = wp.photoUri ? wp.photoUri.split('/').pop() ?? '' : '';
     return [
-      csvField(wp.label), wp.lat.toFixed(7), wp.lon.toFixed(7), wp.alt.toFixed(2),
+      csvField(wp.label), csvField(wp.session ?? ''), csvField(wp.notes ?? ''),
+      wp.lat.toFixed(7), wp.lon.toFixed(7), wp.alt.toFixed(2),
       csvField(utm.label), utm.easting, utm.northing,
       itm.easting, itm.northing,
-      csvField(wp.ts), acc, wp.hdop.toFixed(2), csvField(fq),
+      csvField(wp.ts), acc, wp.hdop.toFixed(2), csvField(fq), csvField(photoFile),
     ].join(',');
   });
   return [header, ...rows].join('\n');
 }
 
 export function generateCSVWithProjection(waypoints: Waypoint[], epsg: EpsgOption): string {
-  const header = `Label,Latitude,Longitude,Altitude_m,${epsg.xHeader},${epsg.yHeader},DateTime,Est_Acc_m,HDOP,Fix_Quality`;
+  const header = `Label,Session,Notes,Latitude,Longitude,Altitude_m,${epsg.xHeader},${epsg.yHeader},DateTime,Est_Acc_m,HDOP,Fix_Quality,Photo`;
   const rows = waypoints.map(wp => {
     const { x, y } = projectPoint(wp.lat, wp.lon, epsg.code);
     const acc = hdopToAccuracy(wp.hdop, wp.fixQ).toFixed(2);
     const fq = fixQualityName(wp.fixQ);
+    const photoFile = wp.photoUri ? wp.photoUri.split('/').pop() ?? '' : '';
     return [
-      csvField(wp.label), wp.lat.toFixed(7), wp.lon.toFixed(7), wp.alt.toFixed(2),
+      csvField(wp.label), csvField(wp.session ?? ''), csvField(wp.notes ?? ''),
+      wp.lat.toFixed(7), wp.lon.toFixed(7), wp.alt.toFixed(2),
       x, y,
-      csvField(wp.ts), acc, wp.hdop.toFixed(2), csvField(fq),
+      csvField(wp.ts), acc, wp.hdop.toFixed(2), csvField(fq), csvField(photoFile),
     ].join(',');
   });
   return [header, ...rows].join('\n');
@@ -139,6 +150,66 @@ ${placemarks}
 ${line}
 </Document>
 </kml>`;
+}
+
+export async function exportAndShareWithPhotos(waypoints: Waypoint[]): Promise<void> {
+  if (waypoints.length === 0) throw new Error('No waypoints to export');
+  const withPhotos = waypoints.filter(w => w.photoUri);
+  if (withPhotos.length === 0) {
+    // No photos — fall back to regular CSV export
+    await exportAndShare(waypoints, 'csv');
+    return;
+  }
+  const Zip = await getJSZip();
+  const zip = new Zip();
+  zip.file('survey.csv', generateCSV(waypoints));
+  const photos = zip.folder('photos');
+  for (const wp of withPhotos) {
+    try {
+      const b64 = await FileSystem.readAsStringAsync(wp.photoUri!, { encoding: FileSystem.EncodingType.Base64 });
+      photos.file(wp.photoUri!.split('/').pop()!, b64, { base64: true });
+    } catch {}
+  }
+  const ts = timestamp();
+  const b64zip: string = await zip.generateAsync({ type: 'base64' });
+  const zipPath = `${FileSystem.cacheDirectory}survey_${ts}.zip`;
+  await FileSystem.writeAsStringAsync(zipPath, b64zip, { encoding: FileSystem.EncodingType.Base64 });
+  if (await Sharing.isAvailableAsync()) {
+    await Sharing.shareAsync(zipPath, { mimeType: 'application/zip', dialogTitle: `Share survey_${ts}.zip` });
+  } else {
+    throw new Error('Sharing not available on this device');
+  }
+}
+
+export function generateShotsCSV(shots: ShotRecord[], epsg: EpsgOption): string {
+  const { xHeader, yHeader } = epsg;
+  const header = `ShotID,Line,SP,DateTime,Latitude,Longitude,Altitude_m,${xHeader},${yHeader},Est_Acc_m,HDOP,Fix_Quality,Bad`;
+  const rows = shots.map(sh => {
+    const { x, y } = projectPoint(sh.lat, sh.lon, epsg.code);
+    const acc = hdopToAccuracy(sh.hdop, sh.fixQ).toFixed(2);
+    const fq  = fixQualityName(sh.fixQ);
+    return [
+      sh.id, sh.line, sh.sp,
+      csvField(sh.ts),
+      sh.lat.toFixed(7), sh.lon.toFixed(7), sh.alt.toFixed(2),
+      x, y,
+      acc, sh.hdop.toFixed(2), csvField(fq), sh.bad ? '1' : '0',
+    ].join(',');
+  });
+  return [header, ...rows].join('\n');
+}
+
+export async function exportShots(shots: ShotRecord[], epsg: EpsgOption): Promise<void> {
+  if (shots.length === 0) throw new Error('No shots to export');
+  const ts      = timestamp();
+  const content = generateShotsCSV(shots, epsg);
+  const path    = `${FileSystem.documentDirectory}shots_${ts}.csv`;
+  await FileSystem.writeAsStringAsync(path, content, { encoding: FileSystem.EncodingType.UTF8 });
+  if (await Sharing.isAvailableAsync()) {
+    await Sharing.shareAsync(path, { mimeType: 'text/csv', dialogTitle: `Share shots_${ts}.csv` });
+  } else {
+    throw new Error('Sharing not available on this device');
+  }
 }
 
 export async function exportAndShare(waypoints: Waypoint[], format: 'csv' | 'kml', epsg?: EpsgOption): Promise<void> {
