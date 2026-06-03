@@ -4,7 +4,7 @@
 
 <h1 align="center">SmartSeismicSystem</h1>
 <p align="center"><strong>Pinpoint the source. Own the future.</strong></p>
-<p align="center">Centimeter-accurate RTK GPS + millisecond-precise seismic shot timing — on hardware and code built in-house.</p>
+<p align="center">Centimeter-accurate RTK GPS + Up to nano second -precise seismic shot timing — on hardware and code built in-house.</p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/MCU-ESP32-000000?logo=espressif&logoColor=white" alt="ESP32"/>
