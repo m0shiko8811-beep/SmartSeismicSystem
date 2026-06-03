@@ -91,6 +91,25 @@ flowchart LR
 
 Prebuilt **Android APK** + ESP32 **firmware.bin** are attached to each tagged release → [**v2.8.1**](../../releases/tag/v2.8.1).
 
+## Credits & licenses
+
+Standing on these open-source projects — all permissively licensed (safe for private & commercial use; none forces opening this project's source):
+
+**Firmware**
+- [TinyGPSPlus](https://github.com/mikalhart/TinyGPSPlus) — Mikal Hart · LGPL-2.1
+- ESP32 Arduino core & bundled libraries (BLE, LittleFS, Preferences) — Espressif / Arduino · Apache-2.0 / LGPL-2.1
+
+**App**
+- React Native · Expo SDK & modules · React Navigation — MIT
+- react-native-ble-plx — Apache-2.0
+- react-native-tcp-socket · react-native-webview · react-native-svg · gesture-handler · screens · safe-area-context · async-storage · jszip — MIT
+- [Leaflet](https://leafletjs.com) (BSD-2-Clause) + leaflet-rotate (MIT) for the map
+
+**Map data**
+- © OpenStreetMap contributors — tiles under the [ODbL](https://www.openstreetmap.org/copyright), used per the OSM tile usage policy.
+
+_Audited 2026-06-03: all dependencies are mainstream and permissively licensed; the only standing obligation (OpenStreetMap attribution) is honored above._
+
 ---
 
 <p align="center"><sub>Built by <b>Moshe Fridin</b> with <b>Claude</b>.</sub></p>
