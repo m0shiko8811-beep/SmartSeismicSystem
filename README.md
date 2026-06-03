@@ -61,6 +61,21 @@ flowchart LR
 | `GPIO25` / `26` / `27` | RGB LED R / G / B | status |
 | `GPIO32` | hammer (plate → GND) | `INPUT_PULLUP`, falling-edge = shot |
 
+### How to wire it
+
+```mermaid
+flowchart LR
+  BATT([5V USB / power bank]) -->|"5V · GND"| ESP[ESP32]
+  ANT([GNSS antenna]) --> GPS[u-blox GPS]
+  GPS -->|"TX → GPIO16"| ESP
+  ESP -->|"GPIO17 → RX · 3V3 · GND"| GPS
+  ESP -->|"R/G/B → GPIO25/26/27"| RGB[RGB LED]
+  RGB -->|"– → GND"| ESP
+  HAMMER([Hammer]) -->|"→ GPIO32"| ESP
+  PLATE([Steel plate]) -->|"→ GND"| ESP
+  ESP <-->|"encrypted BLE"| PHONE[Android phone]
+```
+
 ## Roadmap
 
 - 🚜 **"Waze" for vibroseis fleets** — live fleet map + turn-by-turn to every source point, fully offline.
