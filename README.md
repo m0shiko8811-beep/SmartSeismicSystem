@@ -55,6 +55,18 @@
 | 📤 **Export** | CSV (ITM / EPSG), KML, photos; raw NMEA log |
 | 🔊 **Field UX** | voice prompts + shot / waypoint sounds |
 
+## Screenshots
+
+<p align="center">
+  <img src="docs/media/app-survey.png" width="30%" alt="Survey — waypoint numbering & stakeout"/>
+  &nbsp;
+  <img src="docs/media/app-shots.png" width="30%" alt="Shots — trigger config (edge / debounce)"/>
+  &nbsp;
+  <img src="docs/media/app-settings.png" width="30%" alt="Settings — device & NTRIP casters"/>
+</p>
+
+<p align="center"><sub>Survey numbering &amp; stakeout · shot-trigger config (edge / debounce / apply-to-device) · device &amp; NTRIP caster setup</sub></p>
+
 ## Architecture
 
 ```mermaid
