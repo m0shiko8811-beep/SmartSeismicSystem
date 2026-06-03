@@ -10,7 +10,7 @@
       "supportsTablet": true
     },
     "android": {
-      "package": "com.gii.surveygps",
+      "package": "com.smartseismic.surveygps",
       "versionCode": 281,
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
