@@ -4,6 +4,48 @@ All notable changes to the GPS Survey Tool are documented here.
 
 ---
 
+## [2.8.1] — 2026-06-02 (build 281)
+
+### Security hardening (app + firmware)
+
+- **SSH build password no longer hardcoded**
+  - **Root cause**: `build.ps1` carried the build server's SSH password in plaintext (committed to the repo).
+  - **Fix**: `build.ps1` now reads it from `$env:SGPS_PW` (or a hidden prompt); the server password was rotated. (The old value remains in git history — scrub if the repo is ever shared.)
+- **NTRIP credentials moved to the OS keystore**
+  - **Root cause**: saved NTRIP presets (including passwords) were stored in plaintext `AsyncStorage`.
+  - **Fix**: `storage.ts` now stores them via `expo-secure-store`, with a one-time migration that deletes the old plaintext copy.
+- **BLE link encrypted (firmware)**
+  - **Root cause**: the BLE GATT command/RTCM interface was open — any device in range could send `wp_clear`/`shot_clear`/`shot_cfg` or inject RTCM.
+  - **Fix**: added `BLESecurity` (Secure Connections + bonding, static passkey **471129**) and marked the GPS/CMD/RTCM characteristics `ESP_GATT_PERM_*_ENCRYPTED`. The phone must re-pair once after flashing.
+- **Map WebView hardened**: `originWhitelist` restricted to `https://localhost`, external navigation blocked, multiple windows disabled (labels were already HTML-escaped via `escHtml`).
+
+### Build pipeline
+
+- **`build.ps1` MIUI-safe install**: starts the adb server first so its harmless "daemon not running" stderr no longer aborts the run under `-ErrorActionPreference Stop`, and falls back to `adb push` + `pm install -r` because MIUI blocks streamed `adb install` (`INSTALL_FAILED_USER_RESTRICTED`).
+
+---
+
+## [2.8.0] — 2026-06-01 (build 280)
+
+### Seismic shot trigger (firmware + app)
+
+- **New**: a hammer/plate contact on **GPIO32** fires a FALLING-edge ISR that records a **shot** with a millisecond-precise GPS timestamp + position; shots persist to LittleFS and sync over BLE (`shot_cfg` / `shot_list` / `shot_clear` / `shot_delete` + live shot events).
+- **App**: new **Shots** tab (line/SP/step/edge/debounce config, good/bad marking, CSV export) and CSV **shot-plan import**.
+- **Timestamp precision (fix)**
+  - **Root cause**: `buildTimestampAt` only carried the ms offset into seconds (clamped at 0/59), so timestamps were up to a minute wrong at minute boundaries, and a stale NAV-PVT produced garbage.
+  - **Fix**: proper epoch math (carries seconds → minutes → hours → days) plus a 1.5 s NAV-PVT freshness guard.
+- **Flash wear (fix)**: each shot now **appends** a single line instead of rewriting the whole file.
+
+### Field services (app)
+
+- **Voice prompts** via `expo-speech` (the previous `AccessibilityInfo.announceForAccessibility` only spoke when TalkBack was enabled — silent for normal users).
+- **Shot/waypoint sounds** via `expo-audio` (replaced a hidden audio WebView suspected of stealing touch input from the Leaflet map).
+- **NMEA logging** that actually appends (the old `{ append: true }` option was a no-op that overwrote the file each write).
+- **Stakeout navigation**, **QC checks** (duplicate / no-fix / poor-accuracy / station-gap), and **photo + EPSG/ITM CSV export**.
+- **Shot id sync (fix)**: deleting a shot now mirrors the firmware's 1..n renumber so app/device ids stay aligned.
+
+---
+
 ## [2.7.0] — 2026-05-27 (build 270)
 
 ### Map — fix WP/distance label background clipping
