@@ -1,0 +1,22 @@
+# Dependencies
+**/node_modules/
+
+# Expo / React Native build output
+**/.expo/
+**/dist/
+**/web-build/
+app/android/
+app/ios/
+
+# Android artifacts
+*.apk
+*.aab
+*.keystore
+
+# PlatformIO (firmware) build output
+**/.pio/
+
+# Logs & OS cruft
+*.log
+.DS_Store
+Thumbs.db
