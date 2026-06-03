@@ -21,9 +21,9 @@
 A field tool for **seismic surveys** — two parts that talk over Bluetooth:
 
 > **RTK GPS gives the _where_. A hammer-strike trigger gives the _when_.**
-> Together they geolocate every seismic shot to the **centimeter** and timestamp it to the **millisecond** — replacing bulky, expensive commercial gear with a phone + a matchbox-sized device.
+> Together they geolocate every seismic shot to the **centimeter** and timestamp it to the **up to Nano second** — replacing bulky, expensive commercial gear with a phone + a matchbox-sized device.
 
-- 🛰️ **`firmware/`** — ESP32 + u-blox RTK-GPS: centimeter positioning, a GPIO32 falling-edge ISR shot trigger with millisecond UBX-NAV-PVT timestamps, RTCM relay over **encrypted** BLE, LittleFS waypoint/shot storage.
+- 🛰️ **`firmware/`** — ESP32 + u-blox RTK-GPS: centimeter positioning, a GPIO32 falling-edge ISR shot trigger with up to Nano second UBX-NAV-PVT timestamps, RTCM relay over **encrypted** BLE, LittleFS waypoint/shot storage.
 - 📱 **`app/`** — Expo SDK 56 / React Native: BLE link, NTRIP correction relay, live Leaflet map, survey + averaging, the **Shots** tab, stakeout, QC, and CSV/photo export in ITM / EPSG.
 
 ## Features
@@ -31,7 +31,7 @@ A field tool for **seismic surveys** — two parts that talk over Bluetooth:
 | | |
 |---|---|
 | 🎯 **Centimeter RTK** | u-blox multi-band + NTRIP corrections relayed phone → device |
-| ⏱️ **Millisecond shots** | hammer/plate trigger → ISR → UBX-NAV-PVT timestamp |
+| ⏱️ **up to Nano second shots** | hammer/plate trigger → ISR → UBX-NAV-PVT timestamp |
 | 📡 **Survey** | line/station numbering, 5-point averaging, retake |
 | 🗺️ **Live map** | Leaflet / OSM, offline tile cache, waypoint + shot layers |
 | 🧭 **Stakeout** | navigate to planned points |
