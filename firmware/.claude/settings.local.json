@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(claude doctor *)",
+      "PowerShell(claude doctor *)",
+      "WebFetch(domain:www.sparkfun.com)",
+      "WebSearch",
+      "Bash(python generate_schematic.py)",
+      "Bash(pip install *)",
+      "Bash(\"C:\\\\Program Files\\\\Python312\\\\python.exe\" -m pip install matplotlib --quiet)",
+      "Bash(\"C:\\\\Program Files\\\\Python312\\\\python.exe\" \"C:\\\\Users\\\\moshef.GII\\\\OneDrive - The Geophysical Institute Of Israel\\\\Desktop\\\\Secret\\\\generate_schematic.py\")",
+      "Bash(dir *)",
+      "Bash(Start-Sleep -Seconds 8)",
+      "Bash(Get-Content \"C:\\\\Users\\\\moshef.GII\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-moshef-GII-OneDrive---The-Geophysical-Institute-Of-Israel-Documents-PlatformIO-Projects-Survey-GPS-Test\\\\0f362e99-4adc-4fc0-b301-af7f761623ec\\\\tasks\\\\b8cta22um.output\")",
+      "PowerShell(Move-Item *)",
+      "PowerShell(& \"C:\\\\Program Files\\\\Python312\\\\python.exe\" \"C:\\\\Users\\\\moshef.GII\\\\OneDrive - The Geophysical Institute Of Israel\\\\Desktop\\\\Secret\\\\GPS_PCB_v2_ESP32S3_mosaicX5\\\\generate_schematic_v2.py\")",
+      "Bash(python -c \"import matplotlib; print\\('matplotlib', matplotlib.__version__\\)\")",
+      "Bash(where python *)",
+      "Bash(where pip *)",
+      "Bash(py --version)",
+      "Bash(C:\\\\Program Files\\\\Python312\\\\python.exe *)",
+      "Bash(\"C:\\\\Program Files\\\\Python312\\\\python.exe\" \"C:\\\\Users\\\\moshef.GII\\\\OneDrive - The Geophysical Institute Of Israel\\\\Desktop\\\\Secret\\\\GPS_PCB_v1_ESP32_NEO-M9N\\\\generate_schematic.py\")",
+      "Bash(\"C:\\\\Program Files\\\\Python312\\\\python.exe\" \"C:\\\\Users\\\\moshef.GII\\\\OneDrive - The Geophysical Institute Of Israel\\\\Desktop\\\\Secret\\\\GPS_PCB_v2_ESP32S3_mosaicX5\\\\generate_schematic_v2.py\")",
+      "WebFetch(domain:www.ardusimple.com)",
+      "Bash(python3 *)",
+      "Bash(npx eas *)",
+      "Bash(adb devices *)",
+      "Bash(adb *)"
+    ]
+  }
+}
