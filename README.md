@@ -18,12 +18,26 @@
 
 ## What it is
 
-A field tool for **seismic surveys** — two parts that talk over Bluetooth:
+**A multipurpose seismic field system: RTK survey positioning _and_ a universal source trigger — in one phone-sized device.**
 
-> **RTK GPS gives the _where_. A hammer-strike trigger gives the _when_.**
-> Together they geolocate every seismic shot to the **centimeter** and timestamp it to the **millisecond** — replacing bulky, expensive commercial gear with a phone + a matchbox-sized device.
+> **RTK GPS gives the _where_. The source trigger gives the _when_.**
+> Every shot point is geolocated to the **centimeter** and timestamped to the **millisecond** — replacing bulky, expensive commercial _positioning **and** trigger_ gear with a phone + a matchbox-sized box.
 >
 > _Millisecond-precise today; the u-blox UBX-NAV-PVT time base is nanosecond-resolution, so the design is **nanosecond-capable** once a PPS input is added._
+
+**Two jobs, one box:**
+
+1. **Survey** — lay out & record source/receiver points at cm RTK accuracy (lines/stations, 5-point averaging, stakeout, QC, ITM/EPSG export).
+2. **Trigger** — capture the exact instant energy enters the ground, geolocated + timestamped.
+
+**Source-agnostic — that's the game.** The trigger fires on any **contact closure or trigger pulse**, so it works across essentially every seismic source:
+
+- 🔨 **Hammer & plate** · weight-drop
+- 💥 **Explosive shots / blasts** — blaster fire / shot-break
+- 🚛 **Vibroseis** — mechanical _and_ hydraulic vibrators (time-break / start-of-sweep)
+- ➕ …and anything else that closes a contact or emits a pulse (with simple signal interfacing)
+
+### Under the hood
 
 - 🛰️ **`firmware/`** — ESP32 + u-blox RTK-GPS: centimeter positioning, a GPIO32 falling-edge ISR shot trigger with millisecond UBX-NAV-PVT timestamps (nanosecond-resolution time base), RTCM relay over **encrypted** BLE, LittleFS waypoint/shot storage.
 - 📱 **`app/`** — Expo SDK 56 / React Native: BLE link, NTRIP correction relay, live Leaflet map, survey + averaging, the **Shots** tab, stakeout, QC, and CSV/photo export in ITM / EPSG.
@@ -33,7 +47,7 @@ A field tool for **seismic surveys** — two parts that talk over Bluetooth:
 | | |
 |---|---|
 | 🎯 **Centimeter RTK** | u-blox multi-band + NTRIP corrections relayed phone → device |
-| ⏱️ **Millisecond shots** (ns-capable) | hammer/plate trigger → ISR → UBX-NAV-PVT timestamp |
+| ⏱️ **Millisecond shots** (ns-capable) | any source — hammer / blast / vibroseis → ISR → UBX-NAV-PVT timestamp |
 | 📡 **Survey** | line/station numbering, 5-point averaging, retake |
 | 🗺️ **Live map** | Leaflet / OSM, offline tile cache, waypoint + shot layers |
 | 🧭 **Stakeout** | navigate to planned points |
@@ -48,7 +62,7 @@ flowchart LR
   ANT([GNSS antenna]) --> GPS[u-blox RTK GPS]
   GPS -->|"NMEA + UBX · UART 38400"| ESP[ESP32]
   ESP -->|"RTCM + config"| GPS
-  HAMMER([Hammer + plate]) -->|"GPIO32 ISR"| ESP
+  SRC([Source: hammer · blast · vibro]) -->|"trigger → GPIO32 ISR"| ESP
   ESP <-->|"encrypted BLE"| PHONE[Android app]
   PHONE -->|"internet"| NTRIP[(NTRIP caster)]
   NTRIP -->|"RTCM"| PHONE
@@ -80,9 +94,22 @@ flowchart LR
 
 ## Roadmap
 
-- 🚜 **"Waze" for vibroseis fleets** — live fleet map + turn-by-turn to every source point, fully offline.
-- 🤖 **Autonomous source vehicles** — driver-assist → self-positioning at the source point.
-- 📟 **The trigger in your pocket** — phone + matchbox device replacing commercial trigger boxes.
+**Universal trigger**
+
+- 💥 **Any source, one box** — opto-isolated inputs so the same unit fires on blaster fire / shot-break, vibroseis time-break, weight-drop, or a hammer/plate contact.
+- 🎯 **Sub-millisecond timing** — wire the receiver's PPS pin to push shot times from millisecond toward microsecond / nanosecond class.
+- 🛰️ **Multi-unit time sync** — many trigger / rover units sharing one GNSS time base across a spread, so every source is on the same clock.
+- 🔗 **Recorder / SEG-Y hooks** — feed precise shot times + cm positions straight into the processing chain.
+
+**Bigger picture**
+
+- 🚜 **"Waze" for vibroseis fleets** — a live fleet map with turn-by-turn routing to every source point in the optimal order, real-time progress, and full **offline** operation in no-signal terrain.
+- 🤖 **Autonomous source vehicles** — a staged climb from driver-assist to self-positioning at the source point: smaller crews, 24/7 acquisition, perfectly repeatable cm placement.
+- 📟 **The trigger in your pocket** — a phone + a matchbox-sized box replacing bulky, vendor-locked commercial trigger/timing units.
+- 🛰️ **Be your own RTK base** — broadcast your own corrections for centimeter accuracy **anywhere**, no NTRIP subscription and no cell coverage needed.
+- 🧠 **Real-time field QC** — flag bad, missed, or mis-positioned shots while the crew is _still on site_, killing the cost of re-mobilizing.
+- 📊 **Productivity dashboard** — shots/hour, coverage %, and downtime at a glance for the crew chief and the office.
+- 🧩 **One platform, many products** — survey rover, source trigger, fleet nav, and autonomy on one codebase **you own** — something to license or sell, not just an internal tool.
 
 ## Build & flash
 
