@@ -4,7 +4,7 @@
 
 <h1 align="center">SmartSeismicSystem</h1>
 <p align="center"><strong>Pinpoint the source. Own the future.</strong></p>
-<p align="center">Centimeter-accurate RTK GPS + Up to nano second -precise seismic shot timing — on hardware and code built in-house.</p>
+<p align="center">Centimeter-accurate RTK GPS + millisecond-precise (nanosecond-capable) seismic shot timing — on hardware and code built in-house.</p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/MCU-ESP32-000000?logo=espressif&logoColor=white" alt="ESP32"/>
@@ -21,9 +21,11 @@
 A field tool for **seismic surveys** — two parts that talk over Bluetooth:
 
 > **RTK GPS gives the _where_. A hammer-strike trigger gives the _when_.**
-> Together they geolocate every seismic shot to the **centimeter** and timestamp it to the **up to Nano second** — replacing bulky, expensive commercial gear with a phone + a matchbox-sized device.
+> Together they geolocate every seismic shot to the **centimeter** and timestamp it to the **millisecond** — replacing bulky, expensive commercial gear with a phone + a matchbox-sized device.
+>
+> _Millisecond-precise today; the u-blox UBX-NAV-PVT time base is nanosecond-resolution, so the design is **nanosecond-capable** once a PPS input is added._
 
-- 🛰️ **`firmware/`** — ESP32 + u-blox RTK-GPS: centimeter positioning, a GPIO32 falling-edge ISR shot trigger with up to Nano second UBX-NAV-PVT timestamps, RTCM relay over **encrypted** BLE, LittleFS waypoint/shot storage.
+- 🛰️ **`firmware/`** — ESP32 + u-blox RTK-GPS: centimeter positioning, a GPIO32 falling-edge ISR shot trigger with millisecond UBX-NAV-PVT timestamps (nanosecond-resolution time base), RTCM relay over **encrypted** BLE, LittleFS waypoint/shot storage.
 - 📱 **`app/`** — Expo SDK 56 / React Native: BLE link, NTRIP correction relay, live Leaflet map, survey + averaging, the **Shots** tab, stakeout, QC, and CSV/photo export in ITM / EPSG.
 
 ## Features
@@ -31,7 +33,7 @@ A field tool for **seismic surveys** — two parts that talk over Bluetooth:
 | | |
 |---|---|
 | 🎯 **Centimeter RTK** | u-blox multi-band + NTRIP corrections relayed phone → device |
-| ⏱️ **up to Nano second shots** | hammer/plate trigger → ISR → UBX-NAV-PVT timestamp |
+| ⏱️ **Millisecond shots** (ns-capable) | hammer/plate trigger → ISR → UBX-NAV-PVT timestamp |
 | 📡 **Survey** | line/station numbering, 5-point averaging, retake |
 | 🗺️ **Live map** | Leaflet / OSM, offline tile cache, waypoint + shot layers |
 | 🧭 **Stakeout** | navigate to planned points |
