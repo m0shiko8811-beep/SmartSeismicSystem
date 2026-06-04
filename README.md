@@ -41,6 +41,7 @@
 
 - 🛰️ **`firmware/`** — ESP32 + u-blox RTK-GPS: centimeter positioning, a GPIO32 falling-edge ISR shot trigger with millisecond UBX-NAV-PVT timestamps (nanosecond-resolution time base), RTCM relay over **encrypted** BLE, LittleFS waypoint/shot storage.
 - 📱 **`app/`** — Expo SDK 56 / React Native: BLE link, NTRIP correction relay, live Leaflet map, survey + averaging, the **Shots** tab, stakeout, QC, and CSV/photo export in ITM / EPSG.
+- 🖥️ **`seisconv/`** — desktop seismic-data toolkit (Electron + a pure-TypeScript engine): read & convert SEG-Y · SEG-D · SEG-2 / Geode · SU, with parsing/processing on a worker thread so large files don't block the UI. _(in active development)_
 
 ## Features
 
