@@ -10,7 +10,7 @@
 import { parentPort } from 'node:worker_threads';
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
-import { applyAGC, decimateMinMax, getWriter, normFactorPercentile, parseAny, type AGCType, type ParsedFile } from '../core';
+import { applyAGC, getWriter, normFactorPercentile, parseAny, resampleLinear, type AGCType, type ParsedFile } from '../core';
 
 if (!parentPort) throw new Error('parse.worker must run as a worker thread');
 const port = parentPort;
@@ -92,7 +92,8 @@ port.on('message', (req: Req) => {
         if (req.agc) s = applyAGC(s, req.agcWindowMs ?? 200, si, req.agcType ?? 'rms');
         const nf = normFactorPercentile(s, 0.95);
         if (nf > norm) norm = nf;
-        columns.push(decimateMinMax(s, maxSamples));
+        // Time-preserving downsample (clean vertical axis for VD; good enough for wiggle).
+        columns.push(s.length > maxSamples ? resampleLinear(s, maxSamples) : s);
       }
       if (norm <= 0) norm = 1;
 

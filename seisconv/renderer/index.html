@@ -7,9 +7,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SeisConv</title>
 <style>
+  /* SmartSeismicSystem brand palette: deep navy + teal "S" + cyan waveform */
   :root{
-    --bg:#0d0f14; --panel:#141720; --bar:#10131a; --border:#222838;
-    --text:#c8cdd4; --dim:#7a8090; --amber:#ff8c00; --green:#00ff9f; --red:#ff3040; --blue:#4a9eff;
+    --bg:#0d1f33; --panel:#142a44; --bar:#0f2438; --border:#214564;
+    --text:#d6dceb; --dim:#7e93ac; --amber:#1fc8c0; --green:#34dbd0; --red:#ff5d6c; --blue:#3aa0e0;
   }
   *{box-sizing:border-box;margin:0;padding:0;}
   html,body{height:100%;}
@@ -47,6 +48,10 @@
   .trace-label{font-size:12px;color:var(--dim);font-family:'Consolas',monospace;white-space:nowrap;}
   .canvas{display:block;width:100%;height:60vh;background:var(--bg);border:1px solid var(--border);border-radius:8px;}
   .slider{accent-color:var(--amber);}
+  .sec-bar{display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap;}
+  .ctl{background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px;}
+  .ctl-lbl{font-size:12px;color:var(--dim);display:flex;align-items:center;gap:6px;}
+  .slider.sm{width:90px;}
 </style>
 </head>
 <body>
@@ -93,7 +98,24 @@
     </section>
 
     <section class="panel" id="panel-section" style="display:none;">
-      <p class="muted">File Viewer — full section display (wiggle / variable-density / variable-area) is the next milestone.</p>
+      <div class="sec-bar">
+        <select id="secMode" class="ctl">
+          <option value="vd">Variable Density</option>
+          <option value="wiggle">Wiggle</option>
+          <option value="va">Variable Area</option>
+          <option value="vdwig">VD + Wiggle</option>
+        </select>
+        <select id="secColor" class="ctl">
+          <option value="seismic">Seismic</option>
+          <option value="gray">Gray</option>
+          <option value="amber">Amber</option>
+          <option value="viridis">Viridis</option>
+        </select>
+        <label class="ctl-lbl">Gain <input type="range" id="secGain" class="slider sm" min="0.2" max="6" step="0.1" value="1"></label>
+        <label class="ctl-lbl"><input type="checkbox" id="secAgc"> AGC</label>
+        <span class="trace-label" id="secLabel">Open a file to view the section</span>
+      </div>
+      <canvas id="secCanvas" class="canvas"></canvas>
     </section>
 
     <section class="panel" id="panel-sps" style="display:none;">
