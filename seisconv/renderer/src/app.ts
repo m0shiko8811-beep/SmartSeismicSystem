@@ -5,6 +5,7 @@
 import { normFactorPercentile } from '../../core/render/model';
 import { getColor } from '../../core/render/colormaps';
 import { EPSG_DB } from '../../core/sps/reproject';
+import { amplitudeSpectrum } from '../../core/dsp/fft';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 
@@ -52,6 +53,8 @@ const $ = (id: string) => document.getElementById(id) as HTMLElement;
 
 let summary: Summary | null = null;
 let traceIndex = 0;
+let lastTrace: TraceData | null = null;
+let traceMode: 'wave' | 'spectrum' = 'wave';
 let outFormat = 'segy1';
 let lastSection: SectionData | null = null;
 let spsSummary: SpsSummary | null = null;
@@ -188,14 +191,36 @@ async function refreshTrace() {
   if (!summary || summary.traceCount === 0) return;
   traceIndex = Math.max(0, Math.min(summary.traceCount - 1, traceIndex));
   try {
-    const t = await api.getTrace(traceIndex);
-    drawTrace($('traceCanvas') as HTMLCanvasElement, t);
-    $('traceLabel').textContent = `Trace ${t.index + 1} / ${summary.traceCount}  ·  ${t.nSamples} samples`;
+    lastTrace = await api.getTrace(traceIndex);
     ($('traceSlider') as HTMLInputElement).max = String(summary.traceCount - 1);
     ($('traceSlider') as HTMLInputElement).value = String(traceIndex);
+    renderTrace();
   } catch (e) {
     $('traceLabel').textContent = 'Trace read failed: ' + errMsg(e);
   }
+}
+
+/** Draw the active trace in the current mode (waveform or amplitude spectrum). */
+function renderTrace() {
+  if (!summary || !lastTrace) return;
+  const cv = $('traceCanvas') as HTMLCanvasElement;
+  const t = lastTrace;
+  if (traceMode === 'spectrum') {
+    drawSpectrum(cv, t);
+    const ny = t.sampleInt > 0 ? 1e6 / t.sampleInt / 2 : 0;
+    $('traceLabel').textContent = `Trace ${t.index + 1} / ${summary.traceCount}  ·  spectrum 0–${ny.toFixed(0)} Hz`;
+  } else {
+    drawTrace(cv, t);
+    $('traceLabel').textContent = `Trace ${t.index + 1} / ${summary.traceCount}  ·  ${t.nSamples} samples`;
+  }
+}
+
+function setTraceMode(m: 'wave' | 'spectrum') {
+  if (traceMode === m) return;
+  traceMode = m;
+  $('traceWave').classList.toggle('on', m === 'wave');
+  $('traceSpec').classList.toggle('on', m === 'spectrum');
+  renderTrace();
 }
 
 function drawTrace(cv: HTMLCanvasElement, t: TraceData) {
@@ -250,6 +275,75 @@ function drawTrace(cv: HTMLCanvasElement, t: TraceData) {
     ctx.lineTo(ML + pw, y);
     ctx.stroke();
   }
+}
+
+/** Single-sided amplitude spectrum (amplitude vs Hz) of the active trace. */
+function drawSpectrum(cv: HTMLCanvasElement, t: TraceData) {
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth || 800, H = cv.clientHeight || 460;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  const ctx = cv.getContext('2d')!;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#0f2540'); bg.addColorStop(1, '#0b1a2c');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  if (!t.nSamples || !t.samples.length) return;
+
+  const sp = amplitudeSpectrum(t.samples, t.sampleInt);
+  const ML = 56, MR = 16, MT = 18, MB = 28;
+  const pw = W - ML - MR, ph = H - MT - MB;
+  const fmax = sp.nyquist || 1;
+  let amax = 0;
+  for (let k = 1; k < sp.amp.length; k++) if (sp.amp[k] > amax) amax = sp.amp[k];
+  if (amax <= 0) amax = 1;
+  const Xf = (f: number) => ML + (f / fmax) * pw;
+  const Yf = (a: number) => MT + ph - (a / amax) * ph;
+
+  // frequency gridlines + labels
+  ctx.font = '10px Consolas, monospace'; ctx.lineWidth = 1;
+  const fStep = niceStep(fmax, 8);
+  for (let f = 0; f <= fmax + 1e-6; f += fStep) {
+    const x = Xf(f); if (x > W - MR + 1) break;
+    ctx.strokeStyle = 'rgba(33,69,100,0.45)';
+    ctx.beginPath(); ctx.moveTo(x, MT); ctx.lineTo(x, MT + ph); ctx.stroke();
+    ctx.fillStyle = '#5e7186'; ctx.fillText(f.toFixed(0), x + 2, H - 8);
+  }
+  // amplitude gridlines + labels
+  for (let g = 0; g <= 4; g++) {
+    const y = MT + (ph * g) / 4;
+    ctx.strokeStyle = 'rgba(33,69,100,0.45)';
+    ctx.beginPath(); ctx.moveTo(ML, y); ctx.lineTo(ML + pw, y); ctx.stroke();
+    ctx.fillStyle = '#5e7186'; ctx.fillText(((amax * (4 - g)) / 4).toPrecision(2), 4, y + 3);
+  }
+
+  // filled spectrum curve
+  ctx.beginPath();
+  ctx.moveTo(Xf(0), Yf(0));
+  for (let k = 0; k < sp.amp.length; k++) ctx.lineTo(Xf(sp.freqs[k]), Yf(sp.amp[k]));
+  ctx.lineTo(Xf(fmax), Yf(0));
+  ctx.closePath();
+  const fill = ctx.createLinearGradient(0, MT, 0, MT + ph);
+  fill.addColorStop(0, 'rgba(52,219,208,0.42)'); fill.addColorStop(1, 'rgba(52,219,208,0.04)');
+  ctx.fillStyle = fill; ctx.fill();
+  ctx.strokeStyle = '#34dbd0'; ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  for (let k = 0; k < sp.amp.length; k++) {
+    const x = Xf(sp.freqs[k]), y = Yf(sp.amp[k]);
+    if (k === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // peak marker
+  let pk = 1;
+  for (let k = 2; k < sp.amp.length; k++) if (sp.amp[k] > sp.amp[pk]) pk = k;
+  const pkx = Xf(sp.freqs[pk]), pky = Yf(sp.amp[pk]);
+  ctx.fillStyle = '#1fc8c0'; ctx.beginPath(); ctx.arc(pkx, pky, 3, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#c8d2e0'; ctx.font = '11px "Segoe UI", sans-serif';
+  ctx.fillText(`peak ${sp.freqs[pk].toFixed(1)} Hz`, Math.min(pkx + 6, W - 84), Math.max(pky - 6, MT + 12));
+
+  // axis title
+  ctx.fillStyle = '#7e93ac'; ctx.font = '10px Consolas, monospace';
+  ctx.fillText('Frequency (Hz) →', ML, MT - 6);
 }
 
 // ── File Viewer (section) ──
@@ -873,6 +967,8 @@ function init() {
     traceIndex++;
     void refreshTrace();
   });
+  $('traceWave').addEventListener('click', () => setTraceMode('wave'));
+  $('traceSpec').addEventListener('click', () => setTraceMode('spectrum'));
   for (const id of ['secMode', 'secColor']) ($(id) as HTMLSelectElement).addEventListener('change', redrawSection);
   ($('secGain') as HTMLInputElement).addEventListener('input', redrawSection);
   ($('secAgc') as HTMLInputElement).addEventListener('change', () => void refreshSection());

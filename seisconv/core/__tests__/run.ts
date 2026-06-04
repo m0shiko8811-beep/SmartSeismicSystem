@@ -37,6 +37,9 @@ import {
   reprojectSPS,
   EPSG_DB,
   computeSemblance,
+  fft,
+  amplitudeSpectrum,
+  nextPow2,
 } from '../index';
 import { bytesToBase64, base64ToBytes } from '../base64';
 
@@ -362,6 +365,46 @@ test('semblance returns a valid [0,1] matrix with a coherent peak', () => {
     if (v > max) max = v;
   }
   assert.ok(max > 0.5 && max <= 1.0001, `peak semblance ${max}`);
+});
+
+console.log('\n[spectrum]');
+test('nextPow2 rounds up to a power of two', () => {
+  assert.equal(nextPow2(1), 1);
+  assert.equal(nextPow2(2), 2);
+  assert.equal(nextPow2(3), 4);
+  assert.equal(nextPow2(1000), 1024);
+});
+
+test('fft∘ifft round-trips a random signal (< 1e-9)', () => {
+  const N = 64;
+  const re = new Float64Array(N);
+  const im = new Float64Array(N);
+  const orig = new Float64Array(N);
+  for (let i = 0; i < N; i++) { re[i] = Math.sin(i * 0.7) + 0.3 * Math.cos(i * 2.1); orig[i] = re[i]; }
+  fft(re, im, false);
+  fft(re, im, true);
+  let maxErr = 0;
+  for (let i = 0; i < N; i++) maxErr = Math.max(maxErr, Math.abs(re[i] - orig[i]), Math.abs(im[i]));
+  assert.ok(maxErr < 1e-9, `round-trip error ${maxErr}`);
+});
+
+test('amplitudeSpectrum peaks at the input frequency', () => {
+  const N = 512;
+  const fs = 500; // Hz → siUs = 2000
+  const f0 = 60; // Hz
+  const s = new Float32Array(N);
+  for (let i = 0; i < N; i++) s[i] = Math.cos((2 * Math.PI * f0 * i) / fs);
+  const sp = amplitudeSpectrum(s, 2000);
+  assert.equal(sp.freqs.length, N / 2);
+  assert.ok(Math.abs(sp.nyquist - 250) < 1e-6, `nyquist ${sp.nyquist}`);
+  let max = 0, peakK = 0;
+  for (let k = 0; k < sp.amp.length; k++) {
+    assert.ok(Number.isFinite(sp.amp[k]), 'no NaN in spectrum');
+    if (sp.amp[k] > max) { max = sp.amp[k]; peakK = k; }
+  }
+  const binHz = fs / N;
+  assert.ok(Math.abs(sp.freqs[peakK] - f0) < 2 * binHz, `peak at ${sp.freqs[peakK]} Hz, expected ~${f0}`);
+  console.log(`      peak ${sp.freqs[peakK].toFixed(1)} Hz (amp ${max.toFixed(3)})`);
 });
 
 // ── Summary ───────────────────────────────────────────────────────────────────
