@@ -6,6 +6,8 @@
 
 import type { Bytes, ParsedFile } from './types';
 import { parseWithRegistry } from './formats/registry';
+import { detect } from './detect';
+import { parseTpimage } from './formats/tapeimage';
 
 export * from './types';
 export * from './binary';
@@ -17,6 +19,7 @@ export { parseSEG2 } from './formats/seg2';
 export { parseSU, writeSU } from './formats/su';
 export * from './coords';
 export * from './formats/registry';
+export * from './formats/tapeimage';
 export * from './dsp/interpolate';
 export * from './dsp/agc';
 export * from './render/colormaps';
@@ -31,5 +34,13 @@ export * from './sps/reproject';
  * `formats/registry.ts`) — no change here.
  */
 export function parseAny(b: Bytes, name?: string): ParsedFile {
+  if (detect(b, name) === 'TPIMAGE') {
+    const extracted = parseTpimage(b);
+    if (!extracted.length) {
+      return { format: 'TPIMAGE', revision: 0, bh: {}, traces: [], traceCount: 0, errors: ['No seismic files found in tape image'] };
+    }
+    const first = parseAny(extracted[0].bytes, extracted[0].name);
+    return { ...first, format: 'TPIMAGE→' + first.format };
+  }
   return parseWithRegistry(b, name);
 }
