@@ -1,8 +1,8 @@
 // SeisConv — preload bridge.
 //
 // The ONLY channel between the sandboxed renderer and Node/Electron. Exposes a
-// tiny, typed `window.seisconvAPI`; everything privileged (fs, dialogs, workers)
-// stays in the main process behind these IPC calls.
+// tiny, typed `window.seisconvAPI`; everything privileged (fs, dialogs, the
+// worker) stays in the main process behind these IPC calls.
 
 import { contextBridge, ipcRenderer } from 'electron';
 
@@ -17,6 +17,31 @@ export interface ParseSummary {
   errors: string[];
 }
 
+export interface TraceData {
+  index: number;
+  nSamples: number;
+  sampleInt: number;
+  hdr: Record<string, number | string>;
+  samples: Float32Array;
+}
+
+export interface SectionOpts {
+  maxTraces?: number;
+  maxSamples?: number;
+  agc?: boolean;
+  agcType?: 'rms' | 'median' | 'mean';
+  agcWindowMs?: number;
+}
+
+export interface SectionData {
+  numTraces: number;
+  colLen: number;
+  norm: number;
+  sampleInt: number;
+  traceStep: number;
+  data: Float32Array; // numTraces × colLen, row-major (row = trace)
+}
+
 export interface ConvertResult {
   ok: boolean;
   path?: string;
@@ -25,11 +50,14 @@ export interface ConvertResult {
 }
 
 const api = {
-  /** Open a file picker, parse the chosen file off-thread, return a summary (or null if cancelled). */
+  /** Open a file picker, parse the chosen file off-thread; returns a summary (or null if cancelled). */
   openAndParse: (): Promise<ParseSummary | null> => ipcRenderer.invoke('seisconv:openAndParse'),
-  /** Convert a previously-opened file to `format` ('segy1' | 'segy0' | 'su') and save via a native dialog. */
-  convert: (filePath: string, format: string): Promise<ConvertResult> =>
-    ipcRenderer.invoke('seisconv:convert', { path: filePath, format }),
+  /** Get one trace's samples + header from the currently-open file. */
+  getTrace: (index: number): Promise<TraceData> => ipcRenderer.invoke('seisconv:getTrace', index),
+  /** Get a decimated section matrix (for variable-density / wiggle display). */
+  getSection: (opts?: SectionOpts): Promise<SectionData> => ipcRenderer.invoke('seisconv:getSection', opts ?? {}),
+  /** Convert the currently-open file to `format` ('segy1' | 'segy0' | 'su') and save via a native dialog. */
+  convert: (format: string): Promise<ConvertResult> => ipcRenderer.invoke('seisconv:convert', { format }),
 };
 
 export type SeisconvAPI = typeof api;

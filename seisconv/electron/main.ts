@@ -1,9 +1,9 @@
 // SeisConv — Electron main process.
 //
-// Owns the window + native dialogs, and delegates all heavy work (parse/convert)
-// to a worker thread running the pure-TS core, so the UI never blocks on large
-// files. The renderer is sandboxed (contextIsolation, no nodeIntegration); it can
-// only reach privileged APIs through the typed `seisconvAPI` exposed in preload.
+// Owns the window + native dialogs and drives ONE long-lived worker thread that
+// holds the parsed file and answers view/convert requests. The renderer is
+// sandboxed (contextIsolation, no nodeIntegration); it reaches privileged work
+// only through the typed `seisconvAPI` in preload.
 
 import { app, BrowserWindow, dialog, ipcMain, Menu } from 'electron';
 import { writeFile } from 'node:fs/promises';
@@ -18,29 +18,51 @@ const SEISMIC_FILTERS = [
 ];
 
 let win: BrowserWindow | null = null;
+let lastOpenedPath = '';
 
-/** Run one task on a fresh worker thread and resolve with its single reply. */
-function runWorker<T = any>(task: unknown, transfer: Transferable[] = []): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const worker = new Worker(WORKER_PATH);
-    worker.once('message', (msg: T) => {
-      resolve(msg);
-      void worker.terminate();
-    });
-    worker.once('error', (err) => {
-      reject(err);
-      void worker.terminate();
-    });
-    worker.postMessage(task, transfer as any);
+// ── Persistent worker with id-correlated request/response ──
+let worker: Worker | null = null;
+let seq = 0;
+const pending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
+
+function getWorker(): Worker {
+  if (worker) return worker;
+  const w = new Worker(WORKER_PATH);
+  w.on('message', (msg: { id: number }) => {
+    const p = pending.get(msg.id);
+    if (p) {
+      pending.delete(msg.id);
+      p.resolve(msg);
+    }
+  });
+  const fail = (err: unknown) => {
+    for (const p of pending.values()) p.reject(err);
+    pending.clear();
+    worker = null;
+  };
+  w.on('error', fail);
+  w.on('exit', () => {
+    if (worker === w) worker = null;
+  });
+  worker = w;
+  return w;
+}
+
+function callWorker<T = any>(req: Record<string, unknown>, transfer: Transferable[] = []): Promise<T> {
+  const w = getWorker();
+  const id = ++seq;
+  return new Promise<T>((resolve, reject) => {
+    pending.set(id, { resolve, reject });
+    w.postMessage({ ...req, id }, transfer as any);
   });
 }
 
 function createWindow(): void {
   win = new BrowserWindow({
-    width: 1200,
-    height: 820,
-    minWidth: 720,
-    minHeight: 540,
+    width: 1240,
+    height: 860,
+    minWidth: 760,
+    minHeight: 560,
     backgroundColor: '#0d0f14',
     show: false,
     webPreferences: {
@@ -57,39 +79,43 @@ function createWindow(): void {
   void win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
 }
 
-// ── IPC: open a file and parse it (in the worker) → summary ──
+// ── IPC ──
 ipcMain.handle('seisconv:openAndParse', async () => {
   if (!win) return null;
   const res = await dialog.showOpenDialog(win, { properties: ['openFile'], filters: SEISMIC_FILTERS });
   if (res.canceled || !res.filePaths.length) return null;
   const filePath = res.filePaths[0];
-  const summary = await runWorker<Record<string, unknown>>({ type: 'parse', path: filePath });
-  return { path: filePath, name: path.basename(filePath), ...summary };
+  const r = await callWorker<{ ok: boolean; summary?: any; error?: string }>({ type: 'open', path: filePath });
+  if (!r.ok) throw new Error(r.error || 'parse failed');
+  lastOpenedPath = filePath;
+  return { path: filePath, name: path.basename(filePath), ...r.summary };
 });
 
-// ── IPC: convert a file (in the worker) → native Save dialog → write to disk ──
-ipcMain.handle('seisconv:convert', async (_e, args: { path: string; format: string }) => {
-  const res = await runWorker<{ ok: boolean; bytes?: ArrayBuffer; suggestedName?: string; error?: string }>({
-    type: 'convert',
-    path: args.path,
-    format: args.format,
-  });
-  if (!res.ok || !res.bytes) return { ok: false, error: res.error ?? 'conversion failed' };
+ipcMain.handle('seisconv:getTrace', async (_e, index: number) => {
+  const r = await callWorker<{ ok: boolean; error?: string } & Record<string, any>>({ type: 'trace', index });
+  if (!r.ok) throw new Error(r.error || 'trace failed');
+  return { index: r.index, nSamples: r.nSamples, sampleInt: r.sampleInt, hdr: r.hdr, samples: r.samples };
+});
+
+ipcMain.handle('seisconv:getSection', async (_e, opts: Record<string, unknown>) => {
+  const r = await callWorker<{ ok: boolean; error?: string } & Record<string, any>>({ type: 'section', ...(opts || {}) });
+  if (!r.ok) throw new Error(r.error || 'section failed');
+  return { numTraces: r.numTraces, colLen: r.colLen, norm: r.norm, sampleInt: r.sampleInt, traceStep: r.traceStep, data: r.data };
+});
+
+ipcMain.handle('seisconv:convert', async (_e, args: { format: string }) => {
+  const r = await callWorker<{ ok: boolean; bytes?: ArrayBuffer; ext?: string; error?: string }>({ type: 'convert', format: args.format });
+  if (!r.ok || !r.bytes) return { ok: false, error: r.error ?? 'conversion failed' };
   if (!win) return { ok: false, error: 'no window' };
-  const save = await dialog.showSaveDialog(win, { defaultPath: res.suggestedName, filters: SEISMIC_FILTERS });
+  const base = lastOpenedPath ? path.basename(lastOpenedPath).replace(/\.[^.]+$/, '') : 'output';
+  const save = await dialog.showSaveDialog(win, { defaultPath: `${base}.${r.ext}`, filters: SEISMIC_FILTERS });
   if (save.canceled || !save.filePath) return { ok: false, canceled: true };
-  await writeFile(save.filePath, Buffer.from(res.bytes));
+  await writeFile(save.filePath, Buffer.from(r.bytes));
   return { ok: true, path: save.filePath };
 });
 
 app.whenReady().then(() => {
-  Menu.setApplicationMenu(
-    Menu.buildFromTemplate([
-      { role: 'fileMenu' },
-      { role: 'viewMenu' },
-      { role: 'windowMenu' },
-    ]),
-  );
+  Menu.setApplicationMenu(Menu.buildFromTemplate([{ role: 'fileMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' }]));
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
