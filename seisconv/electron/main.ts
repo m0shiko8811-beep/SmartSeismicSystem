@@ -9,6 +9,7 @@ import { app, BrowserWindow, dialog, ipcMain, Menu } from 'electron';
 import { writeFile } from 'node:fs/promises';
 import { Worker } from 'node:worker_threads';
 import * as path from 'node:path';
+import JSZip from 'jszip';
 
 const WORKER_PATH = path.join(__dirname, 'parse.worker.js');
 
@@ -139,6 +140,20 @@ ipcMain.handle('seisconv:spsQC', async (_e, qc: Record<string, number>) => {
   const r = await callWorker<{ ok: boolean; results?: unknown[]; error?: string }>({ type: 'spsQC', qc });
   if (!r.ok) throw new Error(r.error || 'QC failed');
   return r.results;
+});
+
+ipcMain.handle('seisconv:spsReproject', async (_e, code: string) => {
+  const r = await callWorker<{ ok: boolean; files?: { name: string; text: string }[]; error?: string }>({ type: 'spsReproject', code });
+  if (!r.ok || !r.files) return { ok: false, error: r.error ?? 'reprojection failed' };
+  if (!win) return { ok: false, error: 'no window' };
+  const zip = new JSZip();
+  for (const f of r.files) zip.file(f.name, f.text);
+  const buf = await zip.generateAsync({ type: 'nodebuffer' });
+  const tag = code.replace(':', '');
+  const save = await dialog.showSaveDialog(win, { defaultPath: `reprojected_${tag}.zip`, filters: [{ name: 'ZIP archive', extensions: ['zip'] }] });
+  if (save.canceled || !save.filePath) return { ok: false, canceled: true };
+  await writeFile(save.filePath, buf);
+  return { ok: true, path: save.filePath };
 });
 
 app.whenReady().then(() => {

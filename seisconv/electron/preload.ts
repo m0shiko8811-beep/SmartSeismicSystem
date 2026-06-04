@@ -87,6 +87,8 @@ const api = {
   /** Run survey QC on the loaded SPS data. */
   spsQC: (qc?: { srcInt?: number; rcvInt?: number; tol?: number; maxOff?: number; maxSrc?: number; maxRcv?: number }): Promise<QCRow[]> =>
     ipcRenderer.invoke('seisconv:spsQC', qc ?? {}),
+  /** Reproject the loaded SPS survey to an EPSG target and save a ZIP. */
+  spsReproject: (code: string): Promise<ConvertResult> => ipcRenderer.invoke('seisconv:spsReproject', code),
 };
 
 export type SeisconvAPI = typeof api;

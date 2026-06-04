@@ -4,6 +4,7 @@
 
 import { normFactorPercentile } from '../../core/render/model';
 import { getColor } from '../../core/render/colormaps';
+import { EPSG_DB } from '../../core/sps/reproject';
 
 type Summary = {
   path: string;
@@ -33,6 +34,7 @@ declare global {
       openSPS(): Promise<SpsSummary | null>;
       getSpsPoints(): Promise<SpsPoints>;
       spsQC(qc?: QCParamsUI): Promise<QCRow[]>;
+      spsReproject(code: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
     };
   }
 }
@@ -439,6 +441,23 @@ function renderQC(rows: QCRow[]) {
   }
 }
 
+async function exportReprojected() {
+  if (!spsSummary) {
+    $('spsExportStatus').textContent = 'Load SPS files first.';
+    return;
+  }
+  const code = ($('epsgSelect') as HTMLSelectElement).value;
+  $('spsExportStatus').textContent = 'Reprojecting…';
+  try {
+    const r = await api.spsReproject(code);
+    if (r.ok) $('spsExportStatus').textContent = '✓ Saved ' + r.path;
+    else if (r.canceled) $('spsExportStatus').textContent = '';
+    else $('spsExportStatus').textContent = 'Failed: ' + (r.error || 'unknown');
+  } catch (e) {
+    $('spsExportStatus').textContent = 'Failed: ' + errMsg(e);
+  }
+}
+
 function errMsg(e: unknown): string {
   return e && typeof e === 'object' && 'message' in e ? String((e as { message: unknown }).message) : String(e);
 }
@@ -475,6 +494,15 @@ function init() {
   ($('spsShowS') as HTMLInputElement).addEventListener('change', () => { if (spsPts) drawSurveyPlot($('spsCanvas') as HTMLCanvasElement); });
   ($('spsShowR') as HTMLInputElement).addEventListener('change', () => { if (spsPts) drawSurveyPlot($('spsCanvas') as HTMLCanvasElement); });
   $('spsQcBtn').addEventListener('click', () => void runQC());
+  const epsgSel = $('epsgSelect') as HTMLSelectElement;
+  for (const c of EPSG_DB) {
+    const o = document.createElement('option');
+    o.value = c.code;
+    o.textContent = `${c.code} — ${c.name}`;
+    epsgSel.appendChild(o);
+  }
+  epsgSel.value = 'EPSG:4326';
+  $('spsExportBtn').addEventListener('click', () => void exportReprojected());
   switchTab('conv');
 }
 

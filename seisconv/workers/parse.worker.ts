@@ -10,20 +10,22 @@
 import { parentPort } from 'node:worker_threads';
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
-import { applyAGC, getWriter, mergeSPSData, normFactorPercentile, parseAny, parseSPSText, resampleLinear, runSPSQC, type AGCType, type ParsedFile, type QCParams, type SPSData } from '../core';
+import { applyAGC, detectSPSType, EPSG_DB, getWriter, mergeSPSData, normFactorPercentile, parseAny, parseSPSText, reprojectSPS, resampleLinear, runSPSQC, type AGCType, type ParsedFile, type QCParams, type SPSData } from '../core';
 
 if (!parentPort) throw new Error('parse.worker must run as a worker thread');
 const port = parentPort;
 
 let current: ParsedFile | null = null;
 let currentSPS: SPSData | null = null;
+let currentSPSFiles: { name: string; text: string; type: 'S' | 'R' | 'X' | 'mixed' }[] = [];
 
 interface Req {
   id: number;
-  type: 'open' | 'trace' | 'section' | 'convert' | 'openSPS' | 'spsPoints' | 'spsQC';
+  type: 'open' | 'trace' | 'section' | 'convert' | 'openSPS' | 'spsPoints' | 'spsQC' | 'spsReproject';
   path?: string;
   paths?: string[];
   qc?: QCParams;
+  code?: string;
   index?: number;
   format?: string;
   maxTraces?: number;
@@ -56,8 +58,12 @@ port.on('message', (req: Req) => {
 
     if (type === 'openSPS') {
       let merged: SPSData | null = null;
+      currentSPSFiles = [];
       for (const p of req.paths ?? []) {
-        const sps = parseSPSText(readFileSync(p, 'utf8'));
+        const text = readFileSync(p, 'utf8');
+        const name = basename(p);
+        currentSPSFiles.push({ name, text, type: detectSPSType(name, text) });
+        const sps = parseSPSText(text);
         merged = merged ? mergeSPSData(merged, sps) : sps;
       }
       currentSPS = merged;
@@ -106,6 +112,25 @@ port.on('message', (req: Req) => {
       }
       const results = runSPSQC(currentSPS, req.qc ?? {});
       port.postMessage({ id, ok: true, results: results.map((r) => ({ sev: r.sev, cat: r.cat, msg: r.msg })) });
+      return;
+    }
+
+    if (type === 'spsReproject') {
+      if (!currentSPS || !currentSPS.projection) {
+        port.postMessage({ id, ok: false, error: 'no SPS / source projection' });
+        return;
+      }
+      const tgt = EPSG_DB.find((c) => c.code === req.code);
+      if (!tgt) {
+        port.postMessage({ id, ok: false, error: `unknown CRS: ${req.code}` });
+        return;
+      }
+      const tag = tgt.code.replace(':', '');
+      const files = currentSPSFiles.map((f) => ({
+        name: f.name.replace(/(\.[^.]+)?$/, `_${tag}$1`),
+        text: reprojectSPS(f.text.split('\n'), tgt, f.type === 'X' ? 'X' : f.type === 'R' ? 'R' : 'S', currentSPS!.projection!),
+      }));
+      port.postMessage({ id, ok: true, files });
       return;
     }
 
