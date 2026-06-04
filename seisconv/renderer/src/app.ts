@@ -5,6 +5,8 @@
 import { normFactorPercentile } from '../../core/render/model';
 import { getColor } from '../../core/render/colormaps';
 import { EPSG_DB } from '../../core/sps/reproject';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
 
 type Summary = {
   path: string;
@@ -20,7 +22,8 @@ type TraceData = { index: number; nSamples: number; sampleInt: number; hdr: Reco
 type SectionOpts = { maxTraces?: number; maxSamples?: number; agc?: boolean; agcType?: 'rms' | 'median' | 'mean'; agcWindowMs?: number };
 type SectionData = { numTraces: number; colLen: number; norm: number; sampleInt: number; traceStep: number; data: Float32Array };
 type SpsSummary = { sources: number; receivers: number; xrefs: number; layout: string | null; projection: { type: string | null; subtype: string | null; desc?: string } | null; errors: string[] };
-type SpsPoints = { srcE: Float32Array; srcN: Float32Array; rcvE: Float32Array; rcvN: Float32Array };
+type SpsLines = { x: Float32Array; y: Float32Array; line: Int32Array; pt: Float32Array; names: string[] };
+type SpsGeometry = { geo: boolean; src: SpsLines; rcv: SpsLines; bbox: { minX: number; maxX: number; minY: number; maxY: number } };
 type QCParamsUI = { srcInt?: number; rcvInt?: number; tol?: number; maxOff?: number };
 type QCRow = { sev: string; cat: string; msg: string };
 type BatchRow = { name: string; ok: boolean; traces?: number; error?: string };
@@ -36,8 +39,7 @@ declare global {
       convert(format: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
       batchConvert(format: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string; results?: BatchRow[] } | null>;
       openSPS(): Promise<SpsSummary | null>;
-      getSpsPoints(): Promise<SpsPoints>;
-      spsLatLon(): Promise<{ srcLon: Float32Array; srcLat: Float32Array; rcvLon: Float32Array; rcvLat: Float32Array }>;
+      spsGeometry(geo: boolean): Promise<SpsGeometry>;
       spsQC(qc?: QCParamsUI): Promise<QCRow[]>;
       spsReproject(code: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
       semblance(opts: { velMin: number; velMax: number; velStep: number }): Promise<SemblanceData>;
@@ -53,9 +55,11 @@ let traceIndex = 0;
 let outFormat = 'segy1';
 let lastSection: SectionData | null = null;
 let spsSummary: SpsSummary | null = null;
-let spsPts: SpsPoints | null = null;
-let spsGeoPts: SpsPoints | null = null;
-let spsGeoMode = false;
+let spsGeom: SpsGeometry | null = null;
+let spsView: 'grid' | 'map' = 'grid';
+const gridView = { sc: 1, ox: 0, oy: 0, init: false }; // canvas pan/zoom: x_px = ox + e*sc, y_px = oy - n*sc
+let leafletMap: L.Map | null = null;
+let leafletLayers: { src: L.LayerGroup; rcv: L.LayerGroup } | null = null;
 let velResult: SemblanceData | null = null;
 let velPicks: VelPick[] = [];
 
@@ -69,7 +73,7 @@ function switchTab(tab: Tab) {
   }
   if (tab === 'trace' && summary) void refreshTrace();
   if (tab === 'section' && summary) void refreshSection();
-  if (tab === 'sps' && spsSummary) void refreshSpsPlot();
+  if (tab === 'sps' && spsSummary) void refreshSps();
   if (tab === 'vel' && velResult) drawVelocity();
 }
 
@@ -353,7 +357,7 @@ function drawSection(cv: HTMLCanvasElement, sec: SectionData) {
   }
 }
 
-// ── SPS 2.1 (survey points) ──
+// ── SPS 2.1 (survey geometry) ──
 function spsLabel(s: SpsSummary): string {
   const proj = s.projection?.desc || s.projection?.type || s.projection?.subtype || 'unknown CRS';
   return `${s.sources} sources · ${s.receivers} receivers · ${s.xrefs} X-refs · ${s.layout || '?'} · ${proj}` + (s.errors.length ? ` · ⚠ ${s.errors.length}` : '');
@@ -368,90 +372,269 @@ async function loadSPS() {
       return;
     }
     spsSummary = s;
-    spsPts = await api.getSpsPoints();
-    spsGeoPts = null;
-    spsGeoMode = false;
-    ($('spsGeo') as HTMLInputElement).checked = false;
+    spsGeom = null;
+    gridView.init = false;
     $('spsLabel').textContent = spsLabel(s);
-    drawSurveyPlot($('spsCanvas') as HTMLCanvasElement);
+    await refreshSps();
   } catch (e) {
     $('spsLabel').textContent = 'SPS load failed: ' + errMsg(e);
   }
 }
 
-async function refreshSpsPlot() {
+/** Fetch geometry for the active view (projected E/N for grid, WGS84 lon/lat for map) and render. */
+async function refreshSps() {
   if (!spsSummary) return;
-  if (!spsPts) {
+  const wantGeo = spsView === 'map';
+  if (!spsGeom || spsGeom.geo !== wantGeo) {
     try {
-      spsPts = await api.getSpsPoints();
-    } catch {
+      spsGeom = await api.spsGeometry(wantGeo);
+      gridView.init = false;
+    } catch (e) {
+      $('spsLabel').textContent = 'SPS geometry failed: ' + errMsg(e);
       return;
     }
   }
-  drawSurveyPlot($('spsCanvas') as HTMLCanvasElement);
+  if (spsView === 'grid') drawSurveyGrid();
+  else updateMap();
 }
 
-function drawSurveyPlot(cv: HTMLCanvasElement) {
+function setView(v: 'grid' | 'map') {
+  if (spsView === v) return;
+  spsView = v;
+  $('viewGrid').classList.toggle('on', v === 'grid');
+  $('viewMap').classList.toggle('on', v === 'map');
+  ($('spsCanvas') as HTMLElement).style.display = v === 'grid' ? 'block' : 'none';
+  $('spsMap').style.display = v === 'map' ? 'block' : 'none';
+  if (spsSummary) void refreshSps();
+}
+
+// ── Survey-grid canvas (projected E/N, always offline) ──
+function gridFit() {
+  if (!spsGeom) return;
+  const cv = $('spsCanvas') as HTMLCanvasElement;
+  const W = cv.clientWidth || 900, H = cv.clientHeight || 500;
+  const { minX, maxX, minY, maxY } = spsGeom.bbox;
+  if (!isFinite(minX)) { gridView.sc = 1; gridView.ox = W / 2; gridView.oy = H / 2; gridView.init = true; return; }
+  const dx = Math.max(1e-9, maxX - minX), dy = Math.max(1e-9, maxY - minY);
+  const sc = Math.min((W - 80) / dx, (H - 56) / dy) * 0.96;
+  gridView.sc = sc;
+  gridView.ox = W / 2 - (sc * (minX + maxX)) / 2;
+  gridView.oy = H / 2 + (sc * (minY + maxY)) / 2;
+  gridView.init = true;
+}
+
+function niceStep(range: number, target: number): number {
+  const raw = range / Math.max(1, target);
+  if (!isFinite(raw) || raw <= 0) return 1;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const n = raw / mag;
+  return (n < 1.5 ? 1 : n < 3 ? 2 : n < 7 ? 5 : 10) * mag;
+}
+
+function drawSurveyGrid() {
+  if (!spsGeom) return;
+  const cv = $('spsCanvas') as HTMLCanvasElement;
   const dpr = window.devicePixelRatio || 1;
-  const W = cv.clientWidth || 900;
-  const H = cv.clientHeight || 500;
-  cv.width = Math.round(W * dpr);
-  cv.height = Math.round(H * dpr);
+  const W = cv.clientWidth || 900, H = cv.clientHeight || 500;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
   const ctx = cv.getContext('2d')!;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.fillStyle = '#0d1f33';
-  ctx.fillRect(0, 0, W, H);
-  const pts = spsGeoMode && spsGeoPts ? spsGeoPts : spsPts;
-  if (!pts) return;
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#0f2540'); bg.addColorStop(1, '#0b1a2c');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  if (!gridView.init) gridFit();
+  const { sc, ox, oy } = gridView;
+  const geo = spsGeom.geo;
+  const X = (e: number) => ox + e * sc;
+  const Yf = (n: number) => oy - n * sc;
   const showS = ($('spsShowS') as HTMLInputElement).checked;
   const showR = ($('spsShowR') as HTMLInputElement).checked;
 
-  let minE = Infinity, maxE = -Infinity, minN = Infinity, maxN = -Infinity, count = 0;
-  const acc = (E: Float32Array, N: Float32Array) => {
-    for (let i = 0; i < E.length; i++) {
-      const e = E[i], n = N[i];
-      if (!isFinite(e) || !isFinite(n)) continue;
-      count++;
-      if (e < minE) minE = e;
-      if (e > maxE) maxE = e;
-      if (n < minN) minN = n;
-      if (n > maxN) maxN = n;
-    }
-  };
-  if (showS) acc(pts.srcE, pts.srcN);
-  if (showR) acc(pts.rcvE, pts.rcvN);
-  if (!count) return;
-  if (maxE <= minE) maxE = minE + 1;
-  if (maxN <= minN) maxN = minN + 1;
-
-  const ML = 64, MR = 16, MT = 16, MB = 28;
-  const pw = W - ML - MR;
-  const ph = H - MT - MB;
-  const sc = Math.min(pw / (maxE - minE), ph / (maxN - minN));
-  const ox = ML + (pw - sc * (maxE - minE)) / 2;
-  const oy = MT + (ph - sc * (maxN - minN)) / 2;
-  const X = (e: number) => ox + (e - minE) * sc;
-  const Yf = (n: number) => oy + (maxN - n) * sc;
-
-  const plot = (E: Float32Array, N: Float32Array, col: string) => {
-    ctx.fillStyle = col;
-    for (let i = 0; i < E.length; i++) {
-      const e = E[i], n = N[i];
-      if (!isFinite(e) || !isFinite(n)) continue;
-      ctx.fillRect(X(e) - 1, Yf(n) - 1, 2.2, 2.2);
-    }
-  };
-  if (showR) plot(pts.rcvE, pts.rcvN, '#3aa0e0');
-  if (showS) plot(pts.srcE, pts.srcN, '#ff5d6c');
-
-  ctx.strokeStyle = '#214564';
-  ctx.lineWidth = 1;
-  ctx.strokeRect(ML, MT, pw, ph);
-  ctx.fillStyle = '#7e93ac';
-  ctx.font = '10px Consolas, monospace';
-  const geo = spsGeoMode && spsGeoPts != null;
+  // visible world extent → "nice" gridlines + axis labels
+  const e0 = (0 - ox) / sc, e1 = (W - ox) / sc;
+  const nTop = (oy - 0) / sc, nBot = (oy - H) / sc;
   const pr = geo ? 4 : 0;
-  ctx.fillText(`${geo ? 'lon' : 'E'} ${minE.toFixed(pr)}–${maxE.toFixed(pr)} · ${geo ? 'lat' : 'N'} ${minN.toFixed(pr)}–${maxN.toFixed(pr)}  (● src  ● rcv)`, ML + 4, H - 8);
+  ctx.lineWidth = 1; ctx.font = '10px Consolas, monospace';
+  const sx = niceStep(e1 - e0, 8);
+  for (let e = Math.ceil(e0 / sx) * sx; e <= e1; e += sx) {
+    const x = X(e); if (x < 42 || x > W - 2) continue;
+    ctx.strokeStyle = 'rgba(33,69,100,0.45)';
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H - 16); ctx.stroke();
+    ctx.fillStyle = '#5e7186'; ctx.fillText(e.toFixed(pr), x + 2, H - 5);
+  }
+  const sy = niceStep(nTop - nBot, 6);
+  for (let n = Math.ceil(nBot / sy) * sy; n <= nTop; n += sy) {
+    const y = Yf(n); if (y < 2 || y > H - 16) continue;
+    ctx.strokeStyle = 'rgba(33,69,100,0.45)';
+    ctx.beginPath(); ctx.moveTo(42, y); ctx.lineTo(W, y); ctx.stroke();
+    ctx.fillStyle = '#5e7186'; ctx.fillText(n.toFixed(pr), 3, y - 2);
+  }
+
+  // survey lines (polyline per contiguous same-line run) + glowing points
+  const drawSet = (g: SpsLines, lineCol: string, ptCol: string) => {
+    ctx.strokeStyle = lineCol; ctx.lineWidth = 1.1;
+    let cur = -1; ctx.beginPath();
+    for (let i = 0; i < g.x.length; i++) {
+      const e = g.x[i], n = g.y[i];
+      if (!isFinite(e) || !isFinite(n)) { cur = -1; continue; }
+      const x = X(e), y = Yf(n);
+      if (g.line[i] !== cur) { ctx.moveTo(x, y); cur = g.line[i]; } else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    ctx.fillStyle = ptCol; ctx.shadowColor = ptCol; ctx.shadowBlur = 6;
+    for (let i = 0; i < g.x.length; i++) {
+      const e = g.x[i], n = g.y[i];
+      if (!isFinite(e) || !isFinite(n)) continue;
+      ctx.beginPath(); ctx.arc(X(e), Yf(n), 1.8, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.shadowBlur = 0;
+  };
+  if (showR) drawSet(spsGeom.rcv, 'rgba(58,160,224,0.45)', '#3aa0e0');
+  if (showS) drawSet(spsGeom.src, 'rgba(255,140,0,0.5)', '#ff8c00');
+
+  // legend
+  ctx.font = '11px "Segoe UI", sans-serif';
+  let lx = 52; const ly = 20;
+  const legend = (col: string, txt: string) => {
+    ctx.fillStyle = col; ctx.beginPath(); ctx.arc(lx, ly, 4, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#c8d2e0'; ctx.fillText(txt, lx + 9, ly + 4); lx += ctx.measureText(txt).width + 34;
+  };
+  if (showS) legend('#ff8c00', `${spsSummary?.sources ?? 0} sources`);
+  if (showR) legend('#3aa0e0', `${spsSummary?.receivers ?? 0} receivers`);
+
+  // north arrow (north-up)
+  ctx.fillStyle = '#9fb0c4'; ctx.font = 'bold 12px Consolas, monospace';
+  ctx.fillText('N', W - 22, 24);
+  ctx.strokeStyle = '#9fb0c4'; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(W - 18, 28); ctx.lineTo(W - 18, 40);
+  ctx.moveTo(W - 18, 28); ctx.lineTo(W - 21, 33);
+  ctx.moveTo(W - 18, 28); ctx.lineTo(W - 15, 33);
+  ctx.stroke();
+
+  drawScaleBar(ctx, W, H, sc, geo, (nTop + nBot) / 2);
+}
+
+function drawScaleBar(ctx: CanvasRenderingContext2D, W: number, H: number, scPxPerUnit: number, geo: boolean, midLat: number) {
+  const mPerUnit = geo ? 111320 * Math.cos((midLat * Math.PI) / 180) : 1;
+  const pxPerM = scPxPerUnit / mPerUnit;
+  if (!isFinite(pxPerM) || pxPerM <= 0) return;
+  const meters = niceStep(120 / pxPerM, 1);
+  const barPx = meters * pxPerM;
+  if (!isFinite(barPx) || barPx < 12 || barPx > W - 60) return;
+  const x0 = W - 22 - barPx, y0 = H - 22;
+  ctx.strokeStyle = '#c8d2e0'; ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(x0, y0); ctx.lineTo(x0 + barPx, y0);
+  ctx.moveTo(x0, y0 - 4); ctx.lineTo(x0, y0 + 4);
+  ctx.moveTo(x0 + barPx, y0 - 4); ctx.lineTo(x0 + barPx, y0 + 4);
+  ctx.stroke();
+  ctx.fillStyle = '#c8d2e0'; ctx.font = '10px Consolas, monospace'; ctx.textAlign = 'center';
+  ctx.fillText(meters >= 1000 ? `${meters / 1000} km` : `${meters} m`, x0 + barPx / 2, y0 - 6);
+  ctx.textAlign = 'left';
+}
+
+/** Attach wheel-zoom / drag-pan / hover to the grid canvas (once, at init). */
+function gridInteractions() {
+  const cv = $('spsCanvas') as HTMLCanvasElement;
+  let dragging = false, lx = 0, ly = 0;
+  cv.addEventListener('wheel', (e) => {
+    if (spsView !== 'grid' || !spsGeom) return;
+    e.preventDefault();
+    if (!gridView.init) gridFit();
+    const r = cv.getBoundingClientRect();
+    const px = e.clientX - r.left, py = e.clientY - r.top;
+    const ex = (px - gridView.ox) / gridView.sc, ny = (gridView.oy - py) / gridView.sc;
+    gridView.sc *= e.deltaY < 0 ? 1.15 : 1 / 1.15;
+    gridView.ox = px - ex * gridView.sc;
+    gridView.oy = py + ny * gridView.sc;
+    drawSurveyGrid();
+  }, { passive: false });
+  cv.addEventListener('mousedown', (e) => { if (spsView !== 'grid') return; dragging = true; lx = e.clientX; ly = e.clientY; });
+  window.addEventListener('mouseup', () => { dragging = false; });
+  cv.addEventListener('mousemove', (e) => {
+    if (spsView !== 'grid' || !spsGeom) return;
+    if (dragging) {
+      gridView.ox += e.clientX - lx; gridView.oy += e.clientY - ly;
+      lx = e.clientX; ly = e.clientY;
+      drawSurveyGrid();
+    } else {
+      hoverGrid(e);
+    }
+  });
+  cv.addEventListener('dblclick', () => { if (spsView === 'grid' && spsGeom) { gridFit(); drawSurveyGrid(); } });
+}
+
+function hoverGrid(e: MouseEvent) {
+  if (!spsGeom || !gridView.init) return;
+  const cv = $('spsCanvas') as HTMLCanvasElement;
+  const r = cv.getBoundingClientRect();
+  const px = e.clientX - r.left, py = e.clientY - r.top;
+  const { sc, ox, oy } = gridView;
+  let best = 144, bi = -1, bg: SpsLines | null = null;
+  const scan = (g: SpsLines, on: boolean) => {
+    if (!on) return;
+    for (let i = 0; i < g.x.length; i++) {
+      const x = ox + g.x[i] * sc, y = oy - g.y[i] * sc;
+      const d = (x - px) ** 2 + (y - py) ** 2;
+      if (d < best) { best = d; bi = i; bg = g; }
+    }
+  };
+  scan(spsGeom.src, ($('spsShowS') as HTMLInputElement).checked);
+  scan(spsGeom.rcv, ($('spsShowR') as HTMLInputElement).checked);
+  if (bg && bi >= 0) {
+    const g: SpsLines = bg;
+    const pr = spsGeom.geo ? 5 : 1;
+    $('spsLabel').textContent = `Line ${g.names[g.line[bi]]} · pt ${g.pt[bi]} · ${g.x[bi].toFixed(pr)}, ${g.y[bi].toFixed(pr)}`;
+  } else if (spsSummary) {
+    $('spsLabel').textContent = spsLabel(spsSummary);
+  }
+}
+
+// ── Real basemap (Leaflet, geographic) ──
+function ensureMap() {
+  if (leafletMap) return;
+  const dark = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap, © CARTO' });
+  const sat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19, attribution: 'Esri World Imagery' });
+  const streets = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' });
+  leafletMap = L.map('spsMap', { layers: [dark], preferCanvas: true });
+  L.control.layers({ Dark: dark, Satellite: sat, Streets: streets }).addTo(leafletMap);
+  leafletMap.setView([32, 35], 6);
+}
+
+function updateMap() {
+  if (!spsGeom || !spsGeom.geo) return;
+  ensureMap();
+  const map = leafletMap!;
+  map.invalidateSize();
+  if (leafletLayers) { map.removeLayer(leafletLayers.src); map.removeLayer(leafletLayers.rcv); leafletLayers = null; }
+  const showS = ($('spsShowS') as HTMLInputElement).checked;
+  const showR = ($('spsShowR') as HTMLInputElement).checked;
+  const build = (g: SpsLines, col: string) => {
+    const grp = L.layerGroup();
+    let cur = -1; let coords: [number, number][] = [];
+    const flush = () => { if (coords.length > 1) L.polyline(coords, { color: col, weight: 1, opacity: 0.5 }).addTo(grp); coords = []; };
+    for (let i = 0; i < g.x.length; i++) {
+      const lon = g.x[i], lat = g.y[i];
+      if (!isFinite(lon) || !isFinite(lat)) { flush(); cur = -1; continue; }
+      if (g.line[i] !== cur) { flush(); cur = g.line[i]; }
+      coords.push([lat, lon]);
+      L.circleMarker([lat, lon], { radius: 2.5, color: col, weight: 1, fillColor: col, fillOpacity: 0.9 })
+        .bindPopup(`Line ${g.names[g.line[i]]} · pt ${g.pt[i]}<br>${lat.toFixed(5)}, ${lon.toFixed(5)}`)
+        .addTo(grp);
+    }
+    flush();
+    return grp;
+  };
+  const src = build(spsGeom.src, '#ff8c00');
+  const rcv = build(spsGeom.rcv, '#3aa0e0');
+  if (showR) rcv.addTo(map);
+  if (showS) src.addTo(map);
+  leafletLayers = { src, rcv };
+  const { minX, maxX, minY, maxY } = spsGeom.bbox;
+  if (isFinite(minX) && isFinite(minY) && isFinite(maxX) && isFinite(maxY)) {
+    map.fitBounds([[minY, minX], [maxY, maxX]], { padding: [24, 24], maxZoom: 16 });
+  }
 }
 
 function numVal(id: string): number {
@@ -659,20 +842,6 @@ async function exportPicks() {
   }
 }
 
-async function toggleGeo() {
-  spsGeoMode = ($('spsGeo') as HTMLInputElement).checked;
-  if (spsGeoMode && spsSummary && !spsGeoPts) {
-    try {
-      const g = await api.spsLatLon();
-      spsGeoPts = { srcE: g.srcLon, srcN: g.srcLat, rcvE: g.rcvLon, rcvN: g.rcvLat };
-    } catch (e) {
-      $('spsLabel').textContent = 'Geographic view failed: ' + errMsg(e);
-      spsGeoMode = false;
-      ($('spsGeo') as HTMLInputElement).checked = false;
-    }
-  }
-  drawSurveyPlot($('spsCanvas') as HTMLCanvasElement);
-}
 
 function errMsg(e: unknown): string {
   return e && typeof e === 'object' && 'message' in e ? String((e as { message: unknown }).message) : String(e);
@@ -708,9 +877,11 @@ function init() {
   ($('secGain') as HTMLInputElement).addEventListener('input', redrawSection);
   ($('secAgc') as HTMLInputElement).addEventListener('change', () => void refreshSection());
   $('spsLoadBtn').addEventListener('click', () => void loadSPS());
-  ($('spsShowS') as HTMLInputElement).addEventListener('change', () => { if (spsPts) drawSurveyPlot($('spsCanvas') as HTMLCanvasElement); });
-  ($('spsShowR') as HTMLInputElement).addEventListener('change', () => { if (spsPts) drawSurveyPlot($('spsCanvas') as HTMLCanvasElement); });
-  ($('spsGeo') as HTMLInputElement).addEventListener('change', () => void toggleGeo());
+  ($('spsShowS') as HTMLInputElement).addEventListener('change', () => void refreshSps());
+  ($('spsShowR') as HTMLInputElement).addEventListener('change', () => void refreshSps());
+  $('viewGrid').addEventListener('click', () => setView('grid'));
+  $('viewMap').addEventListener('click', () => setView('map'));
+  gridInteractions();
   $('spsQcBtn').addEventListener('click', () => void runQC());
   const epsgSel = $('epsgSelect') as HTMLSelectElement;
   for (const c of EPSG_DB) {

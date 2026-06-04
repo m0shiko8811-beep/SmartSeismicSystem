@@ -58,11 +58,19 @@ export interface SPSSummary {
   errors: string[];
 }
 
-export interface SpsPoints {
-  srcE: Float32Array;
-  srcN: Float32Array;
-  rcvE: Float32Array;
-  rcvN: Float32Array;
+export interface SpsLines {
+  x: Float32Array;
+  y: Float32Array;
+  line: Int32Array;
+  pt: Float32Array;
+  names: string[];
+}
+
+export interface SpsGeometry {
+  geo: boolean;
+  src: SpsLines;
+  rcv: SpsLines;
+  bbox: { minX: number; maxX: number; minY: number; maxY: number };
 }
 
 export interface QCRow {
@@ -94,11 +102,8 @@ const api = {
     ipcRenderer.invoke('seisconv:batchConvert', format),
   /** Open one or more SPS files (S/R/X), parse + merge them, return a summary. */
   openSPS: (): Promise<SPSSummary | null> => ipcRenderer.invoke('seisconv:openSPS'),
-  /** Get source/receiver coordinate arrays for the survey plot. */
-  getSpsPoints: (): Promise<SpsPoints> => ipcRenderer.invoke('seisconv:getSpsPoints'),
-  /** Get source/receiver coordinates reprojected to WGS84 lon/lat. */
-  spsLatLon: (): Promise<{ srcLon: Float32Array; srcLat: Float32Array; rcvLon: Float32Array; rcvLat: Float32Array }> =>
-    ipcRenderer.invoke('seisconv:spsLatLon'),
+  /** Get line-grouped survey geometry (projected E/N, or WGS84 lon/lat when geo=true). */
+  spsGeometry: (geo: boolean): Promise<SpsGeometry> => ipcRenderer.invoke('seisconv:spsGeometry', geo),
   /** Run survey QC on the loaded SPS data. */
   spsQC: (qc?: { srcInt?: number; rcvInt?: number; tol?: number; maxOff?: number; maxSrc?: number; maxRcv?: number }): Promise<QCRow[]> =>
     ipcRenderer.invoke('seisconv:spsQC', qc ?? {}),

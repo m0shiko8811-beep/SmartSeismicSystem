@@ -10,7 +10,7 @@
     "build:main": "esbuild electron/main.ts --bundle --platform=node --target=node20 --external:electron --outfile=dist/main.js --format=cjs",
     "build:preload": "esbuild electron/preload.ts --bundle --platform=node --target=node20 --external:electron --outfile=dist/preload.js --format=cjs",
     "build:worker": "esbuild workers/parse.worker.ts --bundle --platform=node --target=node20 --outfile=dist/parse.worker.js --format=cjs",
-    "build:renderer": "esbuild renderer/src/app.ts --bundle --platform=browser --outfile=renderer/dist/app.js --format=iife",
+    "build:renderer": "esbuild renderer/src/app.ts --bundle --platform=browser --outfile=renderer/dist/app.js --format=iife --loader:.png=dataurl --loader:.svg=dataurl",
     "build": "npm run build:main && npm run build:preload && npm run build:worker && npm run build:renderer",
     "start": "npm run build && electron .",
     "test:core": "tsx core/__tests__/run.ts",
@@ -18,7 +18,9 @@
     "dist": "npm run build && electron-builder"
   },
   "dependencies": {
-    "jszip": "^3.10.1"
+    "@types/leaflet": "^1.9.21",
+    "jszip": "^3.10.1",
+    "leaflet": "^1.9.4"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
@@ -31,9 +33,19 @@
   "build": {
     "appId": "com.smartseismic.seisconv",
     "productName": "SeisConv",
-    "files": ["dist/**", "renderer/**", "package.json"],
-    "win": { "target": "nsis" },
-    "mac": { "target": "dmg" },
-    "linux": { "target": "AppImage" }
+    "files": [
+      "dist/**",
+      "renderer/**",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "mac": {
+      "target": "dmg"
+    },
+    "linux": {
+      "target": "AppImage"
+    }
   }
 }

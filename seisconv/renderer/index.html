@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy"
-      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;">
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://*.basemaps.cartocdn.com https://server.arcgisonline.com https://*.tile.openstreetmap.org;">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SeisConv</title>
 <style>
@@ -65,7 +65,13 @@
   .qc-row.warn .qc-sev{color:var(--amber);}
   .qc-row.ok .qc-sev{color:var(--green);}
   .qc-cat{color:var(--dim);}
+  .seg{display:inline-flex;border:1px solid var(--border);border-radius:6px;overflow:hidden;}
+  .segbtn{background:transparent;color:var(--dim);border:none;padding:6px 12px;font-size:12px;cursor:pointer;font-family:inherit;}
+  .segbtn.on{background:rgba(31,200,192,0.16);color:var(--amber);}
+  #spsMap{cursor:grab;}
+  .leaflet-container{background:#0d1f33;}
 </style>
+<link rel="stylesheet" href="./dist/app.css">
 </head>
 <body>
   <header>
@@ -140,10 +146,11 @@
         <button class="btn sm" id="spsLoadBtn">Load SPS files (S / R / X)…</button>
         <label class="ctl-lbl"><input type="checkbox" id="spsShowS" checked> Sources</label>
         <label class="ctl-lbl"><input type="checkbox" id="spsShowR" checked> Receivers</label>
-        <label class="ctl-lbl"><input type="checkbox" id="spsGeo"> Geographic (WGS84)</label>
+        <span class="seg"><button class="segbtn on" id="viewGrid">Survey grid</button><button class="segbtn" id="viewMap">Real map</button></span>
         <span class="trace-label" id="spsLabel">Load S/R/X files to plot the survey</span>
       </div>
       <canvas id="spsCanvas" class="canvas"></canvas>
+      <div id="spsMap" class="canvas" style="display:none;"></div>
       <div class="sec-bar" style="margin-top:12px;">
         <button class="btn sm" id="spsQcBtn">Run QC</button>
         <label class="ctl-lbl">Src int <input type="number" id="qcSrcInt" class="numin" value="0"></label>

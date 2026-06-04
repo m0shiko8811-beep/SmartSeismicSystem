@@ -36,7 +36,7 @@ function dist2d(a: SPSPoint, b: SPSPoint): number {
   return Math.sqrt(de * de + dn * dn);
 }
 
-function groupByLine(arr: SPSPoint[]): Record<string, SPSPoint[]> {
+export function groupByLine(arr: SPSPoint[]): Record<string, SPSPoint[]> {
   const g: Record<string, SPSPoint[]> = {};
   for (const p of arr) {
     const k = (p.lineName || '').trim();

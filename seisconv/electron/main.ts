@@ -142,16 +142,10 @@ ipcMain.handle('seisconv:openSPS', async () => {
   return r.summary;
 });
 
-ipcMain.handle('seisconv:getSpsPoints', async () => {
-  const r = await callWorker<{ ok: boolean; error?: string } & Record<string, any>>({ type: 'spsPoints' });
-  if (!r.ok) throw new Error(r.error || 'sps points failed');
-  return { srcE: r.srcE, srcN: r.srcN, rcvE: r.rcvE, rcvN: r.rcvN };
-});
-
-ipcMain.handle('seisconv:spsLatLon', async () => {
-  const r = await callWorker<{ ok: boolean; error?: string } & Record<string, any>>({ type: 'spsLatLon' });
-  if (!r.ok) throw new Error(r.error || 'sps lat/lon failed');
-  return { srcLon: r.srcLon, srcLat: r.srcLat, rcvLon: r.rcvLon, rcvLat: r.rcvLat };
+ipcMain.handle('seisconv:spsGeometry', async (_e, geo: boolean) => {
+  const r = await callWorker<{ ok: boolean; error?: string } & Record<string, any>>({ type: 'spsGeometry', geo });
+  if (!r.ok) throw new Error(r.error || 'sps geometry failed');
+  return { geo: r.geo, src: r.src, rcv: r.rcv, bbox: r.bbox };
 });
 
 ipcMain.handle('seisconv:spsQC', async (_e, qc: Record<string, number>) => {
