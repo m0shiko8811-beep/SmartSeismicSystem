@@ -114,6 +114,27 @@ ipcMain.handle('seisconv:convert', async (_e, args: { format: string }) => {
   return { ok: true, path: save.filePath };
 });
 
+ipcMain.handle('seisconv:openSPS', async () => {
+  if (!win) return null;
+  const res = await dialog.showOpenDialog(win, {
+    properties: ['openFile', 'multiSelections'],
+    filters: [
+      { name: 'SPS files', extensions: ['s', 'r', 'x', 's01', 'r01', 'x01', 'sps', 'txt'] },
+      { name: 'All files', extensions: ['*'] },
+    ],
+  });
+  if (res.canceled || !res.filePaths.length) return null;
+  const r = await callWorker<{ ok: boolean; summary?: any; error?: string }>({ type: 'openSPS', paths: res.filePaths });
+  if (!r.ok) throw new Error(r.error || 'SPS parse failed');
+  return r.summary;
+});
+
+ipcMain.handle('seisconv:getSpsPoints', async () => {
+  const r = await callWorker<{ ok: boolean; error?: string } & Record<string, any>>({ type: 'spsPoints' });
+  if (!r.ok) throw new Error(r.error || 'sps points failed');
+  return { srcE: r.srcE, srcN: r.srcN, rcvE: r.rcvE, rcvN: r.rcvN };
+});
+
 app.whenReady().then(() => {
   Menu.setApplicationMenu(Menu.buildFromTemplate([{ role: 'fileMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' }]));
   createWindow();

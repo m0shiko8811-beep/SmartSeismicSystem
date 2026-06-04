@@ -312,3 +312,35 @@ export function detectSPSType(filename: string, firstLines?: string): 'S' | 'R' 
   const max = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
   return max && max[1] > 0 ? (max[0] as 'S' | 'R' | 'X') : 'mixed';
 }
+
+/** Merge two parsed SPS files (e.g. an S file + an R file), de-duplicating points. */
+export function mergeSPSData(a: SPSData, b: SPSData): SPSData {
+  const keyOf = (p: SPSPoint) => `${(p.lineName || '').trim()}|${p.point}|${p.idx || ''}`;
+  const seen = new Set<string>();
+  const dedup = (arr: SPSPoint[]): SPSPoint[] => {
+    const out: SPSPoint[] = [];
+    for (const p of arr) {
+      const k = keyOf(p);
+      if (!seen.has(k)) { seen.add(k); out.push(p); }
+    }
+    return out;
+  };
+  const sources = dedup([...a.sources, ...b.sources]);
+  seen.clear();
+  const receivers = dedup([...a.receivers, ...b.receivers]);
+  const xseen = new Set<string>();
+  const xrefs: SPSXref[] = [];
+  for (const x of [...a.xrefs, ...b.xrefs]) {
+    const k = `${x.srcLine}|${x.srcPt}|${x.ffid}|${x.rcvLineFrom}|${x.rcvPtFrom}`;
+    if (!xseen.has(k)) { xseen.add(k); xrefs.push(x); }
+  }
+  const projection = a.projection && a.projection.type ? a.projection : b.projection && b.projection.type ? b.projection : undefined;
+  return {
+    sources, receivers, xrefs,
+    headers: [...a.headers, ...b.headers],
+    errors: [...a.errors, ...b.errors],
+    skipped: a.skipped + b.skipped,
+    layout: a.layout || b.layout,
+    projection,
+  };
+}

@@ -18,6 +18,8 @@ type Summary = {
 type TraceData = { index: number; nSamples: number; sampleInt: number; hdr: Record<string, number | string>; samples: Float32Array };
 type SectionOpts = { maxTraces?: number; maxSamples?: number; agc?: boolean; agcType?: 'rms' | 'median' | 'mean'; agcWindowMs?: number };
 type SectionData = { numTraces: number; colLen: number; norm: number; sampleInt: number; traceStep: number; data: Float32Array };
+type SpsSummary = { sources: number; receivers: number; xrefs: number; layout: string | null; projection: { type: string | null; subtype: string | null; desc?: string } | null; errors: string[] };
+type SpsPoints = { srcE: Float32Array; srcN: Float32Array; rcvE: Float32Array; rcvN: Float32Array };
 
 declare global {
   interface Window {
@@ -26,6 +28,8 @@ declare global {
       getTrace(i: number): Promise<TraceData>;
       getSection(o?: SectionOpts): Promise<SectionData>;
       convert(format: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
+      openSPS(): Promise<SpsSummary | null>;
+      getSpsPoints(): Promise<SpsPoints>;
     };
   }
 }
@@ -36,6 +40,8 @@ let summary: Summary | null = null;
 let traceIndex = 0;
 let outFormat = 'segy1';
 let lastSection: SectionData | null = null;
+let spsSummary: SpsSummary | null = null;
+let spsPts: SpsPoints | null = null;
 
 const TABS = ['conv', 'trace', 'section', 'sps'] as const;
 type Tab = (typeof TABS)[number];
@@ -47,6 +53,7 @@ function switchTab(tab: Tab) {
   }
   if (tab === 'trace' && summary) void refreshTrace();
   if (tab === 'section' && summary) void refreshSection();
+  if (tab === 'sps' && spsSummary) void refreshSpsPlot();
 }
 
 function fmtRate(si: number | null) {
@@ -284,6 +291,101 @@ function drawSection(cv: HTMLCanvasElement, sec: SectionData) {
   }
 }
 
+// ── SPS 2.1 (survey points) ──
+function spsLabel(s: SpsSummary): string {
+  const proj = s.projection?.desc || s.projection?.type || s.projection?.subtype || 'unknown CRS';
+  return `${s.sources} sources · ${s.receivers} receivers · ${s.xrefs} X-refs · ${s.layout || '?'} · ${proj}` + (s.errors.length ? ` · ⚠ ${s.errors.length}` : '');
+}
+
+async function loadSPS() {
+  $('spsLabel').textContent = 'Loading…';
+  try {
+    const s = await api.openSPS();
+    if (!s) {
+      $('spsLabel').textContent = spsSummary ? spsLabel(spsSummary) : 'Load S/R/X files to plot the survey';
+      return;
+    }
+    spsSummary = s;
+    spsPts = await api.getSpsPoints();
+    $('spsLabel').textContent = spsLabel(s);
+    drawSurveyPlot($('spsCanvas') as HTMLCanvasElement);
+  } catch (e) {
+    $('spsLabel').textContent = 'SPS load failed: ' + errMsg(e);
+  }
+}
+
+async function refreshSpsPlot() {
+  if (!spsSummary) return;
+  if (!spsPts) {
+    try {
+      spsPts = await api.getSpsPoints();
+    } catch {
+      return;
+    }
+  }
+  drawSurveyPlot($('spsCanvas') as HTMLCanvasElement);
+}
+
+function drawSurveyPlot(cv: HTMLCanvasElement) {
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth || 900;
+  const H = cv.clientHeight || 500;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  const ctx = cv.getContext('2d')!;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#0d1f33';
+  ctx.fillRect(0, 0, W, H);
+  if (!spsPts) return;
+  const showS = ($('spsShowS') as HTMLInputElement).checked;
+  const showR = ($('spsShowR') as HTMLInputElement).checked;
+
+  let minE = Infinity, maxE = -Infinity, minN = Infinity, maxN = -Infinity, count = 0;
+  const acc = (E: Float32Array, N: Float32Array) => {
+    for (let i = 0; i < E.length; i++) {
+      const e = E[i], n = N[i];
+      if (!isFinite(e) || !isFinite(n)) continue;
+      count++;
+      if (e < minE) minE = e;
+      if (e > maxE) maxE = e;
+      if (n < minN) minN = n;
+      if (n > maxN) maxN = n;
+    }
+  };
+  if (showS) acc(spsPts.srcE, spsPts.srcN);
+  if (showR) acc(spsPts.rcvE, spsPts.rcvN);
+  if (!count) return;
+  if (maxE <= minE) maxE = minE + 1;
+  if (maxN <= minN) maxN = minN + 1;
+
+  const ML = 64, MR = 16, MT = 16, MB = 28;
+  const pw = W - ML - MR;
+  const ph = H - MT - MB;
+  const sc = Math.min(pw / (maxE - minE), ph / (maxN - minN));
+  const ox = ML + (pw - sc * (maxE - minE)) / 2;
+  const oy = MT + (ph - sc * (maxN - minN)) / 2;
+  const X = (e: number) => ox + (e - minE) * sc;
+  const Yf = (n: number) => oy + (maxN - n) * sc;
+
+  const plot = (E: Float32Array, N: Float32Array, col: string) => {
+    ctx.fillStyle = col;
+    for (let i = 0; i < E.length; i++) {
+      const e = E[i], n = N[i];
+      if (!isFinite(e) || !isFinite(n)) continue;
+      ctx.fillRect(X(e) - 1, Yf(n) - 1, 2.2, 2.2);
+    }
+  };
+  if (showR) plot(spsPts.rcvE, spsPts.rcvN, '#3aa0e0');
+  if (showS) plot(spsPts.srcE, spsPts.srcN, '#ff5d6c');
+
+  ctx.strokeStyle = '#214564';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(ML, MT, pw, ph);
+  ctx.fillStyle = '#7e93ac';
+  ctx.font = '10px Consolas, monospace';
+  ctx.fillText(`E ${minE.toFixed(0)}–${maxE.toFixed(0)} · N ${minN.toFixed(0)}–${maxN.toFixed(0)}  (● src  ● rcv)`, ML + 4, H - 8);
+}
+
 function errMsg(e: unknown): string {
   return e && typeof e === 'object' && 'message' in e ? String((e as { message: unknown }).message) : String(e);
 }
@@ -316,6 +418,9 @@ function init() {
   for (const id of ['secMode', 'secColor']) ($(id) as HTMLSelectElement).addEventListener('change', redrawSection);
   ($('secGain') as HTMLInputElement).addEventListener('input', redrawSection);
   ($('secAgc') as HTMLInputElement).addEventListener('change', () => void refreshSection());
+  $('spsLoadBtn').addEventListener('click', () => void loadSPS());
+  ($('spsShowS') as HTMLInputElement).addEventListener('change', () => { if (spsPts) drawSurveyPlot($('spsCanvas') as HTMLCanvasElement); });
+  ($('spsShowR') as HTMLInputElement).addEventListener('change', () => { if (spsPts) drawSurveyPlot($('spsCanvas') as HTMLCanvasElement); });
   switchTab('conv');
 }
 

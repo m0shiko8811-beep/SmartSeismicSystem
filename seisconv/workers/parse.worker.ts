@@ -10,17 +10,19 @@
 import { parentPort } from 'node:worker_threads';
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
-import { applyAGC, getWriter, normFactorPercentile, parseAny, resampleLinear, type AGCType, type ParsedFile } from '../core';
+import { applyAGC, getWriter, mergeSPSData, normFactorPercentile, parseAny, parseSPSText, resampleLinear, type AGCType, type ParsedFile, type SPSData } from '../core';
 
 if (!parentPort) throw new Error('parse.worker must run as a worker thread');
 const port = parentPort;
 
 let current: ParsedFile | null = null;
+let currentSPS: SPSData | null = null;
 
 interface Req {
   id: number;
-  type: 'open' | 'trace' | 'section' | 'convert';
+  type: 'open' | 'trace' | 'section' | 'convert' | 'openSPS' | 'spsPoints';
   path?: string;
+  paths?: string[];
   index?: number;
   format?: string;
   maxTraces?: number;
@@ -48,6 +50,51 @@ port.on('message', (req: Req) => {
       const bytes = new Uint8Array(readFileSync(req.path!));
       current = parseAny(bytes, basename(req.path!));
       port.postMessage({ id, ok: true, summary: summarize(current) });
+      return;
+    }
+
+    if (type === 'openSPS') {
+      let merged: SPSData | null = null;
+      for (const p of req.paths ?? []) {
+        const sps = parseSPSText(readFileSync(p, 'utf8'));
+        merged = merged ? mergeSPSData(merged, sps) : sps;
+      }
+      currentSPS = merged;
+      port.postMessage({
+        id,
+        ok: true,
+        summary: {
+          sources: merged?.sources.length ?? 0,
+          receivers: merged?.receivers.length ?? 0,
+          xrefs: merged?.xrefs.length ?? 0,
+          layout: merged?.layout ?? null,
+          projection: merged?.projection ?? null,
+          errors: merged?.errors ?? [],
+        },
+      });
+      return;
+    }
+
+    if (type === 'spsPoints') {
+      if (!currentSPS) {
+        port.postMessage({ id, ok: false, error: 'no SPS loaded' });
+        return;
+      }
+      const S = currentSPS.sources;
+      const R = currentSPS.receivers;
+      const srcE = new Float32Array(S.length);
+      const srcN = new Float32Array(S.length);
+      for (let i = 0; i < S.length; i++) {
+        srcE[i] = S[i].easting;
+        srcN[i] = S[i].northing;
+      }
+      const rcvE = new Float32Array(R.length);
+      const rcvN = new Float32Array(R.length);
+      for (let i = 0; i < R.length; i++) {
+        rcvE[i] = R[i].easting;
+        rcvN[i] = R[i].northing;
+      }
+      port.postMessage({ id, ok: true, srcE, srcN, rcvE, rcvN }, [srcE.buffer, srcN.buffer, rcvE.buffer, rcvN.buffer]);
       return;
     }
 

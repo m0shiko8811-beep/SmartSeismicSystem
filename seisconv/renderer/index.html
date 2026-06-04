@@ -123,7 +123,13 @@
     </section>
 
     <section class="panel" id="panel-sps" style="display:none;">
-      <p class="muted">SPS 2.1 — survey points, QC, and map come in a later milestone.</p>
+      <div class="sec-bar">
+        <button class="btn sm" id="spsLoadBtn">Load SPS files (S / R / X)…</button>
+        <label class="ctl-lbl"><input type="checkbox" id="spsShowS" checked> Sources</label>
+        <label class="ctl-lbl"><input type="checkbox" id="spsShowR" checked> Receivers</label>
+        <span class="trace-label" id="spsLabel">Load S/R/X files to plot the survey</span>
+      </div>
+      <canvas id="spsCanvas" class="canvas"></canvas>
     </section>
   </main>
 

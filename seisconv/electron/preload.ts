@@ -49,6 +49,22 @@ export interface ConvertResult {
   error?: string;
 }
 
+export interface SPSSummary {
+  sources: number;
+  receivers: number;
+  xrefs: number;
+  layout: string | null;
+  projection: { type: string | null; subtype: string | null; desc?: string; latOrigin?: number | null; zone?: number | null } | null;
+  errors: string[];
+}
+
+export interface SpsPoints {
+  srcE: Float32Array;
+  srcN: Float32Array;
+  rcvE: Float32Array;
+  rcvN: Float32Array;
+}
+
 const api = {
   /** Open a file picker, parse the chosen file off-thread; returns a summary (or null if cancelled). */
   openAndParse: (): Promise<ParseSummary | null> => ipcRenderer.invoke('seisconv:openAndParse'),
@@ -58,6 +74,10 @@ const api = {
   getSection: (opts?: SectionOpts): Promise<SectionData> => ipcRenderer.invoke('seisconv:getSection', opts ?? {}),
   /** Convert the currently-open file to `format` ('segy1' | 'segy0' | 'su') and save via a native dialog. */
   convert: (format: string): Promise<ConvertResult> => ipcRenderer.invoke('seisconv:convert', { format }),
+  /** Open one or more SPS files (S/R/X), parse + merge them, return a summary. */
+  openSPS: (): Promise<SPSSummary | null> => ipcRenderer.invoke('seisconv:openSPS'),
+  /** Get source/receiver coordinate arrays for the survey plot. */
+  getSpsPoints: (): Promise<SpsPoints> => ipcRenderer.invoke('seisconv:getSpsPoints'),
 };
 
 export type SeisconvAPI = typeof api;
