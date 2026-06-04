@@ -23,6 +23,7 @@ type SpsSummary = { sources: number; receivers: number; xrefs: number; layout: s
 type SpsPoints = { srcE: Float32Array; srcN: Float32Array; rcvE: Float32Array; rcvN: Float32Array };
 type QCParamsUI = { srcInt?: number; rcvInt?: number; tol?: number; maxOff?: number };
 type QCRow = { sev: string; cat: string; msg: string };
+type BatchRow = { name: string; ok: boolean; traces?: number; error?: string };
 
 declare global {
   interface Window {
@@ -31,6 +32,7 @@ declare global {
       getTrace(i: number): Promise<TraceData>;
       getSection(o?: SectionOpts): Promise<SectionData>;
       convert(format: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
+      batchConvert(format: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string; results?: BatchRow[] } | null>;
       openSPS(): Promise<SpsSummary | null>;
       getSpsPoints(): Promise<SpsPoints>;
       spsQC(qc?: QCParamsUI): Promise<QCRow[]>;
@@ -119,6 +121,51 @@ async function onConvert() {
     setStatus('convStatus', 'Conversion failed: ' + errMsg(e), 'err');
   } finally {
     ($('convertBtn') as HTMLButtonElement).disabled = !(summary && summary.traceCount > 0);
+  }
+}
+
+async function batchConvert() {
+  setStatus('convStatus', 'Pick files to convert…');
+  try {
+    const r = await api.batchConvert(outFormat);
+    if (!r) {
+      setStatus('convStatus', '');
+      return;
+    }
+    renderBatchResults(r.results);
+    if (r.ok) setStatus('convStatus', '✓ Saved ' + r.path, 'ok');
+    else if (r.canceled) setStatus('convStatus', 'Converted — save cancelled');
+    else setStatus('convStatus', 'Batch failed: ' + (r.error || 'unknown'), 'err');
+  } catch (e) {
+    setStatus('convStatus', 'Batch failed: ' + errMsg(e), 'err');
+  }
+}
+
+function renderBatchResults(results?: BatchRow[]) {
+  const el = $('batchResults');
+  el.innerHTML = '';
+  if (!results || !results.length) return;
+  const ok = results.filter((r) => r.ok).length;
+  const hdr = document.createElement('div');
+  hdr.className = 'qc-hdr';
+  hdr.textContent = `${ok}/${results.length} converted`;
+  el.appendChild(hdr);
+  for (const r of results) {
+    const row = document.createElement('div');
+    row.className = 'qc-row ' + (r.ok ? 'ok' : 'error');
+    const sev = document.createElement('span');
+    sev.className = 'qc-sev';
+    sev.textContent = r.ok ? 'OK' : 'ERR';
+    const cat = document.createElement('span');
+    cat.className = 'qc-cat';
+    cat.textContent = r.ok ? `${r.traces ?? 0} tr` : '';
+    const msg = document.createElement('span');
+    msg.className = 'qc-msg';
+    msg.textContent = r.ok ? r.name : `${r.name}: ${r.error || 'failed'}`;
+    row.appendChild(sev);
+    row.appendChild(cat);
+    row.appendChild(msg);
+    el.appendChild(row);
   }
 }
 
@@ -468,6 +515,7 @@ function init() {
   $('openBtn').addEventListener('click', onOpen);
   $('openBtn2').addEventListener('click', onOpen);
   $('convertBtn').addEventListener('click', onConvert);
+  $('batchBtn').addEventListener('click', () => void batchConvert());
   $('fmtChips').addEventListener('click', (e) => {
     const btn = (e.target as HTMLElement).closest('button[data-fmt]') as HTMLElement | null;
     if (!btn) return;

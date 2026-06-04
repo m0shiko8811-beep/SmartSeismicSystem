@@ -80,6 +80,9 @@ const api = {
   getSection: (opts?: SectionOpts): Promise<SectionData> => ipcRenderer.invoke('seisconv:getSection', opts ?? {}),
   /** Convert the currently-open file to `format` ('segy1' | 'segy0' | 'su') and save via a native dialog. */
   convert: (format: string): Promise<ConvertResult> => ipcRenderer.invoke('seisconv:convert', { format }),
+  /** Convert many files to `format` and save them as a single ZIP. */
+  batchConvert: (format: string): Promise<(ConvertResult & { results?: { name: string; ok: boolean; traces?: number; error?: string }[] }) | null> =>
+    ipcRenderer.invoke('seisconv:batchConvert', format),
   /** Open one or more SPS files (S/R/X), parse + merge them, return a summary. */
   openSPS: (): Promise<SPSSummary | null> => ipcRenderer.invoke('seisconv:openSPS'),
   /** Get source/receiver coordinate arrays for the survey plot. */

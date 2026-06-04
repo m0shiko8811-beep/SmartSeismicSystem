@@ -10,6 +10,7 @@
 import { parentPort } from 'node:worker_threads';
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
+import JSZip from 'jszip';
 import { applyAGC, detectSPSType, EPSG_DB, getWriter, mergeSPSData, normFactorPercentile, parseAny, parseSPSText, reprojectSPS, resampleLinear, runSPSQC, type AGCType, type ParsedFile, type QCParams, type SPSData } from '../core';
 
 if (!parentPort) throw new Error('parse.worker must run as a worker thread');
@@ -21,7 +22,7 @@ let currentSPSFiles: { name: string; text: string; type: 'S' | 'R' | 'X' | 'mixe
 
 interface Req {
   id: number;
-  type: 'open' | 'trace' | 'section' | 'convert' | 'openSPS' | 'spsPoints' | 'spsQC' | 'spsReproject';
+  type: 'open' | 'trace' | 'section' | 'convert' | 'openSPS' | 'spsPoints' | 'spsQC' | 'spsReproject' | 'batchConvert';
   path?: string;
   paths?: string[];
   qc?: QCParams;
@@ -46,6 +47,34 @@ function summarize(pf: ParsedFile) {
   };
 }
 
+/** Convert many files and bundle the results into a ZIP (async). */
+async function doBatchConvert(req: Req): Promise<void> {
+  const { id } = req;
+  try {
+    const writer = getWriter(req.format!);
+    if (!writer) {
+      port.postMessage({ id, ok: false, error: `unknown output format: ${req.format}` });
+      return;
+    }
+    const zip = new JSZip();
+    const results: { name: string; ok: boolean; traces?: number; error?: string }[] = [];
+    for (const p of req.paths ?? []) {
+      const name = basename(p);
+      try {
+        const pf = parseAny(new Uint8Array(readFileSync(p)), name);
+        zip.file(`${name.replace(/\.[^.]+$/, '')}.${writer.ext}`, writer.write(pf));
+        results.push({ name, ok: true, traces: pf.traceCount });
+      } catch (e) {
+        results.push({ name, ok: false, error: (e as Error).message });
+      }
+    }
+    const zipBytes = (await zip.generateAsync({ type: 'arraybuffer' })) as ArrayBuffer;
+    port.postMessage({ id, ok: true, zip: zipBytes, results }, [zipBytes]);
+  } catch (e) {
+    port.postMessage({ id, ok: false, error: (e as Error).message });
+  }
+}
+
 port.on('message', (req: Req) => {
   const { id, type } = req;
   try {
@@ -53,6 +82,11 @@ port.on('message', (req: Req) => {
       const bytes = new Uint8Array(readFileSync(req.path!));
       current = parseAny(bytes, basename(req.path!));
       port.postMessage({ id, ok: true, summary: summarize(current) });
+      return;
+    }
+
+    if (type === 'batchConvert') {
+      void doBatchConvert(req);
       return;
     }
 

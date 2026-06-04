@@ -115,6 +115,18 @@ ipcMain.handle('seisconv:convert', async (_e, args: { format: string }) => {
   return { ok: true, path: save.filePath };
 });
 
+ipcMain.handle('seisconv:batchConvert', async (_e, format: string) => {
+  if (!win) return null;
+  const res = await dialog.showOpenDialog(win, { properties: ['openFile', 'multiSelections'], filters: SEISMIC_FILTERS });
+  if (res.canceled || !res.filePaths.length) return null;
+  const r = await callWorker<{ ok: boolean; zip?: ArrayBuffer; results?: unknown[]; error?: string }>({ type: 'batchConvert', paths: res.filePaths, format });
+  if (!r.ok || !r.zip) return { ok: false, error: r.error ?? 'batch failed' };
+  const save = await dialog.showSaveDialog(win, { defaultPath: `converted_${format}.zip`, filters: [{ name: 'ZIP archive', extensions: ['zip'] }] });
+  if (save.canceled || !save.filePath) return { ok: false, canceled: true, results: r.results };
+  await writeFile(save.filePath, Buffer.from(r.zip));
+  return { ok: true, path: save.filePath, results: r.results };
+});
+
 ipcMain.handle('seisconv:openSPS', async () => {
   if (!win) return null;
   const res = await dialog.showOpenDialog(win, {
