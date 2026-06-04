@@ -18,6 +18,9 @@ export { parseSU, writeSU } from './formats/su';
 export * from './coords';
 export * from './formats/registry';
 export * from './dsp/interpolate';
+export * from './dsp/agc';
+export * from './render/colormaps';
+export * from './render/model';
 
 /**
  * Detect and parse any supported seismic file. Dispatches through the format

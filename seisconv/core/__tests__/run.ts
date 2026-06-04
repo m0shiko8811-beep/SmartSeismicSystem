@@ -25,6 +25,12 @@ import {
   listWriters,
   resampleLinear,
   resampleToInterval,
+  applyAGC,
+  getColor,
+  colorSeismic,
+  maxAbs,
+  normFactorPercentile,
+  decimateMinMax,
 } from '../index';
 import { bytesToBase64, base64ToBytes } from '../base64';
 
@@ -244,6 +250,32 @@ test('resampleToInterval rescales trace sample count when interval changes', () 
   assert.equal(rs.bh.sampleInt, 1000);
   assert.equal(rs.traces[0].nSamples, 51);
   assert.ok(rs.traces[0].samples != null);
+});
+
+// ── Render engine (N1) ────────────────────────────────────────────────────────
+console.log('\n[render engine]');
+test('AGC normalizes a constant-amplitude trace to ~1', () => {
+  const s = new Float32Array(200).fill(5);
+  const rms = applyAGC(s, 50, 1000, 'rms');
+  assert.equal(rms.length, 200);
+  assert.ok(Math.abs(rms[100] - 1) < 1e-6, `rms mid ${rms[100]}`);
+  assert.ok(Number.isFinite(rms[0]) && Number.isFinite(rms[199]));
+  assert.ok(Math.abs(applyAGC(s, 50, 1000, 'mean')[100] - 1) < 1e-6);
+});
+test('color maps hit known anchors', () => {
+  assert.deepEqual(colorSeismic(0), [255, 255, 255]);
+  assert.deepEqual(colorSeismic(1), [255, 0, 0]);
+  assert.deepEqual(colorSeismic(-1), [0, 0, 255]);
+  assert.deepEqual(getColor(0, 'gray'), [128, 128, 128]);
+  assert.deepEqual(getColor(5, 'amber'), [255, 140, 0]);
+});
+test('maxAbs / percentile / decimate behave', () => {
+  const s = Float32Array.from([-3, 1, 2, -1]);
+  assert.equal(maxAbs(s), 3);
+  assert.ok(normFactorPercentile(s, 0.95) > 0);
+  const big = new Float32Array(1000);
+  for (let i = 0; i < 1000; i++) big[i] = Math.sin(i / 10);
+  assert.ok(decimateMinMax(big, 100).length <= 100);
 });
 
 // ── Summary ───────────────────────────────────────────────────────────────────
