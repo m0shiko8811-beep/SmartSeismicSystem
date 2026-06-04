@@ -31,6 +31,8 @@ import {
   maxAbs,
   normFactorPercentile,
   decimateMinMax,
+  parseSPSText,
+  detectSPSType,
 } from '../index';
 import { bytesToBase64, base64ToBytes } from '../base64';
 
@@ -276,6 +278,34 @@ test('maxAbs / percentile / decimate behave', () => {
   const big = new Float32Array(1000);
   for (let i = 0; i < 1000; i++) big[i] = Math.sin(i / 10);
   assert.ok(decimateMinMax(big, 100).length <= 100);
+});
+
+// ── SPS (N5) ──────────────────────────────────────────────────────────────────
+console.log('\n[sps]');
+test('SPS parser reads S/R records, headers, and ITM projection', () => {
+  const put = (line: string, start: number, txt: string) => {
+    const padded = line.padEnd(Math.max(line.length, start + txt.length), ' ');
+    return padded.slice(0, start) + txt + padded.slice(start + txt.length);
+  };
+  let h = 'H18'.padEnd(80, ' ');
+  h = put(h, 32, 'ITM');
+  let s = put('S'.padEnd(80, ' '), 1, '101');
+  s = put(s, 11, '200'); s = put(s, 23, '1');
+  s = put(s, 46, '660000.0'); s = put(s, 55, '3550000.0'); s = put(s, 65, '120.0');
+  let r = put('R'.padEnd(80, ' '), 1, '500');
+  r = put(r, 11, '10'); r = put(r, 23, '1');
+  r = put(r, 46, '661000.0'); r = put(r, 55, '3551000.0'); r = put(r, 65, '95.0');
+  const sps = parseSPSText([h, s, r].join('\n'));
+  assert.equal(sps.sources.length, 1, `sources ${sps.sources.length}`);
+  assert.equal(sps.receivers.length, 1, `receivers ${sps.receivers.length}`);
+  assert.equal(sps.layout, 'SPS2.1');
+  assert.ok(Math.abs(sps.sources[0].easting - 660000) < 1, `E ${sps.sources[0].easting}`);
+  assert.ok(Math.abs(sps.receivers[0].northing - 3551000) < 1, `N ${sps.receivers[0].northing}`);
+  assert.equal(sps.projection?.subtype, 'TM');
+  const lat0 = sps.projection?.latOrigin ?? 0;
+  assert.ok(lat0 > 31 && lat0 < 32, `latOrigin ${lat0}`);
+  assert.equal(detectSPSType('survey.s01'), 'S');
+  assert.equal(detectSPSType('survey.r'), 'R');
 });
 
 // ── Summary ───────────────────────────────────────────────────────────────────

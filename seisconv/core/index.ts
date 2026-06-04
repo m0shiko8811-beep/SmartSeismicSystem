@@ -21,6 +21,7 @@ export * from './dsp/interpolate';
 export * from './dsp/agc';
 export * from './render/colormaps';
 export * from './render/model';
+export * from './sps/parse';
 
 /**
  * Detect and parse any supported seismic file. Dispatches through the format
