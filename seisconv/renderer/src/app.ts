@@ -37,6 +37,7 @@ declare global {
       batchConvert(format: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string; results?: BatchRow[] } | null>;
       openSPS(): Promise<SpsSummary | null>;
       getSpsPoints(): Promise<SpsPoints>;
+      spsLatLon(): Promise<{ srcLon: Float32Array; srcLat: Float32Array; rcvLon: Float32Array; rcvLat: Float32Array }>;
       spsQC(qc?: QCParamsUI): Promise<QCRow[]>;
       spsReproject(code: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
       semblance(opts: { velMin: number; velMax: number; velStep: number }): Promise<SemblanceData>;
@@ -53,6 +54,8 @@ let outFormat = 'segy1';
 let lastSection: SectionData | null = null;
 let spsSummary: SpsSummary | null = null;
 let spsPts: SpsPoints | null = null;
+let spsGeoPts: SpsPoints | null = null;
+let spsGeoMode = false;
 let velResult: SemblanceData | null = null;
 let velPicks: VelPick[] = [];
 
@@ -366,6 +369,9 @@ async function loadSPS() {
     }
     spsSummary = s;
     spsPts = await api.getSpsPoints();
+    spsGeoPts = null;
+    spsGeoMode = false;
+    ($('spsGeo') as HTMLInputElement).checked = false;
     $('spsLabel').textContent = spsLabel(s);
     drawSurveyPlot($('spsCanvas') as HTMLCanvasElement);
   } catch (e) {
@@ -395,7 +401,8 @@ function drawSurveyPlot(cv: HTMLCanvasElement) {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.fillStyle = '#0d1f33';
   ctx.fillRect(0, 0, W, H);
-  if (!spsPts) return;
+  const pts = spsGeoMode && spsGeoPts ? spsGeoPts : spsPts;
+  if (!pts) return;
   const showS = ($('spsShowS') as HTMLInputElement).checked;
   const showR = ($('spsShowR') as HTMLInputElement).checked;
 
@@ -411,8 +418,8 @@ function drawSurveyPlot(cv: HTMLCanvasElement) {
       if (n > maxN) maxN = n;
     }
   };
-  if (showS) acc(spsPts.srcE, spsPts.srcN);
-  if (showR) acc(spsPts.rcvE, spsPts.rcvN);
+  if (showS) acc(pts.srcE, pts.srcN);
+  if (showR) acc(pts.rcvE, pts.rcvN);
   if (!count) return;
   if (maxE <= minE) maxE = minE + 1;
   if (maxN <= minN) maxN = minN + 1;
@@ -434,15 +441,17 @@ function drawSurveyPlot(cv: HTMLCanvasElement) {
       ctx.fillRect(X(e) - 1, Yf(n) - 1, 2.2, 2.2);
     }
   };
-  if (showR) plot(spsPts.rcvE, spsPts.rcvN, '#3aa0e0');
-  if (showS) plot(spsPts.srcE, spsPts.srcN, '#ff5d6c');
+  if (showR) plot(pts.rcvE, pts.rcvN, '#3aa0e0');
+  if (showS) plot(pts.srcE, pts.srcN, '#ff5d6c');
 
   ctx.strokeStyle = '#214564';
   ctx.lineWidth = 1;
   ctx.strokeRect(ML, MT, pw, ph);
   ctx.fillStyle = '#7e93ac';
   ctx.font = '10px Consolas, monospace';
-  ctx.fillText(`E ${minE.toFixed(0)}–${maxE.toFixed(0)} · N ${minN.toFixed(0)}–${maxN.toFixed(0)}  (● src  ● rcv)`, ML + 4, H - 8);
+  const geo = spsGeoMode && spsGeoPts != null;
+  const pr = geo ? 4 : 0;
+  ctx.fillText(`${geo ? 'lon' : 'E'} ${minE.toFixed(pr)}–${maxE.toFixed(pr)} · ${geo ? 'lat' : 'N'} ${minN.toFixed(pr)}–${maxN.toFixed(pr)}  (● src  ● rcv)`, ML + 4, H - 8);
 }
 
 function numVal(id: string): number {
@@ -650,6 +659,21 @@ async function exportPicks() {
   }
 }
 
+async function toggleGeo() {
+  spsGeoMode = ($('spsGeo') as HTMLInputElement).checked;
+  if (spsGeoMode && spsSummary && !spsGeoPts) {
+    try {
+      const g = await api.spsLatLon();
+      spsGeoPts = { srcE: g.srcLon, srcN: g.srcLat, rcvE: g.rcvLon, rcvN: g.rcvLat };
+    } catch (e) {
+      $('spsLabel').textContent = 'Geographic view failed: ' + errMsg(e);
+      spsGeoMode = false;
+      ($('spsGeo') as HTMLInputElement).checked = false;
+    }
+  }
+  drawSurveyPlot($('spsCanvas') as HTMLCanvasElement);
+}
+
 function errMsg(e: unknown): string {
   return e && typeof e === 'object' && 'message' in e ? String((e as { message: unknown }).message) : String(e);
 }
@@ -686,6 +710,7 @@ function init() {
   $('spsLoadBtn').addEventListener('click', () => void loadSPS());
   ($('spsShowS') as HTMLInputElement).addEventListener('change', () => { if (spsPts) drawSurveyPlot($('spsCanvas') as HTMLCanvasElement); });
   ($('spsShowR') as HTMLInputElement).addEventListener('change', () => { if (spsPts) drawSurveyPlot($('spsCanvas') as HTMLCanvasElement); });
+  ($('spsGeo') as HTMLInputElement).addEventListener('change', () => void toggleGeo());
   $('spsQcBtn').addEventListener('click', () => void runQC());
   const epsgSel = $('epsgSelect') as HTMLSelectElement;
   for (const c of EPSG_DB) {

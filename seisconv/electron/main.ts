@@ -148,6 +148,12 @@ ipcMain.handle('seisconv:getSpsPoints', async () => {
   return { srcE: r.srcE, srcN: r.srcN, rcvE: r.rcvE, rcvN: r.rcvN };
 });
 
+ipcMain.handle('seisconv:spsLatLon', async () => {
+  const r = await callWorker<{ ok: boolean; error?: string } & Record<string, any>>({ type: 'spsLatLon' });
+  if (!r.ok) throw new Error(r.error || 'sps lat/lon failed');
+  return { srcLon: r.srcLon, srcLat: r.srcLat, rcvLon: r.rcvLon, rcvLat: r.rcvLat };
+});
+
 ipcMain.handle('seisconv:spsQC', async (_e, qc: Record<string, number>) => {
   const r = await callWorker<{ ok: boolean; results?: unknown[]; error?: string }>({ type: 'spsQC', qc });
   if (!r.ok) throw new Error(r.error || 'QC failed');

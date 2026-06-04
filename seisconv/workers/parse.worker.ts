@@ -11,7 +11,7 @@ import { parentPort } from 'node:worker_threads';
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import JSZip from 'jszip';
-import { applyAGC, computeSemblance, detectSPSType, EPSG_DB, getWriter, mergeSPSData, normFactorPercentile, parseAny, parseSPSText, reprojectSPS, resampleLinear, runSPSQC, type AGCType, type ParsedFile, type QCParams, type SPSData } from '../core';
+import { applyAGC, computeSemblance, detectSPSType, EPSG_DB, getWriter, mergeSPSData, normFactorPercentile, parseAny, parseSPSText, projToLatLon, reprojectSPS, resampleLinear, runSPSQC, type AGCType, type ParsedFile, type QCParams, type SPSData, type SPSPoint } from '../core';
 
 if (!parentPort) throw new Error('parse.worker must run as a worker thread');
 const port = parentPort;
@@ -22,7 +22,7 @@ let currentSPSFiles: { name: string; text: string; type: 'S' | 'R' | 'X' | 'mixe
 
 interface Req {
   id: number;
-  type: 'open' | 'trace' | 'section' | 'convert' | 'openSPS' | 'spsPoints' | 'spsQC' | 'spsReproject' | 'batchConvert' | 'semblance';
+  type: 'open' | 'trace' | 'section' | 'convert' | 'openSPS' | 'spsPoints' | 'spsQC' | 'spsReproject' | 'batchConvert' | 'semblance' | 'spsLatLon';
   path?: string;
   paths?: string[];
   qc?: QCParams;
@@ -168,6 +168,33 @@ port.on('message', (req: Req) => {
         text: reprojectSPS(f.text.split('\n'), tgt, f.type === 'X' ? 'X' : f.type === 'R' ? 'R' : 'S', currentSPS!.projection!),
       }));
       port.postMessage({ id, ok: true, files });
+      return;
+    }
+
+    if (type === 'spsLatLon') {
+      if (!currentSPS || !currentSPS.projection) {
+        port.postMessage({ id, ok: false, error: 'no SPS / source projection' });
+        return;
+      }
+      const proj = currentSPS.projection as unknown as Parameters<typeof projToLatLon>[2];
+      const conv = (pts: SPSPoint[]) => {
+        const lon = new Float32Array(pts.length);
+        const lat = new Float32Array(pts.length);
+        for (let i = 0; i < pts.length; i++) {
+          if (isFinite(pts[i].easting) && isFinite(pts[i].northing)) {
+            const ll = projToLatLon(pts[i].easting, pts[i].northing, proj, 0);
+            lon[i] = ll.lon;
+            lat[i] = ll.lat;
+          } else {
+            lon[i] = NaN;
+            lat[i] = NaN;
+          }
+        }
+        return { lon, lat };
+      };
+      const s = conv(currentSPS.sources);
+      const r = conv(currentSPS.receivers);
+      port.postMessage({ id, ok: true, srcLon: s.lon, srcLat: s.lat, rcvLon: r.lon, rcvLat: r.lat }, [s.lon.buffer, s.lat.buffer, r.lon.buffer, r.lat.buffer]);
       return;
     }
 
