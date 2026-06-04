@@ -22,6 +22,7 @@ export * from './formats/registry';
 export * from './formats/tapeimage';
 export * from './dsp/interpolate';
 export * from './dsp/agc';
+export * from './dsp/semblance';
 export * from './render/colormaps';
 export * from './render/model';
 export * from './sps/parse';

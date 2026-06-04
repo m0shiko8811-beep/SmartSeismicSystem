@@ -36,6 +36,7 @@ import {
   runSPSQC,
   reprojectSPS,
   EPSG_DB,
+  computeSemblance,
 } from '../index';
 import { bytesToBase64, base64ToBytes } from '../base64';
 
@@ -343,6 +344,24 @@ test('SPS reprojection ITM→WGS84 lands near Israel', () => {
   const lat = parseFloat(txt.substring(55, 65));
   assert.ok(lon > 33 && lon < 37, `lon ${lon}`);
   assert.ok(lat > 29 && lat < 34, `lat ${lat}`);
+});
+
+test('semblance returns a valid [0,1] matrix with a coherent peak', () => {
+  const traces: any[] = [];
+  for (let k = 0; k < 12; k++) {
+    const s = new Float32Array(200);
+    s[100] = 1; // flat spike across the gather
+    traces.push({ hdr: {}, samples: s, nSamples: 200 });
+  }
+  const r = computeSemblance(traces, 2000, 4000, 6000, 500);
+  assert.equal(r.vels.length, 5);
+  assert.equal(r.semb.length, 5 * 200);
+  let max = 0;
+  for (const v of r.semb) {
+    assert.ok(Number.isFinite(v), 'no NaN in semblance');
+    if (v > max) max = v;
+  }
+  assert.ok(max > 0.5 && max <= 1.0001, `peak semblance ${max}`);
 });
 
 // ── Summary ───────────────────────────────────────────────────────────────────
