@@ -84,6 +84,7 @@
     <button class="tab" id="tab-trace">Trace Inspector</button>
     <button class="tab" id="tab-section">File Viewer</button>
     <button class="tab" id="tab-sps">SPS 2.1</button>
+    <button class="tab" id="tab-vel">Velocity</button>
   </nav>
 
   <main>
@@ -156,6 +157,19 @@
         <button class="btn sm" id="spsExportBtn">Export reprojected (ZIP)…</button>
         <span class="trace-label" id="spsExportStatus"></span>
       </div>
+    </section>
+
+    <section class="panel" id="panel-vel" style="display:none;">
+      <div class="sec-bar">
+        <label class="ctl-lbl">Vmin <input type="number" id="velMin" class="numin" value="1000"></label>
+        <label class="ctl-lbl">Vmax <input type="number" id="velMax" class="numin" value="5000"></label>
+        <label class="ctl-lbl">Step <input type="number" id="velStep" class="numin" value="50"></label>
+        <button class="btn sm" id="velComputeBtn">Compute semblance</button>
+        <button class="btn sm" id="velExportBtn">Export picks CSV…</button>
+        <span class="trace-label" id="velLabel">Open a file, then compute</span>
+      </div>
+      <canvas id="velCanvas" class="canvas"></canvas>
+      <div id="velPicks" class="qc-results"></div>
     </section>
   </main>
 

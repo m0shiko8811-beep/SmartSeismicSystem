@@ -168,6 +168,20 @@ ipcMain.handle('seisconv:spsReproject', async (_e, code: string) => {
   return { ok: true, path: save.filePath };
 });
 
+ipcMain.handle('seisconv:semblance', async (_e, opts: { velMin: number; velMax: number; velStep: number }) => {
+  const r = await callWorker<{ ok: boolean; error?: string } & Record<string, any>>({ type: 'semblance', ...opts });
+  if (!r.ok) throw new Error(r.error || 'semblance failed');
+  return { semb: r.semb, vels: r.vels, nT: r.nT, dt: r.dt, siUs: r.siUs, offNote: r.offNote };
+});
+
+ipcMain.handle('seisconv:exportText', async (_e, args: { name: string; text: string }) => {
+  if (!win) return { ok: false };
+  const save = await dialog.showSaveDialog(win, { defaultPath: args.name });
+  if (save.canceled || !save.filePath) return { ok: false, canceled: true };
+  await writeFile(save.filePath, args.text, 'utf8');
+  return { ok: true, path: save.filePath };
+});
+
 app.whenReady().then(() => {
   Menu.setApplicationMenu(Menu.buildFromTemplate([{ role: 'fileMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' }]));
   createWindow();

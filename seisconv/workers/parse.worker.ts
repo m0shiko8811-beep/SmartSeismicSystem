@@ -11,7 +11,7 @@ import { parentPort } from 'node:worker_threads';
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import JSZip from 'jszip';
-import { applyAGC, detectSPSType, EPSG_DB, getWriter, mergeSPSData, normFactorPercentile, parseAny, parseSPSText, reprojectSPS, resampleLinear, runSPSQC, type AGCType, type ParsedFile, type QCParams, type SPSData } from '../core';
+import { applyAGC, computeSemblance, detectSPSType, EPSG_DB, getWriter, mergeSPSData, normFactorPercentile, parseAny, parseSPSText, reprojectSPS, resampleLinear, runSPSQC, type AGCType, type ParsedFile, type QCParams, type SPSData } from '../core';
 
 if (!parentPort) throw new Error('parse.worker must run as a worker thread');
 const port = parentPort;
@@ -22,11 +22,14 @@ let currentSPSFiles: { name: string; text: string; type: 'S' | 'R' | 'X' | 'mixe
 
 interface Req {
   id: number;
-  type: 'open' | 'trace' | 'section' | 'convert' | 'openSPS' | 'spsPoints' | 'spsQC' | 'spsReproject' | 'batchConvert';
+  type: 'open' | 'trace' | 'section' | 'convert' | 'openSPS' | 'spsPoints' | 'spsQC' | 'spsReproject' | 'batchConvert' | 'semblance';
   path?: string;
   paths?: string[];
   qc?: QCParams;
   code?: string;
+  velMin?: number;
+  velMax?: number;
+  velStep?: number;
   index?: number;
   format?: string;
   maxTraces?: number;
@@ -237,6 +240,17 @@ port.on('message', (req: Req) => {
       const out = writer.write(current);
       const ab = out.buffer.slice(out.byteOffset, out.byteOffset + out.byteLength) as ArrayBuffer;
       port.postMessage({ id, ok: true, bytes: ab, ext: writer.ext }, [ab]);
+      return;
+    }
+
+    if (type === 'semblance') {
+      const gather = current.traces.filter((tr) => tr.samples).slice(0, 96);
+      if (!gather.length) {
+        port.postMessage({ id, ok: false, error: 'no traces with samples' });
+        return;
+      }
+      const sr = computeSemblance(gather, current.bh.sampleInt ?? 2000, req.velMin ?? 1000, req.velMax ?? 5000, req.velStep ?? 50);
+      port.postMessage({ id, ok: true, semb: sr.semb, vels: sr.vels, nT: sr.nT, dt: sr.dt, siUs: sr.siUs, offNote: sr.offNote }, [sr.semb.buffer as ArrayBuffer]);
       return;
     }
 

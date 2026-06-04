@@ -71,6 +71,15 @@ export interface QCRow {
   msg: string;
 }
 
+export interface SemblanceData {
+  semb: Float32Array;
+  vels: number[];
+  nT: number;
+  dt: number;
+  siUs: number;
+  offNote: string;
+}
+
 const api = {
   /** Open a file picker, parse the chosen file off-thread; returns a summary (or null if cancelled). */
   openAndParse: (): Promise<ParseSummary | null> => ipcRenderer.invoke('seisconv:openAndParse'),
@@ -92,6 +101,10 @@ const api = {
     ipcRenderer.invoke('seisconv:spsQC', qc ?? {}),
   /** Reproject the loaded SPS survey to an EPSG target and save a ZIP. */
   spsReproject: (code: string): Promise<ConvertResult> => ipcRenderer.invoke('seisconv:spsReproject', code),
+  /** Compute an NMO semblance panel for the open file. */
+  semblance: (opts: { velMin: number; velMax: number; velStep: number }): Promise<SemblanceData> => ipcRenderer.invoke('seisconv:semblance', opts),
+  /** Save arbitrary text (e.g. velocity picks CSV) via a native dialog. */
+  exportText: (name: string, text: string): Promise<ConvertResult> => ipcRenderer.invoke('seisconv:exportText', { name, text }),
 };
 
 export type SeisconvAPI = typeof api;

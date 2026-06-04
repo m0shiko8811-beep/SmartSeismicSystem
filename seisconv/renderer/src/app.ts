@@ -24,6 +24,8 @@ type SpsPoints = { srcE: Float32Array; srcN: Float32Array; rcvE: Float32Array; r
 type QCParamsUI = { srcInt?: number; rcvInt?: number; tol?: number; maxOff?: number };
 type QCRow = { sev: string; cat: string; msg: string };
 type BatchRow = { name: string; ok: boolean; traces?: number; error?: string };
+type SemblanceData = { semb: Float32Array; vels: number[]; nT: number; dt: number; siUs: number; offNote: string };
+type VelPick = { v: number; tMs: number };
 
 declare global {
   interface Window {
@@ -37,6 +39,8 @@ declare global {
       getSpsPoints(): Promise<SpsPoints>;
       spsQC(qc?: QCParamsUI): Promise<QCRow[]>;
       spsReproject(code: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
+      semblance(opts: { velMin: number; velMax: number; velStep: number }): Promise<SemblanceData>;
+      exportText(name: string, text: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
     };
   }
 }
@@ -49,8 +53,10 @@ let outFormat = 'segy1';
 let lastSection: SectionData | null = null;
 let spsSummary: SpsSummary | null = null;
 let spsPts: SpsPoints | null = null;
+let velResult: SemblanceData | null = null;
+let velPicks: VelPick[] = [];
 
-const TABS = ['conv', 'trace', 'section', 'sps'] as const;
+const TABS = ['conv', 'trace', 'section', 'sps', 'vel'] as const;
 type Tab = (typeof TABS)[number];
 
 function switchTab(tab: Tab) {
@@ -61,6 +67,7 @@ function switchTab(tab: Tab) {
   if (tab === 'trace' && summary) void refreshTrace();
   if (tab === 'section' && summary) void refreshSection();
   if (tab === 'sps' && spsSummary) void refreshSpsPlot();
+  if (tab === 'vel' && velResult) drawVelocity();
 }
 
 function fmtRate(si: number | null) {
@@ -505,6 +512,144 @@ async function exportReprojected() {
   }
 }
 
+// ── Velocity / semblance ──
+function velGeom(cv: HTMLCanvasElement) {
+  return { W: cv.clientWidth || 900, H: cv.clientHeight || 460, ML: 56, MR: 12, MT: 12, MB: 28 };
+}
+
+async function computeVelocity() {
+  if (!summary || summary.traceCount === 0) {
+    $('velLabel').textContent = 'Open a file first.';
+    return;
+  }
+  $('velLabel').textContent = 'Computing…';
+  try {
+    velResult = await api.semblance({ velMin: numVal('velMin') || 1000, velMax: numVal('velMax') || 5000, velStep: numVal('velStep') || 50 });
+    $('velLabel').textContent = `${velResult.vels.length} velocities · ${velResult.offNote}`;
+    drawVelocity();
+  } catch (e) {
+    $('velLabel').textContent = 'Failed: ' + errMsg(e);
+  }
+}
+
+function drawVelocity() {
+  const cv = $('velCanvas') as HTMLCanvasElement;
+  const dpr = window.devicePixelRatio || 1;
+  const { W, H, ML, MR, MT, MB } = velGeom(cv);
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  const ctx = cv.getContext('2d')!;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#0d1f33';
+  ctx.fillRect(0, 0, W, H);
+  if (!velResult) return;
+  const { semb, vels, nT, dt } = velResult;
+  const nV = vels.length;
+  const pw = W - ML - MR;
+  const ph = H - MT - MB;
+
+  const off = document.createElement('canvas');
+  off.width = nV;
+  off.height = nT;
+  const octx = off.getContext('2d')!;
+  const img = octx.createImageData(nV, nT);
+  for (let vi = 0; vi < nV; vi++) {
+    for (let ti = 0; ti < nT; ti++) {
+      const [r, g, b] = getColor(Math.max(0, Math.min(1, semb[vi * nT + ti])) * 2 - 1, 'viridis');
+      const idx = (ti * nV + vi) * 4;
+      img.data[idx] = r;
+      img.data[idx + 1] = g;
+      img.data[idx + 2] = b;
+      img.data[idx + 3] = 255;
+    }
+  }
+  octx.putImageData(img, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(off, ML, MT, pw, ph);
+
+  const velMin = vels[0];
+  const velMax = vels[nV - 1];
+  const totalMs = nT * dt * 1000;
+  ctx.strokeStyle = '#ff5d6c';
+  ctx.lineWidth = 1.5;
+  for (const p of velPicks) {
+    const x = ML + ((p.v - velMin) / (velMax - velMin)) * pw;
+    const y = MT + (p.tMs / totalMs) * ph;
+    ctx.beginPath();
+    ctx.arc(x, y, 4, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.fillStyle = '#7e93ac';
+  ctx.font = '10px Consolas, monospace';
+  ctx.fillText(`${velMin}–${velMax} m/s  (click to pick)`, ML, H - 8);
+  for (let k = 0; k <= 4; k++) {
+    const y = MT + (ph * k) / 4;
+    ctx.fillText(((totalMs * k) / 4).toFixed(0) + ' ms', 4, y + 3);
+  }
+}
+
+function onVelClick(e: MouseEvent) {
+  if (!velResult) return;
+  const cv = $('velCanvas') as HTMLCanvasElement;
+  const rect = cv.getBoundingClientRect();
+  const { ML, MR, MT, MB } = velGeom(cv);
+  const W = cv.clientWidth;
+  const H = cv.clientHeight;
+  const pw = W - ML - MR;
+  const ph = H - MT - MB;
+  const px = e.clientX - rect.left;
+  const py = e.clientY - rect.top;
+  if (px < ML || px > ML + pw || py < MT || py > MT + ph) return;
+  const { vels, nT, dt } = velResult;
+  const velMin = vels[0];
+  const velMax = vels[vels.length - 1];
+  const totalMs = nT * dt * 1000;
+  const v = Math.round(velMin + ((px - ML) / pw) * (velMax - velMin));
+  const tMs = Math.round(((py - MT) / ph) * totalMs);
+  const near = velPicks.findIndex((p) => {
+    const x = ML + ((p.v - velMin) / (velMax - velMin)) * pw;
+    const y = MT + (p.tMs / totalMs) * ph;
+    return Math.hypot(px - x, py - y) < 12;
+  });
+  if (near >= 0) velPicks.splice(near, 1);
+  else velPicks.push({ v, tMs });
+  drawVelocity();
+  renderVelPicks();
+}
+
+function renderVelPicks() {
+  const el = $('velPicks');
+  el.innerHTML = '';
+  for (const p of velPicks.slice().sort((a, b) => a.tMs - b.tMs)) {
+    const row = document.createElement('div');
+    row.className = 'qc-row ok';
+    const a = document.createElement('span');
+    a.className = 'qc-sev';
+    a.textContent = p.tMs + ' ms';
+    const b = document.createElement('span');
+    b.className = 'qc-cat';
+    b.textContent = p.v + ' m/s';
+    row.appendChild(a);
+    row.appendChild(b);
+    row.appendChild(document.createElement('span'));
+    el.appendChild(row);
+  }
+}
+
+async function exportPicks() {
+  if (!velPicks.length) {
+    $('velLabel').textContent = 'No picks to export.';
+    return;
+  }
+  const csv = 't_ms,v_ms\n' + velPicks.slice().sort((a, b) => a.tMs - b.tMs).map((p) => `${p.tMs},${p.v}`).join('\n') + '\n';
+  try {
+    const r = await api.exportText('velocity_picks.csv', csv);
+    $('velLabel').textContent = r.ok ? '✓ Saved ' + r.path : r.canceled ? '' : 'Failed: ' + (r.error || 'unknown');
+  } catch (e) {
+    $('velLabel').textContent = 'Failed: ' + errMsg(e);
+  }
+}
+
 function errMsg(e: unknown): string {
   return e && typeof e === 'object' && 'message' in e ? String((e as { message: unknown }).message) : String(e);
 }
@@ -551,6 +696,9 @@ function init() {
   }
   epsgSel.value = 'EPSG:4326';
   $('spsExportBtn').addEventListener('click', () => void exportReprojected());
+  $('velComputeBtn').addEventListener('click', () => void computeVelocity());
+  $('velExportBtn').addEventListener('click', () => void exportPicks());
+  ($('velCanvas') as HTMLCanvasElement).addEventListener('click', onVelClick);
   switchTab('conv');
 }
 
