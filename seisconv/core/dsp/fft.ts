@@ -73,8 +73,10 @@ export function amplitudeSpectrum(samples: Float32Array, siUs: number): Spectrum
   const N = nextPow2(Math.max(2, n0));
   const re = new Float64Array(N);
   const im = new Float64Array(N);
+  let winSum = 0;
   for (let i = 0; i < n0; i++) {
     const w = n0 > 1 ? 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (n0 - 1)) : 1; // Hann
+    winSum += w;
     re[i] = samples[i] * w;
   }
   fft(re, im, false);
@@ -82,10 +84,12 @@ export function amplitudeSpectrum(samples: Float32Array, siUs: number): Spectrum
   const fs = siUs > 0 ? 1e6 / siUs : 1; // sample rate (Hz)
   const amp = new Float32Array(half);
   const freqs = new Float32Array(half);
-  const denom = n0 || 1;
+  // Normalize by the window's coherent gain (sum of window) so a unit-amplitude
+  // tone reads its true amplitude — not by n0 (which under-reads ~2x for Hann).
+  const norm = winSum > 0 ? winSum : 1;
   for (let k = 0; k < half; k++) {
     const mag = Math.sqrt(re[k] * re[k] + im[k] * im[k]);
-    amp[k] = (k === 0 ? mag : 2 * mag) / denom; // single-sided, window-length normalized
+    amp[k] = (k === 0 ? mag : 2 * mag) / norm; // single-sided amplitude
     freqs[k] = (k * fs) / N;
   }
   return { freqs, amp, nyquist: fs / 2 };

@@ -388,12 +388,13 @@ test('fft∘ifft round-trips a random signal (< 1e-9)', () => {
   assert.ok(maxErr < 1e-9, `round-trip error ${maxErr}`);
 });
 
-test('amplitudeSpectrum peaks at the input frequency', () => {
+test('amplitudeSpectrum peaks at the input frequency with correct amplitude', () => {
   const N = 512;
   const fs = 500; // Hz → siUs = 2000
-  const f0 = 60; // Hz
+  const f0 = 62.5; // Hz — lands exactly on bin 64 (fs/N = 0.9766 Hz)
+  const amp0 = 1; // unit-amplitude cosine
   const s = new Float32Array(N);
-  for (let i = 0; i < N; i++) s[i] = Math.cos((2 * Math.PI * f0 * i) / fs);
+  for (let i = 0; i < N; i++) s[i] = amp0 * Math.cos((2 * Math.PI * f0 * i) / fs);
   const sp = amplitudeSpectrum(s, 2000);
   assert.equal(sp.freqs.length, N / 2);
   assert.ok(Math.abs(sp.nyquist - 250) < 1e-6, `nyquist ${sp.nyquist}`);
@@ -403,7 +404,8 @@ test('amplitudeSpectrum peaks at the input frequency', () => {
     if (sp.amp[k] > max) { max = sp.amp[k]; peakK = k; }
   }
   const binHz = fs / N;
-  assert.ok(Math.abs(sp.freqs[peakK] - f0) < 2 * binHz, `peak at ${sp.freqs[peakK]} Hz, expected ~${f0}`);
+  assert.ok(Math.abs(sp.freqs[peakK] - f0) < binHz, `peak at ${sp.freqs[peakK]} Hz, expected ${f0}`);
+  assert.ok(Math.abs(max - amp0) < 0.05, `peak amplitude ${max}, expected ~${amp0}`);
   console.log(`      peak ${sp.freqs[peakK].toFixed(1)} Hz (amp ${max.toFixed(3)})`);
 });
 

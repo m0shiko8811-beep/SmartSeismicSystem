@@ -297,7 +297,7 @@ function drawSpectrum(cv: HTMLCanvasElement, t: TraceData) {
   for (let k = 1; k < sp.amp.length; k++) if (sp.amp[k] > amax) amax = sp.amp[k];
   if (amax <= 0) amax = 1;
   const Xf = (f: number) => ML + (f / fmax) * pw;
-  const Yf = (a: number) => MT + ph - (a / amax) * ph;
+  const Yf = (a: number) => { const y = MT + ph - (a / amax) * ph; return y < MT ? MT : y; };
 
   // frequency gridlines + labels
   ctx.font = '10px Consolas, monospace'; ctx.lineWidth = 1;
@@ -320,7 +320,7 @@ function drawSpectrum(cv: HTMLCanvasElement, t: TraceData) {
   ctx.beginPath();
   ctx.moveTo(Xf(0), Yf(0));
   for (let k = 0; k < sp.amp.length; k++) ctx.lineTo(Xf(sp.freqs[k]), Yf(sp.amp[k]));
-  ctx.lineTo(Xf(fmax), Yf(0));
+  ctx.lineTo(Xf(sp.freqs[sp.freqs.length - 1]), Yf(0));
   ctx.closePath();
   const fill = ctx.createLinearGradient(0, MT, 0, MT + ph);
   fill.addColorStop(0, 'rgba(52,219,208,0.42)'); fill.addColorStop(1, 'rgba(52,219,208,0.04)');
@@ -478,6 +478,16 @@ async function loadSPS() {
 /** Fetch geometry for the active view (projected E/N for grid, WGS84 lon/lat for map) and render. */
 async function refreshSps() {
   if (!spsSummary) return;
+  // Geographic (map) view needs a projected CRS in the SPS header; if a freshly
+  // loaded survey lacks one while we're on the map, fall back to the grid.
+  if (spsView === 'map' && !spsSummary.projection) {
+    spsView = 'grid';
+    $('viewGrid').classList.add('on');
+    $('viewMap').classList.remove('on');
+    ($('spsCanvas') as HTMLElement).style.display = 'block';
+    $('spsMap').style.display = 'none';
+    $('spsLabel').textContent = 'Real map needs a projected CRS in the SPS header — showing Survey grid.';
+  }
   const wantGeo = spsView === 'map';
   if (!spsGeom || spsGeom.geo !== wantGeo) {
     try {
@@ -494,6 +504,10 @@ async function refreshSps() {
 
 function setView(v: 'grid' | 'map') {
   if (spsView === v) return;
+  if (v === 'map' && (!spsSummary || !spsSummary.projection)) {
+    $('spsLabel').textContent = 'Real map needs a projected CRS in the SPS header — staying on Survey grid.';
+    return;
+  }
   spsView = v;
   $('viewGrid').classList.toggle('on', v === 'grid');
   $('viewMap').classList.toggle('on', v === 'map');
@@ -657,6 +671,12 @@ function gridInteractions() {
     }
   });
   cv.addEventListener('dblclick', () => { if (spsView === 'grid' && spsGeom) { gridFit(); drawSurveyGrid(); } });
+  // Keep the active SPS view correct after a window resize (the cached grid
+  // transform would otherwise go stale; Leaflet needs invalidateSize).
+  window.addEventListener('resize', () => {
+    if (spsView === 'grid' && spsGeom) { gridFit(); drawSurveyGrid(); }
+    else if (spsView === 'map' && leafletMap) leafletMap.invalidateSize();
+  });
 }
 
 function hoverGrid(e: MouseEvent) {
@@ -704,8 +724,12 @@ function updateMap() {
   if (leafletLayers) { map.removeLayer(leafletLayers.src); map.removeLayer(leafletLayers.rcv); leafletLayers = null; }
   const showS = ($('spsShowS') as HTMLInputElement).checked;
   const showR = ($('spsShowR') as HTMLInputElement).checked;
+  // Lines always draw in full; station markers are decimated so a 50k-point
+  // survey can't flood the map renderer (each marker is a canvas circle + popup).
+  const MAX_MARKERS = 6000;
   const build = (g: SpsLines, col: string) => {
     const grp = L.layerGroup();
+    const stride = Math.max(1, Math.ceil(g.x.length / MAX_MARKERS));
     let cur = -1; let coords: [number, number][] = [];
     const flush = () => { if (coords.length > 1) L.polyline(coords, { color: col, weight: 1, opacity: 0.5 }).addTo(grp); coords = []; };
     for (let i = 0; i < g.x.length; i++) {
@@ -713,9 +737,11 @@ function updateMap() {
       if (!isFinite(lon) || !isFinite(lat)) { flush(); cur = -1; continue; }
       if (g.line[i] !== cur) { flush(); cur = g.line[i]; }
       coords.push([lat, lon]);
-      L.circleMarker([lat, lon], { radius: 2.5, color: col, weight: 1, fillColor: col, fillOpacity: 0.9 })
-        .bindPopup(`Line ${g.names[g.line[i]]} · pt ${g.pt[i]}<br>${lat.toFixed(5)}, ${lon.toFixed(5)}`)
-        .addTo(grp);
+      if (i % stride === 0) {
+        L.circleMarker([lat, lon], { radius: 2.5, color: col, weight: 1, fillColor: col, fillOpacity: 0.9 })
+          .bindPopup(`Line ${g.names[g.line[i]]} · pt ${g.pt[i]}<br>${lat.toFixed(5)}, ${lon.toFixed(5)}`)
+          .addTo(grp);
+      }
     }
     flush();
     return grp;
