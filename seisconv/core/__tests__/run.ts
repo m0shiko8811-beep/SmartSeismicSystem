@@ -34,6 +34,8 @@ import {
   parseSPSText,
   detectSPSType,
   runSPSQC,
+  reprojectSPS,
+  EPSG_DB,
 } from '../index';
 import { bytesToBase64, base64ToBytes } from '../base64';
 
@@ -321,6 +323,26 @@ test('SPS QC flags a duplicate source', () => {
   };
   const qc = runSPSQC(parseSPSText([mk(), mk()].join('\n')), {});
   assert.ok(qc.some((r) => r.cat === 'Duplicate' && r.sev === 'error'), 'duplicate not flagged');
+});
+test('SPS reprojection ITM→WGS84 lands near Israel', () => {
+  const put = (line: string, start: number, txt: string) => {
+    const padded = line.padEnd(Math.max(line.length, start + txt.length), ' ');
+    return padded.slice(0, start) + txt + padded.slice(start + txt.length);
+  };
+  const src: any = {
+    subtype: 'TM', a: 6378137, invF: 298.257222101, centralMeridian: 35.20451694444, latOrigin: 31.73439361111,
+    scaleFactor: 1.0000067, falseEasting: 219529.584, falseNorthing: 626907.39,
+    helmert: { dx: 23.772, dy: 17.49, dz: 17.859, rx: -0.313, ry: -1.853, rz: 1.673, ds: 0 },
+  };
+  let s = put('S'.padEnd(80, ' '), 1, '101');
+  s = put(s, 46, '179622.00');
+  s = put(s, 55, '665896.00');
+  const wgs = EPSG_DB.find((c) => c.code === 'EPSG:4326')!;
+  const txt = reprojectSPS([s], wgs, 'S', src);
+  const lon = parseFloat(txt.substring(46, 55));
+  const lat = parseFloat(txt.substring(55, 65));
+  assert.ok(lon > 33 && lon < 37, `lon ${lon}`);
+  assert.ok(lat > 29 && lat < 34, `lat ${lat}`);
 });
 
 // ── Summary ───────────────────────────────────────────────────────────────────

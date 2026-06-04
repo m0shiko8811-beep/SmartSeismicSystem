@@ -23,6 +23,7 @@ export * from './render/colormaps';
 export * from './render/model';
 export * from './sps/parse';
 export * from './sps/qc';
+export * from './sps/reproject';
 
 /**
  * Detect and parse any supported seismic file. Dispatches through the format
