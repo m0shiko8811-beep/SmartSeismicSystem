@@ -229,6 +229,10 @@ test('resampleLinear preserves endpoints, length, and ramp values', () => {
   assert.equal(up[6], 3);
   assert.ok(Math.abs(up[3] - 1.5) < 1e-6, `midpoint ${up[3]}`);
   assert.deepEqual(Array.from(resampleLinear(a, 4)), [0, 1, 2, 3]);
+  // regression: downsample to a single point must not produce NaN
+  const one = resampleLinear(a, 1);
+  assert.equal(one.length, 1);
+  assert.ok(Number.isFinite(one[0]), `newLength=1 produced ${one[0]}`);
 });
 test('resampleToInterval rescales trace sample count when interval changes', () => {
   const ramp = resampleLinear(Float32Array.from([0, 100]), 101);

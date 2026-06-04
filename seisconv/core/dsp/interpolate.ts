@@ -19,6 +19,11 @@ export function resampleLinear(samples: Float32Array, newLength: number): Float3
     out.fill(samples[0]);
     return out;
   }
+  if (newLength === 1) {
+    // Avoid (newLength - 1) === 0 → Infinity → NaN; collapse to the first sample.
+    out[0] = samples[0];
+    return out;
+  }
   const scale = (n - 1) / (newLength - 1);
   for (let i = 0; i < newLength; i++) {
     const x = i * scale;

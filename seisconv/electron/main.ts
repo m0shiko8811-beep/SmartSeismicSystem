@@ -51,6 +51,9 @@ function createWindow(): void {
     },
   });
   win.once('ready-to-show', () => win?.show());
+  // Hardening: a local-only app never opens new windows or navigates elsewhere.
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  win.webContents.on('will-navigate', (event) => event.preventDefault());
   void win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
 }
 
