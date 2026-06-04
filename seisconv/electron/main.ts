@@ -135,6 +135,12 @@ ipcMain.handle('seisconv:getSpsPoints', async () => {
   return { srcE: r.srcE, srcN: r.srcN, rcvE: r.rcvE, rcvN: r.rcvN };
 });
 
+ipcMain.handle('seisconv:spsQC', async (_e, qc: Record<string, number>) => {
+  const r = await callWorker<{ ok: boolean; results?: unknown[]; error?: string }>({ type: 'spsQC', qc });
+  if (!r.ok) throw new Error(r.error || 'QC failed');
+  return r.results;
+});
+
 app.whenReady().then(() => {
   Menu.setApplicationMenu(Menu.buildFromTemplate([{ role: 'fileMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' }]));
   createWindow();

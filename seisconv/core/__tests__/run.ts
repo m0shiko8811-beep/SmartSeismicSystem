@@ -33,6 +33,7 @@ import {
   decimateMinMax,
   parseSPSText,
   detectSPSType,
+  runSPSQC,
 } from '../index';
 import { bytesToBase64, base64ToBytes } from '../base64';
 
@@ -306,6 +307,20 @@ test('SPS parser reads S/R records, headers, and ITM projection', () => {
   assert.ok(lat0 > 31 && lat0 < 32, `latOrigin ${lat0}`);
   assert.equal(detectSPSType('survey.s01'), 'S');
   assert.equal(detectSPSType('survey.r'), 'R');
+});
+test('SPS QC flags a duplicate source', () => {
+  const put = (line: string, start: number, txt: string) => {
+    const padded = line.padEnd(Math.max(line.length, start + txt.length), ' ');
+    return padded.slice(0, start) + txt + padded.slice(start + txt.length);
+  };
+  const mk = () => {
+    let s = put('S'.padEnd(80, ' '), 1, '101');
+    s = put(s, 11, '200'); s = put(s, 23, '1');
+    s = put(s, 46, '660000.0'); s = put(s, 55, '3550000.0'); s = put(s, 65, '120.0');
+    return s;
+  };
+  const qc = runSPSQC(parseSPSText([mk(), mk()].join('\n')), {});
+  assert.ok(qc.some((r) => r.cat === 'Duplicate' && r.sev === 'error'), 'duplicate not flagged');
 });
 
 // ── Summary ───────────────────────────────────────────────────────────────────

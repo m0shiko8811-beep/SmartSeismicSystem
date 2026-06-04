@@ -65,6 +65,12 @@ export interface SpsPoints {
   rcvN: Float32Array;
 }
 
+export interface QCRow {
+  sev: string;
+  cat: string;
+  msg: string;
+}
+
 const api = {
   /** Open a file picker, parse the chosen file off-thread; returns a summary (or null if cancelled). */
   openAndParse: (): Promise<ParseSummary | null> => ipcRenderer.invoke('seisconv:openAndParse'),
@@ -78,6 +84,9 @@ const api = {
   openSPS: (): Promise<SPSSummary | null> => ipcRenderer.invoke('seisconv:openSPS'),
   /** Get source/receiver coordinate arrays for the survey plot. */
   getSpsPoints: (): Promise<SpsPoints> => ipcRenderer.invoke('seisconv:getSpsPoints'),
+  /** Run survey QC on the loaded SPS data. */
+  spsQC: (qc?: { srcInt?: number; rcvInt?: number; tol?: number; maxOff?: number; maxSrc?: number; maxRcv?: number }): Promise<QCRow[]> =>
+    ipcRenderer.invoke('seisconv:spsQC', qc ?? {}),
 };
 
 export type SeisconvAPI = typeof api;

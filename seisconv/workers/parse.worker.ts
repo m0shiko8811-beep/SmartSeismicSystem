@@ -10,7 +10,7 @@
 import { parentPort } from 'node:worker_threads';
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
-import { applyAGC, getWriter, mergeSPSData, normFactorPercentile, parseAny, parseSPSText, resampleLinear, type AGCType, type ParsedFile, type SPSData } from '../core';
+import { applyAGC, getWriter, mergeSPSData, normFactorPercentile, parseAny, parseSPSText, resampleLinear, runSPSQC, type AGCType, type ParsedFile, type QCParams, type SPSData } from '../core';
 
 if (!parentPort) throw new Error('parse.worker must run as a worker thread');
 const port = parentPort;
@@ -20,9 +20,10 @@ let currentSPS: SPSData | null = null;
 
 interface Req {
   id: number;
-  type: 'open' | 'trace' | 'section' | 'convert' | 'openSPS' | 'spsPoints';
+  type: 'open' | 'trace' | 'section' | 'convert' | 'openSPS' | 'spsPoints' | 'spsQC';
   path?: string;
   paths?: string[];
+  qc?: QCParams;
   index?: number;
   format?: string;
   maxTraces?: number;
@@ -95,6 +96,16 @@ port.on('message', (req: Req) => {
         rcvN[i] = R[i].northing;
       }
       port.postMessage({ id, ok: true, srcE, srcN, rcvE, rcvN }, [srcE.buffer, srcN.buffer, rcvE.buffer, rcvN.buffer]);
+      return;
+    }
+
+    if (type === 'spsQC') {
+      if (!currentSPS) {
+        port.postMessage({ id, ok: false, error: 'no SPS loaded' });
+        return;
+      }
+      const results = runSPSQC(currentSPS, req.qc ?? {});
+      port.postMessage({ id, ok: true, results: results.map((r) => ({ sev: r.sev, cat: r.cat, msg: r.msg })) });
       return;
     }
 

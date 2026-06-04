@@ -20,6 +20,8 @@ type SectionOpts = { maxTraces?: number; maxSamples?: number; agc?: boolean; agc
 type SectionData = { numTraces: number; colLen: number; norm: number; sampleInt: number; traceStep: number; data: Float32Array };
 type SpsSummary = { sources: number; receivers: number; xrefs: number; layout: string | null; projection: { type: string | null; subtype: string | null; desc?: string } | null; errors: string[] };
 type SpsPoints = { srcE: Float32Array; srcN: Float32Array; rcvE: Float32Array; rcvN: Float32Array };
+type QCParamsUI = { srcInt?: number; rcvInt?: number; tol?: number; maxOff?: number };
+type QCRow = { sev: string; cat: string; msg: string };
 
 declare global {
   interface Window {
@@ -30,6 +32,7 @@ declare global {
       convert(format: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
       openSPS(): Promise<SpsSummary | null>;
       getSpsPoints(): Promise<SpsPoints>;
+      spsQC(qc?: QCParamsUI): Promise<QCRow[]>;
     };
   }
 }
@@ -386,6 +389,56 @@ function drawSurveyPlot(cv: HTMLCanvasElement) {
   ctx.fillText(`E ${minE.toFixed(0)}–${maxE.toFixed(0)} · N ${minN.toFixed(0)}–${maxN.toFixed(0)}  (● src  ● rcv)`, ML + 4, H - 8);
 }
 
+function numVal(id: string): number {
+  const v = parseFloat(($(id) as HTMLInputElement).value);
+  return isFinite(v) ? v : 0;
+}
+
+async function runQC() {
+  if (!spsSummary) {
+    $('qcResults').textContent = 'Load SPS files first.';
+    return;
+  }
+  $('qcResults').textContent = 'Running QC…';
+  try {
+    const rows = await api.spsQC({ srcInt: numVal('qcSrcInt'), rcvInt: numVal('qcRcvInt'), tol: numVal('qcTol') || 1, maxOff: numVal('qcMaxOff') });
+    renderQC(rows);
+  } catch (e) {
+    $('qcResults').textContent = 'QC failed: ' + errMsg(e);
+  }
+}
+
+function renderQC(rows: QCRow[]) {
+  const el = $('qcResults');
+  el.innerHTML = '';
+  let errs = 0, warns = 0;
+  for (const r of rows) {
+    if (r.sev === 'error') errs++;
+    else if (r.sev === 'warn') warns++;
+  }
+  const hdr = document.createElement('div');
+  hdr.className = 'qc-hdr';
+  hdr.textContent = `${errs} errors · ${warns} warnings · ${rows.length} rows`;
+  el.appendChild(hdr);
+  for (const r of rows.slice(0, 1000)) {
+    const row = document.createElement('div');
+    row.className = 'qc-row ' + r.sev;
+    const sev = document.createElement('span');
+    sev.className = 'qc-sev';
+    sev.textContent = r.sev.toUpperCase();
+    const cat = document.createElement('span');
+    cat.className = 'qc-cat';
+    cat.textContent = r.cat;
+    const msg = document.createElement('span');
+    msg.className = 'qc-msg';
+    msg.textContent = r.msg;
+    row.appendChild(sev);
+    row.appendChild(cat);
+    row.appendChild(msg);
+    el.appendChild(row);
+  }
+}
+
 function errMsg(e: unknown): string {
   return e && typeof e === 'object' && 'message' in e ? String((e as { message: unknown }).message) : String(e);
 }
@@ -421,6 +474,7 @@ function init() {
   $('spsLoadBtn').addEventListener('click', () => void loadSPS());
   ($('spsShowS') as HTMLInputElement).addEventListener('change', () => { if (spsPts) drawSurveyPlot($('spsCanvas') as HTMLCanvasElement); });
   ($('spsShowR') as HTMLInputElement).addEventListener('change', () => { if (spsPts) drawSurveyPlot($('spsCanvas') as HTMLCanvasElement); });
+  $('spsQcBtn').addEventListener('click', () => void runQC());
   switchTab('conv');
 }
 
