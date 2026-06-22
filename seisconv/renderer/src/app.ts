@@ -7,6 +7,7 @@ import { getColor, colorViridis } from '../../core/render/colormaps';
 import { EPSG_DB } from '../../core/sps/reproject';
 import { amplitudeSpectrum } from '../../core/dsp/fft';
 import { crossCorrelate, difference } from '../../core/dsp/correlate';
+import { resampleLinear } from '../../core/dsp/interpolate';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 
@@ -482,6 +483,12 @@ function setState(kind: StripState, label: string) {
 function applyOpenedFile(s: Summary) {
   summary = s;
   traceIndex = 0;
+  // Drop the previous file's cached trace. Without this, stepping files with ]/[
+  // on a non-trace tab leaves lastTrace holding the OLD file's samples/index,
+  // and 'Add open trace' / Inspector 'Add to Workbench' would pair the NEW
+  // summary.name with the OLD samples (a silent label/data desync). When the
+  // trace panel is visible, refreshTrace() below repopulates it for the new file.
+  lastTrace = null;
   renderInfo();
   showSingleLoaded();      // banner + light up the single-file wizard
   updateNamePreview();
@@ -928,6 +935,7 @@ async function clearConverter() {
   lastTrace = null;
   lastSection = null;
   secView.init = false; // forget the data-zoom window so the next file opens fitted
+  disarmSecToWb();      // reset the '+ Workbench' click-to-add toggle (button + cursor)
   traceIndex = 0;
   // batch state
   batchFiles = [];
@@ -1599,6 +1607,20 @@ function sectionInteractions() {
   });
 }
 
+/** Disarm the section click-to-add toggle, resetting button label + cursor.
+ *  Called on Clear / file open so the '+ Workbench' UI never stays falsely armed
+ *  (clicks were a guarded no-op, but the 'copy' cursor + label were misleading). */
+function disarmSecToWb() {
+  secToWb = false;
+  const wbToggle = $opt('secToWb') as HTMLButtonElement | null;
+  if (wbToggle) {
+    wbToggle.classList.remove('on');
+    wbToggle.textContent = '+ Workbench';
+  }
+  const cv = $opt('secCanvas') as HTMLCanvasElement | null;
+  if (cv) cv.style.cursor = '';
+}
+
 // ── Trace Inspector time-axis zoom / pan (renderer-only) ──
 // The full trace is already in lastTrace.samples, so zoom/pan just re-windows
 // [s0,s1) and repaints — no worker round-trip. Mirrors the section interactions.
@@ -2019,16 +2041,25 @@ function wbFillAnalysisSelects() {
   const selA = $opt('wbSelA') as HTMLSelectElement | null;
   const selB = $opt('wbSelB') as HTMLSelectElement | null;
   if (!selA || !selB) return;
-  const opts = wbTraces
-    .map((t) => `<option value="${t.id}">${t.sourceName} #${t.traceIndex + 1}</option>`)
-    .join('');
   // Default picks: keep prior choices if still present, else first / second trace.
   if (!wbTraceById(wbSelA)) wbSelA = wbTraces[0]?.id ?? -1;
   if (!wbTraceById(wbSelB) || (wbTraces.length > 1 && wbSelB === wbSelA)) {
     wbSelB = wbTraces.find((t) => t.id !== wbSelA)?.id ?? wbTraces[0]?.id ?? -1;
   }
-  selA.innerHTML = opts;
-  selB.innerHTML = opts;
+  // Build options via DOM + textContent (like renderWorkbenchList) instead of an
+  // innerHTML template: t.sourceName is a raw filename and would otherwise let a
+  // name containing <, >, &, or " break/garble the markup or inject DOM.
+  const fill = (sel: HTMLSelectElement) => {
+    sel.textContent = '';
+    for (const t of wbTraces) {
+      const o = document.createElement('option');
+      o.value = String(t.id);
+      o.textContent = `${t.sourceName} #${t.traceIndex + 1}`;
+      sel.appendChild(o);
+    }
+  };
+  fill(selA);
+  fill(selB);
   if (wbSelA >= 0) selA.value = String(wbSelA);
   if (wbSelB >= 0) selB.value = String(wbSelB);
 }
@@ -2179,8 +2210,19 @@ function wbUpdateAnalysis() {
   const b = wbTraceById(wbSelB);
   if (!a || !b) return;
 
-  const cc = crossCorrelate(a.samples, b.samples, a.sampleInt);
-  const df = difference(a.samples, b.samples);
+  // Put B on A's time base before correlating/differencing. crossCorrelate's lag
+  // axis is built from A's dt (msPerSample = a.sampleInt/1000) and difference()
+  // aligns by sample COUNT, so a B captured at a different dt (e.g. 4 ms vs A's
+  // 2 ms) would yield a physically wrong lag and difference. Resampling B by the
+  // dt ratio makes one B sample equal one A sample in time for both ops.
+  let bSamples = b.samples;
+  if (a.sampleInt > 0 && b.sampleInt > 0 && b.sampleInt !== a.sampleInt && b.samples.length > 0) {
+    const newLen = Math.max(1, Math.round(b.samples.length * (b.sampleInt / a.sampleInt)));
+    bSamples = resampleLinear(b.samples, newLen);
+  }
+
+  const cc = crossCorrelate(a.samples, bSamples, a.sampleInt);
+  const df = difference(a.samples, bSamples);
 
   wbDrawCorr(cc);
   wbDrawDiff(df.diff, a.sampleInt);
@@ -2816,8 +2858,16 @@ function gridInteractions() {
   // Keep the active SPS view correct after a window resize (the cached grid
   // transform would otherwise go stale; Leaflet needs invalidateSize).
   window.addEventListener('resize', () => {
+    // SPS grid/map.
     if (spsView === 'grid' && spsGeom) { gridFit(); drawSurveyGrid(); }
     else if (spsView === 'map' && leafletMap) leafletMap.invalidateSize();
+    // The section / trace / workbench / velocity canvases size to client*
+    // dimensions only inside their draw fns, which aren't otherwise re-run on
+    // resize — so repaint whichever is visible or they stay stretched/blurred.
+    if (lastSection && $opt('panel-section')?.style.display !== 'none') redrawSection();
+    if (lastTrace && $opt('panel-trace')?.style.display !== 'none') renderTrace();
+    if ($opt('panel-workbench')?.style.display !== 'none') { drawWorkbench(); wbUpdateAnalysis(); }
+    if (velResult && $opt('panel-vel')?.style.display !== 'none') drawVelocity();
   });
 }
 

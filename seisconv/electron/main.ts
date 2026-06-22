@@ -31,6 +31,21 @@ let lastOpenedPath = '';
 let siblingPaths: string[] = [];
 let siblingIndex = -1;
 
+// Allowlist of file paths the USER has chosen via a native dialog (or that we
+// enumerated from a user-chosen folder). extractTrace/getSection-style handlers
+// read arbitrary renderer-supplied paths; confining them to this set stops a
+// compromised renderer from reading files the user never selected. Normalized
+// with path.resolve so '.'/'..'/separator variants can't slip past the check.
+const authorizedPaths = new Set<string>();
+function authorizePath(p: string): string {
+  const abs = path.resolve(p);
+  authorizedPaths.add(abs);
+  return abs;
+}
+function isAuthorizedPath(p: string): boolean {
+  return typeof p === 'string' && authorizedPaths.has(path.resolve(p));
+}
+
 // Enumerate the seismic siblings of `filePath` (same directory), sorted by name,
 // and remember the open file's position. Best-effort: on any fs error we fall
 // back to a one-element list containing just the open file so navigation is a
@@ -47,6 +62,8 @@ async function indexSiblings(filePath: string): Promise<void> {
   } catch {
     siblingPaths = [];
   }
+  // Every enumerated sibling is reachable via Prev/Next, so authorize them all.
+  for (const p of siblingPaths) authorizePath(p);
   // Locate the open file in the list; if it (somehow) isn't present, seed the
   // list with just it so index/count stay coherent.
   let idx = siblingPaths.indexOf(filePath);
@@ -185,13 +202,24 @@ ipcMain.handle('seisconv:openSiblingFile', async (_e, delta: number) => {
   const count = siblingPaths.length;
   if (count === 0 || siblingIndex < 0) return null;
   const d = Number.isFinite(delta) ? Math.trunc(delta) : 0;
+  const prev = siblingIndex;
   const next = Math.max(0, Math.min(count - 1, siblingIndex + d));
   if (next === siblingIndex) return null; // no move (clamped at an edge)
   const filePath = siblingPaths[next];
-  const r = await callWorker<{ ok: boolean; summary?: any; error?: string }>({ type: 'open', path: filePath });
-  if (!r.ok) throw new Error(r.error || 'parse failed');
-  lastOpenedPath = filePath;
+  // Commit the index BEFORE the await so a second fast ]/[ press reads the new
+  // index and steps further, instead of both reads seeing the same stale index
+  // and resolving to the same file (one keypress silently dropped). Roll back if
+  // the parse fails so a failed step doesn't leave the index advanced.
   siblingIndex = next;
+  let r: { ok: boolean; summary?: any; error?: string };
+  try {
+    r = await callWorker<{ ok: boolean; summary?: any; error?: string }>({ type: 'open', path: filePath });
+  } catch (e) {
+    siblingIndex = prev;
+    throw e;
+  }
+  if (!r.ok) { siblingIndex = prev; throw new Error(r.error || 'parse failed'); }
+  lastOpenedPath = filePath;
   return openEnvelope(filePath, r.summary);
 });
 
@@ -207,13 +235,17 @@ ipcMain.handle('seisconv:pickTraceFile', async () => {
   if (!win) return null;
   const res = await dialog.showOpenDialog(win, { properties: ['openFile'], filters: SEISMIC_FILTERS });
   if (res.canceled || !res.filePaths.length) return null;
-  return res.filePaths[0];
+  return authorizePath(res.filePaths[0]);
 });
 
 // Trace Workbench: parse `path` locally (off the persistently-open file) and
 // return ONE trace's samples + header. Mirrors getTrace's return shape, plus the
 // source name + total trace count so the workbench can label + clamp the entry.
 ipcMain.handle('seisconv:extractTrace', async (_e, filePath: string, index: number) => {
+  // Only read paths the user actually chose via a dialog (or that we enumerated
+  // from a user-picked folder). Blocks a compromised renderer from passing an
+  // arbitrary path to readFileSync in the worker.
+  if (!isAuthorizedPath(filePath)) throw new Error('extractTrace: unauthorized file path');
   const r = await callWorker<{ ok: boolean; error?: string } & Record<string, any>>({ type: 'extractTrace', path: filePath, index });
   if (!r.ok) throw new Error(r.error || 'extract trace failed');
   return { name: r.name, index: r.index, traceCount: r.traceCount, nSamples: r.nSamples, sampleInt: r.sampleInt, hdr: r.hdr, samples: r.samples };
@@ -240,6 +272,8 @@ ipcMain.handle('seisconv:pickInputFolder', async () => {
     .map((e) => ({ name: e.name, path: path.join(dir, e.name) }))
     .sort((a, b) => a.name.localeCompare(b.name));
   if (!files.length) return null;
+  // Authorize each enumerated file so batchConvert/extractTrace can read them.
+  for (const f of files) authorizePath(f.path);
   return { dir, files };
 });
 

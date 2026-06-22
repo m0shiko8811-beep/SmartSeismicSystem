@@ -227,7 +227,11 @@ export function writeSEGY(pd: ParsedFile, rev: number): Bytes {
     bdv.setFloat64(bh + 80, si, false); // 3281-3288: extended sample interval (IEEE double, µs)
     bdv.setUint32(bh + 88, spt, false); // 3289-3292: extended number of samples/trace (uint32)
     bdv.setUint32(bh + 96, 0x01020304, false); // 3297-3300: byte-order constant (big-endian)
-    w16(out, bh + 316, 0); // 3517-3518: number of additional 240-byte trace headers = 0
+    // 3507-3510 (binhdr offset 306, uint32): max number of additional 240-byte
+    // trace headers = 0. MUST match the field the reader parses (maxAddTraceHdr,
+    // r32u at offset 306) so the per-trace stride round-trips; the previous
+    // w16(bh+316) wrote a different field (wrong location AND width).
+    w32(out, bh + 306, 0);
   }
 
   let off = 3600;

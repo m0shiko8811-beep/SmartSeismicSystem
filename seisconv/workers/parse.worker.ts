@@ -426,8 +426,13 @@ port.on('message', (req: Req) => {
         const from = num(x.rcvPtFrom), to = num(x.rcvPtTo);
         if (!isFinite(from) || !isFinite(to) || to < from) continue;
         const incr = x.layout === 'SPS2.1' ? 1 : Math.max(1, num(x.rcvPtIncr) || 1);
+        // Bound the inner range walk independently of pushes: a crafted X-file
+        // range (from=0,to=1e9,incr=1) whose points never match would otherwise
+        // run ~1e9 Map lookups and hang the single-threaded worker, since the
+        // sxA-length break only fires when a segment is actually pushed.
+        let rcvSteps = 0;
         for (let rp = from; rp <= to; rp += incr) {
-          if (sxA.length >= MAX_SEG) break;
+          if (sxA.length >= MAX_SEG || ++rcvSteps > MAX_SEG) break;
           const rcv = rcvMap.get(`${rcvLine}|${rp}`);
           if (!rcv) continue;
           let rx = rcv.easting, ry = rcv.northing;
@@ -504,7 +509,12 @@ port.on('message', (req: Req) => {
         const from = num(x.rcvPtFrom), to = num(x.rcvPtTo);
         if (!isFinite(from) || !isFinite(to) || to < from) continue;
         const incr = x.layout === 'SPS2.1' ? 1 : Math.max(1, num(x.rcvPtIncr) || 1);
+        // Bound the inner range walk: MAX_PAIRS decimation is an xref-LIST stride
+        // and never caps a single xref, so a crafted range (from=0,to=1e9,incr=1)
+        // would run ~1e9 Map lookups and hang the worker. Cap iterations per xref.
+        let rcvSteps = 0;
         for (let rp = from; rp <= to; rp += incr) {
+          if (++rcvSteps > MAX_PAIRS) break;
           const rcv = rcvMap.get(`${rcvLine}|${rp}`);
           if (!rcv) continue;
           const rx = rcv.easting, ry = rcv.northing;
@@ -694,6 +704,18 @@ port.on('message', (req: Req) => {
         return;
       }
       const inTraces = req.traces ?? [];
+      // Bound the synthetic file before the writer allocates its output buffer.
+      // trc.length is renderer-supplied and otherwise uncapped, so a driven
+      // renderer could force a multi-GB allocation in writeSU/writeSEGY. Reject
+      // collections past a sane trace count or total-sample budget instead.
+      const MAX_EXPORT_TRACES = 200_000;
+      const MAX_EXPORT_SAMPLES = 200_000_000; // ~800 MB of f32 samples
+      let totalSamples = 0;
+      for (const t of inTraces) totalSamples += Math.max(0, (t.nSamples | 0));
+      if (inTraces.length > MAX_EXPORT_TRACES || totalSamples > MAX_EXPORT_SAMPLES) {
+        port.postMessage({ id, ok: false, error: `export collection too large (${inTraces.length} traces, ${totalSamples} samples)` });
+        return;
+      }
       const pf: ParsedFile = {
         format: 'SEG-Y',
         revision: 1,
@@ -750,6 +772,11 @@ port.on('message', (req: Req) => {
       let s0 = Math.max(0, Math.min(fullSamps, (req.sampStart ?? 0) | 0));
       let s1 = Math.max(0, Math.min(fullSamps, (req.sampEnd ?? fullSamps) | 0));
       if (s1 <= s0) { s0 = 0; s1 = fullSamps || 0; }
+      // True only when the request actually narrows the sample axis. Without this
+      // flag, an un-zoomed request (s1 = fullSamps = bh.samplesTrace) would slice
+      // — and so truncate — any variable-length trace whose nSamples exceeds
+      // bh.samplesTrace, silently dropping its deep tail (a data-loss regression).
+      const sampZoom = s0 > 0 || s1 < fullSamps;
       const winTraces = t1 - t0;
       const winSamps = s1 - s0;
       const traceStep = Math.max(1, Math.ceil(winTraces / maxTraces));
@@ -764,8 +791,10 @@ port.on('message', (req: Req) => {
         if (!tr?.samples) continue;
         let s = tr.samples;
         if (req.agc) s = applyAGC(s, req.agcWindowMs ?? 200, si, req.agcType ?? 'rms');
-        // Slice to the visible sample window (no-op when it's the whole trace).
-        if (s0 > 0 || s1 < s.length) s = s.subarray(Math.min(s0, s.length), Math.min(s1, s.length));
+        // Slice to the visible sample window only when the user actually zoomed
+        // the sample axis; otherwise keep the full trace (its tail beyond
+        // bh.samplesTrace must survive an un-zoomed render).
+        if (sampZoom) s = s.subarray(Math.min(s0, s.length), Math.min(s1, s.length));
         const nf = normFactorPercentile(s, 0.95);
         if (nf > norm) norm = nf;
         // Time-preserving downsample (clean vertical axis for VD; good enough for wiggle).
@@ -774,7 +803,11 @@ port.on('message', (req: Req) => {
       if (norm <= 0) norm = 1;
 
       const numTraces = columns.length;
-      const colLen = numTraces ? columns[0].length : 0;
+      // Use the LONGEST column, not columns[0]: with variable-length traces the
+      // first windowed trace may be short/dead (e.g. 400 samples) while later
+      // ones are full — sizing to columns[0] would truncate every longer trace.
+      let colLen = 0;
+      for (let c = 0; c < numTraces; c++) if (columns[c].length > colLen) colLen = columns[c].length;
       // Flatten into one transferable matrix (numTraces × colLen), row = trace.
       const data = new Float32Array(numTraces * colLen);
       for (let c = 0; c < numTraces; c++) {

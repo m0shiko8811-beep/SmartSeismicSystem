@@ -116,8 +116,12 @@ function rms(x: Float32Array): number {
 export function difference(a: Float32Array, b: Float32Array): TraceDifference {
   const n = a.length;
   const bAligned = b.length === n ? b : resampleLinear(b, n);
+  // resampleLinear returns an empty array when b has no samples (a dead/empty
+  // trace), so bAligned can be shorter than n. Treat any missing B sample as 0
+  // rather than reading undefined → NaN-poisoning diff and every RMS below.
+  const mb = bAligned.length;
   const diff = new Float32Array(n);
-  for (let i = 0; i < n; i++) diff[i] = a[i] - bAligned[i];
+  for (let i = 0; i < n; i++) diff[i] = a[i] - (i < mb ? bAligned[i] : 0);
   const rmsA = rms(a);
   const rmsB = rms(bAligned);
   return {

@@ -446,7 +446,11 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
 
 /* ---- Modal (Help / Manual) ---- */
 .modal-back{
-  position:fixed;inset:0;z-index:50;display:none;align-items:center;justify-content:center;
+  /* Must sit above the left rail (z-index 1200, raised for the Leaflet basemap):
+     .app is a non-positioned grid so it forms no stacking context, putting the
+     rail and this overlay at the same root level. 50 < 1200 let the rail paint
+     over the modal and stay clickable; 2000 keeps the overlay on top. */
+  position:fixed;inset:0;z-index:2000;display:none;align-items:center;justify-content:center;
   background:rgba(13,31,51,.46);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);padding:24px;
 }
 .modal-back.open{display:flex;}

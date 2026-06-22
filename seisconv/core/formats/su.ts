@@ -144,7 +144,11 @@ export function writeSU(pd: ParsedFile): Bytes {
     // trid (byte 28): carry through if present, else 1 = seismic data (segy.h).
     w16(out, off + 28, hw(h, 'traceId') || 1);
     if (hw(h, 'offset')) w32(out, off + 36, hw(h, 'offset'));
-    w16(out, off + 114, tr.nSamples);
+    // ns (byte 114) is a 16-bit field; clamp to 65535 like writeSEGY. Writing the
+    // raw nSamples would mask to 0xFFFF (e.g. 100000 → 34464) while the data slot
+    // below is sized from the full spt, so a reader keying off this field would
+    // mis-walk every subsequent trace.
+    w16(out, off + 114, Math.min(tr.nSamples, 65535));
     w16(out, off + 116, si);
     if (tr.samples) {
       const sdv = dv(out);
