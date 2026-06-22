@@ -225,6 +225,47 @@ export interface SemblanceData {
   offNote: string;
 }
 
+/** Average amplitude spectrum across the open file (or a trace sub-window): the
+ *  mean of per-trace single-sided spectra. `freqs`/`amp` are parallel length-N/2
+ *  arrays; `nTraces` is how many traces contributed; `decimated` flags a sampled
+ *  (strided) trace set. */
+export interface AvgSpectrumData {
+  freqs: Float32Array;
+  amp: Float32Array;
+  nyquist: number;
+  nTraces: number;
+  decimated: boolean;
+  log: string;
+}
+
+/** STFT spectrogram of one trace: `mag` is a row-major nFrames×nBins Float32 grid
+ *  (row = time frame, col = freq bin); `freqs` (Hz, length nBins) + `times` (s,
+ *  length nFrames) are the axes; `maxMag` is the peak for normalized display. */
+export interface SpectrogramData {
+  mag: Float32Array;
+  nFrames: number;
+  nBins: number;
+  freqs: Float32Array;
+  times: Float32Array;
+  maxMag: number;
+  siUs: number;
+}
+
+/** f-k (frequency–wavenumber) spectrum of the section: `mag` is a row-major
+ *  nF×nKx Float32 grid (row = frequency, col = wavenumber); `fAxis` (Hz, positive
+ *  half) + `kAxis` (cycles/distance-unit, fftshifted so kx=0 is centred) are the
+ *  axes; `maxMag` is the peak; `decimated` flags a sampled section. */
+export interface FkData {
+  mag: Float32Array;
+  nKx: number;
+  nF: number;
+  kAxis: Float32Array;
+  fAxis: Float32Array;
+  maxMag: number;
+  decimated: boolean;
+  log: string;
+}
+
 /** One SPS H-record row for the Header Viewer/Editor: the 4-char code, the
  *  editable DATA value, the original raw line, and a human-readable description. */
 export interface SPSHeaderRow {
@@ -403,6 +444,15 @@ const api = {
     ipcRenderer.invoke('seisconv:spsExport', args),
   /** Compute an NMO semblance panel for the open file. */
   semblance: (opts: { velMin: number; velMax: number; velStep: number }): Promise<SemblanceData> => ipcRenderer.invoke('seisconv:semblance', opts),
+  /** Spectrum Analysis: mean amplitude spectrum over the open file (or the
+   *  [traceStart,traceEnd) trace window). Trace count is decimated when huge. */
+  avgSpectrum: (opts?: { traceStart?: number; traceEnd?: number }): Promise<AvgSpectrumData> => ipcRenderer.invoke('seisconv:avgSpectrum', opts ?? {}),
+  /** Spectrum Analysis: STFT spectrogram of trace `index` (winLen samples, hop =
+   *  winLen/2 by default). Returns a row-major nFrames×nBins magnitude grid. */
+  spectrogram: (opts: { index: number; winLen?: number; hop?: number }): Promise<SpectrogramData> => ipcRenderer.invoke('seisconv:spectrogram', opts),
+  /** Spectrum Analysis: 2-D f-k spectrum of the section (`dx` = trace spacing,
+   *  default 1). Returns a row-major nF×nKx magnitude grid, kx fftshifted. */
+  fk: (opts?: { dx?: number }): Promise<FkData> => ipcRenderer.invoke('seisconv:fk', opts ?? {}),
   /** Save arbitrary text (e.g. velocity picks CSV) via a native dialog. */
   exportText: (name: string, text: string): Promise<ConvertResult> => ipcRenderer.invoke('seisconv:exportText', { name, text }),
   /** Save arbitrary binary bytes (e.g. a renderer-built .xlsx / .ods) via a native dialog. */

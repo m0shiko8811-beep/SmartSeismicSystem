@@ -10,7 +10,7 @@
 import { parentPort } from 'node:worker_threads';
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
-import { applyAGC, computeSemblance, crsFromSpec, detectSPSType, EPSG_DB, generateProjHeaders, getWriter, groupByLine, mergeSPSData, normFactorPercentile, parseAny, parseSPSText, projToLatLon, PROJ_HEADER_CODES, reprojectSPS, resampleLinear, runSPSQC, spsHeaderDesc, type AGCType, type CRSSpec, type ParsedFile, type QCParams, type SPSData, type SPSHeader, type SPSPoint } from '../core';
+import { applyAGC, averageSpectrum, computeSemblance, crsFromSpec, detectSPSType, EPSG_DB, fkSpectrum, generateProjHeaders, getWriter, groupByLine, mergeSPSData, nextPow2, normFactorPercentile, parseAny, parseSPSText, projToLatLon, PROJ_HEADER_CODES, reprojectSPS, resampleLinear, runSPSQC, spectrogram, spsHeaderDesc, type AGCType, type CRSSpec, type ParsedFile, type QCParams, type SPSData, type SPSHeader, type SPSPoint } from '../core';
 
 if (!parentPort) throw new Error('parse.worker must run as a worker thread');
 const port = parentPort;
@@ -21,7 +21,7 @@ let currentSPSFiles: { name: string; text: string; type: 'S' | 'R' | 'X' | 'mixe
 
 interface Req {
   id: number;
-  type: 'open' | 'trace' | 'extractTrace' | 'section' | 'convert' | 'convertPath' | 'convertTraces' | 'reset' | 'openSPS' | 'spsClear' | 'spsGeometry' | 'spsXrefLines' | 'spsFold' | 'spsQC' | 'spsPointDetail' | 'spsSourceList' | 'spsReproject' | 'spsExport' | 'spsHeaderList' | 'spsApplyHeaders' | 'spsSaveCorrected' | 'semblance';
+  type: 'open' | 'trace' | 'extractTrace' | 'section' | 'convert' | 'convertPath' | 'convertTraces' | 'reset' | 'openSPS' | 'spsClear' | 'spsGeometry' | 'spsXrefLines' | 'spsFold' | 'spsQC' | 'spsPointDetail' | 'spsSourceList' | 'spsReproject' | 'spsExport' | 'spsHeaderList' | 'spsApplyHeaders' | 'spsSaveCorrected' | 'semblance' | 'avgSpectrum' | 'spectrogram' | 'fk';
   path?: string;
   // spsApplyHeaders: scope ('shared' = all loaded files, else a file name) + the
   // edit/add/remove batch and an optional CRS rewrite. Mirrors the IPC contract.
@@ -66,6 +66,12 @@ interface Req {
   // spsFold: CMP bin dimensions (projected units, e.g. metres).
   binX?: number;
   binY?: number;
+  // Spectrum Analysis tab: spectrogram STFT params (winLen/hop in samples) + the
+  // f-k trace spacing (dx, projected distance units). traceStart/traceEnd above
+  // double as the avgSpectrum averaging window.
+  winLen?: number;
+  hop?: number;
+  dx?: number;
 }
 
 function summarize(pf: ParsedFile) {
@@ -1102,6 +1108,119 @@ port.on('message', (req: Req) => {
       }
       const sr = computeSemblance(gather, current.bh.sampleInt ?? 2000, req.velMin ?? 1000, req.velMax ?? 5000, req.velStep ?? 50);
       port.postMessage({ id, ok: true, semb: sr.semb, vels: sr.vels, nT: sr.nT, dt: sr.dt, siUs: sr.siUs, offNote: sr.offNote }, [sr.semb.buffer as ArrayBuffer]);
+      return;
+    }
+
+    // ── Spectrum Analysis tab ──
+    //
+    // avgSpectrum + fk both consume the file's trace matrix; spectrogram pulls a
+    // single trace. avgSpectrum + fk reuse the SAME stride-decimation the section
+    // handler uses (cap the trace count, keep every Nth) but assemble UN-normalized
+    // raw samples (true amplitudes matter for a spectrum). The trace caps below
+    // mirror the section view's defaults so a huge survey can't blow the worker.
+
+    if (type === 'avgSpectrum') {
+      const si = current.bh.sampleInt ?? 2000;
+      const tc = current.traceCount;
+      // Averaging window (full-data indices, end exclusive); clamp + order.
+      let t0 = Math.max(0, Math.min(tc, (req.traceStart ?? 0) | 0));
+      let t1 = Math.max(0, Math.min(tc, (req.traceEnd ?? tc) | 0));
+      if (t1 <= t0) { t0 = 0; t1 = tc; }
+      // Decimate the trace COUNT if the window is huge (same idea as the section
+      // handler's traceStep): keep at most MAX_TRACES, every Nth across the window.
+      const MAX_TRACES = 4000;
+      const winTraces = t1 - t0;
+      const stride = Math.max(1, Math.ceil(winTraces / MAX_TRACES));
+      const traces: Float32Array[] = [];
+      for (let t = t0; t < t1; t += stride) {
+        const s = current.traces[t]?.samples;
+        if (s) traces.push(s);
+      }
+      if (!traces.length) {
+        port.postMessage({ id, ok: false, error: 'no traces with samples' });
+        return;
+      }
+      const r = averageSpectrum(traces, si, {});
+      const decimated = stride > 1;
+      const log = decimated
+        ? `Average spectrum decimated: ${winTraces} traces > ${MAX_TRACES} cap; kept every ${stride}${stride === 2 ? 'nd' : stride === 3 ? 'rd' : 'th'} → ${r.nTraces} traces.`
+        : `Average spectrum over ${r.nTraces} traces.`;
+      port.postMessage(
+        { id, ok: true, freqs: r.freqs, amp: r.amp, nyquist: r.nyquist, nTraces: r.nTraces, decimated, log },
+        [r.freqs.buffer, r.amp.buffer] as ArrayBuffer[],
+      );
+      return;
+    }
+
+    if (type === 'spectrogram') {
+      const si = current.bh.sampleInt ?? 2000;
+      const i = Math.max(0, Math.min(current.traceCount - 1, (req.index ?? 0) | 0));
+      const s = current.traces[i]?.samples;
+      if (!s || s.length === 0) {
+        port.postMessage({ id, ok: false, error: 'trace has no samples' });
+        return;
+      }
+      // Cap the output grid (nFrames*nBins) so a long trace with a tiny hop can't
+      // allocate a huge image; grow the hop just enough to fit the budget.
+      const MAX_CELLS = 4_000_000;
+      let winLen = Math.max(2, (req.winLen ?? 128) | 0);
+      let hop = Math.max(1, (req.hop ?? (winLen >> 1)) | 0);
+      const nBins = nextPow2(winLen) >> 1;
+      const framesFor = (h: number) => (s.length >= winLen ? Math.floor((s.length - winLen) / h) + 1 : 1);
+      if (framesFor(hop) * nBins > MAX_CELLS) {
+        const maxFrames = Math.max(1, Math.floor(MAX_CELLS / nBins));
+        hop = Math.max(hop, Math.ceil((s.length - winLen) / Math.max(1, maxFrames - 1)));
+      }
+      const r = spectrogram(s, si, { winLen, hop });
+      port.postMessage(
+        { id, ok: true, mag: r.mag, nFrames: r.nFrames, nBins: r.nBins, freqs: r.freqs, times: r.times, maxMag: r.maxMag, siUs: r.siUs },
+        [r.mag.buffer, r.freqs.buffer, r.times.buffer] as ArrayBuffer[],
+      );
+      return;
+    }
+
+    if (type === 'fk') {
+      const si = current.bh.sampleInt ?? 2000;
+      const tc = current.traceCount;
+      const fullSamps = current.bh.samplesTrace ?? current.traces[0]?.nSamples ?? 0;
+      // Decimate trace count + sample count to keep the 2-D FFT (padded to pow2)
+      // bounded. Reuse the section view's defaults as the working caps.
+      const MAX_TRACES = 1024;
+      const MAX_SAMPLES = 4096;
+      const traceStep = Math.max(1, Math.ceil(tc / MAX_TRACES));
+      // Build an un-normalized trace matrix (raw samples). Size to the LONGEST
+      // selected trace (capped), zero-pad shorter ones — variable-length traces
+      // must not be truncated to trace 0's length.
+      const cols: Float32Array[] = [];
+      for (let t = 0; t < tc; t += traceStep) {
+        const s = current.traces[t]?.samples;
+        if (!s) continue;
+        cols.push(s.length > MAX_SAMPLES ? resampleLinear(s, MAX_SAMPLES) : s);
+      }
+      const nTraces = cols.length;
+      if (!nTraces) {
+        port.postMessage({ id, ok: false, error: 'no traces with samples' });
+        return;
+      }
+      let nSamples = 0;
+      for (let c = 0; c < nTraces; c++) if (cols[c].length > nSamples) nSamples = cols[c].length;
+      const matrix = new Float32Array(nTraces * nSamples);
+      for (let c = 0; c < nTraces; c++) {
+        const col = cols[c];
+        matrix.set(col.subarray(0, Math.min(nSamples, col.length)), c * nSamples);
+      }
+      // dx scales by the trace decimation: skipping traceStep traces multiplies
+      // the effective spacing so the wavenumber axis stays physically correct.
+      const dx = (req.dx && req.dx > 0 ? req.dx : 1) * traceStep;
+      const r = fkSpectrum(matrix, nTraces, nSamples, si, dx);
+      const decimated = traceStep > 1 || fullSamps > MAX_SAMPLES;
+      const log = decimated
+        ? `f-k decimated: ${nTraces} traces (every ${traceStep}${traceStep === 2 ? 'nd' : traceStep === 3 ? 'rd' : 'th'}), ${nSamples} samples/trace; grid ${r.nF}×${r.nKx}.`
+        : `f-k spectrum: ${nTraces} traces × ${nSamples} samples; grid ${r.nF}×${r.nKx}.`;
+      port.postMessage(
+        { id, ok: true, mag: r.mag, nKx: r.nKx, nF: r.nF, kAxis: r.kAxis, fAxis: r.fAxis, maxMag: r.maxMag, decimated, log },
+        [r.mag.buffer, r.kAxis.buffer, r.fAxis.buffer] as ArrayBuffer[],
+      );
       return;
     }
 

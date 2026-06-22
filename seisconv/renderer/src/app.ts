@@ -53,6 +53,14 @@ type SPSPointDetail = {
 type SemblanceData = { semb: Float32Array; vels: number[]; nT: number; dt: number; siUs: number; offNote: string };
 type VelPick = { v: number; tMs: number };
 
+// ── Spectrum-analysis contract types (mirror the worker payloads) ──
+// Average amplitude spectrum over the record (or a trace window).
+type AvgSpectrumData = { freqs: Float32Array; amp: Float32Array; nyquist: number; nTraces: number; decimated: boolean; log: string };
+// STFT spectrogram of one trace: `mag` is a row-major nFrames×nBins grid.
+type SpectrogramData = { mag: Float32Array; nFrames: number; nBins: number; freqs: Float32Array; times: Float32Array; maxMag: number; siUs: number };
+// f-k spectrum of the section: `mag` is a row-major nF×nKx grid (kx fftshifted).
+type FkData = { mag: Float32Array; nKx: number; nF: number; kAxis: Float32Array; fAxis: Float32Array; maxMag: number; decimated: boolean; log: string };
+
 // ── Converter contract (folder-batch) types ──
 type ConvResult = { ok: boolean; path?: string; canceled?: boolean; error?: string };
 type FolderFile = { name: string; path: string };
@@ -169,6 +177,13 @@ declare global {
       spsSaveCorrected(): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
       spsExport(args: { kind: 'kml' | 'geojson' | 'csv' | 'qcreport'; qcParams?: QCParamsUI }): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
       semblance(opts: { velMin: number; velMax: number; velStep: number }): Promise<SemblanceData>;
+      // ── Spectrum-analysis tab ──
+      // Mean amplitude spectrum of the open file (or a [traceStart,traceEnd) window).
+      avgSpectrum(opts?: { traceStart?: number; traceEnd?: number }): Promise<AvgSpectrumData>;
+      // STFT spectrogram of trace `index` (winLen samples; hop defaults to winLen/2).
+      spectrogram(opts: { index: number; winLen?: number; hop?: number }): Promise<SpectrogramData>;
+      // 2-D f-k spectrum of the whole section (dx = trace spacing, default 1).
+      fk(opts?: { dx?: number }): Promise<FkData>;
       exportText(name: string, text: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
       // Save arbitrary binary bytes (renderer-built .xlsx / .ods) via a save dialog.
       exportBinary(name: string, bytes: Uint8Array): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
@@ -270,11 +285,11 @@ function applyKeyHints() {
     tip.innerHTML =
       `Tip — <span class="kbd">${KEY_OPEN}</span> open · ` +
       `<span class="kbd">${KEY_BATCH}</span> batch · ` +
-      `<span class="kbd">1–7</span> switch tabs · ` +
+      `<span class="kbd">1–8</span> switch tabs · ` +
       `<span class="kbd">?</span> help.`;
   }
   // rail + header tooltips
-  $opt('railHelp')?.setAttribute('title', `Help / Manual — keys: ${KEY_OPEN} open · ${KEY_BATCH} batch · 1–7 tabs · ? help`);
+  $opt('railHelp')?.setAttribute('title', `Help / Manual — keys: ${KEY_OPEN} open · ${KEY_BATCH} batch · 1–8 tabs · ? help`);
   $opt('helpBtn')?.setAttribute('title', `Help / Manual (?)`);
   $opt('openBtn')?.setAttribute('title', `Open a seismic file (${KEY_OPEN})`);
   // in-manual key chips that carry a data-key marker
@@ -282,7 +297,7 @@ function applyKeyHints() {
     const k = el.getAttribute('data-key');
     if (k === 'open') el.textContent = KEY_OPEN;
     else if (k === 'batch') el.textContent = KEY_BATCH;
-    else if (k === 'tabs') el.textContent = '1–7';
+    else if (k === 'tabs') el.textContent = '1–8';
     else if (k === 'help') el.textContent = '?';
   });
 }
@@ -294,6 +309,7 @@ const TAB_META: Record<string, { title: string; desc: string }> = {
   section: { title: 'File Viewer', desc: 'Render the full record as a variable-density / wiggle section with gain and AGC.' },
   sps: { title: 'SPS 2.1', desc: 'Plot source/receiver geometry on a survey grid or real basemap; QC and reproject.' },
   vel: { title: 'Velocity', desc: 'Compute an NMO semblance panel and pick a stacking-velocity function.' },
+  spectrum: { title: 'Spectrum', desc: 'Amplitude spectrum · spectrogram · F-K analysis' },
   workbench: { title: 'Trace Workbench', desc: 'Collect individual traces from any file and compare them side-by-side or overlaid, zoomed in lock-step.' },
   obslog: { title: 'Observer Log', desc: 'Per-shot field log; wizard-configured, exportable to Excel.' },
 };
@@ -340,6 +356,19 @@ let gridHighlight: { x: number; y: number } | null = null;
 let mapHighlight: L.CircleMarker | null = null;
 let velResult: SemblanceData | null = null;
 let velPicks: VelPick[] = [];
+
+// ── Spectrum-analysis tab state ──
+// Which of the three displays is showing, plus the most-recent payload for each
+// (cached so a tab switch / resize repaints without re-fetching). `specTraceIdx`
+// is the spectrogram's current trace; `specDb` toggles the Average view's axis.
+type SpecDisplay = 'avg' | 'spectrogram' | 'fk';
+let specDisplay: SpecDisplay = 'avg';
+let specAvg: AvgSpectrumData | null = null;
+let specGram: SpectrogramData | null = null;
+let specFk: FkData | null = null;
+let specTraceIdx = 0;
+let specDb = false;
+let specBusy = false;
 
 // ── Trace Workbench state ──
 // A collection of traces pulled from arbitrary files (or the open file), drawn
@@ -415,7 +444,7 @@ const MOD = IS_MAC ? 'Cmd' : 'Ctrl';      // primary modifier label
 const KEY_OPEN = `${MOD}+O`;
 const KEY_BATCH = `${MOD}+B`;
 
-const TABS = ['conv', 'trace', 'section', 'sps', 'vel', 'workbench', 'obslog'] as const;
+const TABS = ['conv', 'trace', 'section', 'sps', 'vel', 'spectrum', 'workbench', 'obslog'] as const;
 type Tab = (typeof TABS)[number];
 
 // Which tab is showing — drives the universal header "Clear" button (see
@@ -443,6 +472,7 @@ function switchTab(tab: Tab) {
   if (tab === 'section' && summary) void refreshSection();
   if (tab === 'sps' && spsSummary) void refreshSps();
   if (tab === 'vel' && velResult) drawVelocity();
+  if (tab === 'spectrum') void refreshSpectrum();
   if (tab === 'workbench') { drawWorkbench(); wbUpdateAnalysis(); }
   if (tab === 'obslog') renderLog();
 }
@@ -1097,6 +1127,7 @@ const CLEAR_TIP: Record<Tab, string> = {
   section: 'Clear file',
   sps: 'Clear SPS',
   vel: 'Clear picks',
+  spectrum: 'Clear spectrum',
   workbench: 'Clear workbench',
   obslog: 'Clear log',
 };
@@ -1113,6 +1144,8 @@ function activeTabHasData(tab: Tab): boolean {
       return !!spsSummary;
     case 'vel':
       return !!velResult || velPicks.length > 0;
+    case 'spectrum':
+      return !!summary;
     case 'workbench':
       return wbTraces.length > 0;
     case 'obslog':
@@ -1135,6 +1168,9 @@ function clearActiveTab() {
       break;
     case 'vel':
       clearVelocity();
+      break;
+    case 'spectrum':
+      clearSpectrum();
       break;
     case 'workbench':
       wbClear();
@@ -1337,7 +1373,12 @@ function renderTrace() {
   const cv = $('traceCanvas') as HTMLCanvasElement;
   const t = lastTrace;
   if (traceMode === 'spectrum') {
-    drawSpectrum(cv, t);
+    // Single-trace amplitude spectrum, drawn by the SHARED renderer (same fn the
+    // Spectrum tab's Average view uses).
+    const sp = (t.nSamples && t.samples.length)
+      ? amplitudeSpectrum(t.samples, t.sampleInt)
+      : { freqs: new Float32Array(0), amp: new Float32Array(0), nyquist: t.sampleInt > 0 ? 1e6 / t.sampleInt / 2 : 0 };
+    drawSpectrum(cv, sp);
     const ny = t.sampleInt > 0 ? 1e6 / t.sampleInt / 2 : 0;
     $('traceLabel').textContent = `Trace ${t.index + 1} / ${summary.traceCount}  ·  spectrum 0–${ny.toFixed(0)} Hz`;
   } else {
@@ -1419,8 +1460,19 @@ function drawTrace(cv: HTMLCanvasElement, t: TraceData) {
   }
 }
 
-/** Single-sided amplitude spectrum (amplitude vs Hz) of the active trace. */
-function drawSpectrum(cv: HTMLCanvasElement, t: TraceData) {
+/** A frequency-domain spectrum: parallel freqs/amp arrays + the Nyquist edge.
+ *  Matches core's `Spectrum` (and the worker's avgSpectrum payload) so ONE
+ *  renderer (drawSpectrum) serves both the Trace Inspector and the Spectrum tab. */
+type SpectrumLike = { freqs: Float32Array; amp: Float32Array; nyquist: number };
+
+/**
+ * Amplitude-vs-frequency plot of a {@link SpectrumLike}. Shared by the Trace
+ * Inspector (single-trace spectrum) and the Spectrum tab's Average view, so the
+ * two render identically. `opts.dB` switches the amplitude axis to decibels
+ * (20·log10(amp/peak)); `opts.label` is an optional caption drawn top-right.
+ * Marks the peak frequency and the −6 dB (half-amplitude) bandwidth.
+ */
+function drawSpectrum(cv: HTMLCanvasElement, sp: SpectrumLike, opts: { dB?: boolean; label?: string } = {}) {
   const dpr = window.devicePixelRatio || 1;
   const W = cv.clientWidth || 800, H = cv.clientHeight || 460;
   cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
@@ -1429,17 +1481,27 @@ function drawSpectrum(cv: HTMLCanvasElement, t: TraceData) {
   const bg = ctx.createLinearGradient(0, 0, 0, H);
   bg.addColorStop(0, '#0f2540'); bg.addColorStop(1, '#0b1a2c');
   ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
-  if (!t.nSamples || !t.samples.length) return;
+  if (!sp.amp.length) {
+    ctx.fillStyle = '#5e7186'; ctx.font = '13px Consolas, monospace'; ctx.textAlign = 'center';
+    ctx.fillText('No spectrum to show', W / 2, H / 2); ctx.textAlign = 'left';
+    return;
+  }
 
-  const sp = amplitudeSpectrum(t.samples, t.sampleInt);
+  const dB = !!opts.dB;
   const ML = 56, MR = 16, MT = 18, MB = 28;
   const pw = W - ML - MR, ph = H - MT - MB;
   const fmax = sp.nyquist || 1;
-  let amax = 0;
-  for (let k = 1; k < sp.amp.length; k++) if (sp.amp[k] > amax) amax = sp.amp[k];
+  // Linear peak amplitude (skip DC at k=0) → reference for both peak + dB scale.
+  let amax = 0, pk = 1;
+  for (let k = 1; k < sp.amp.length; k++) if (sp.amp[k] > amax) { amax = sp.amp[k]; pk = k; }
   if (amax <= 0) amax = 1;
+  // Plot value: linear amplitude, or dB relative to the peak (floored at FLOOR_DB).
+  const FLOOR_DB = -60;
+  const toPlot = (a: number) => (dB ? Math.max(FLOOR_DB, 20 * Math.log10((a > 0 ? a : 1e-12) / amax)) : a);
+  const vmax = dB ? 0 : amax;
+  const vmin = dB ? FLOOR_DB : 0;
   const Xf = (f: number) => ML + (f / fmax) * pw;
-  const Yf = (a: number) => { const y = MT + ph - (a / amax) * ph; return y < MT ? MT : y; };
+  const Yf = (a: number) => { const y = MT + ph - ((toPlot(a) - vmin) / (vmax - vmin)) * ph; return y < MT ? MT : y > MT + ph ? MT + ph : y; };
 
   // frequency gridlines + labels
   ctx.font = '10px Consolas, monospace'; ctx.lineWidth = 1;
@@ -1450,19 +1512,20 @@ function drawSpectrum(cv: HTMLCanvasElement, t: TraceData) {
     ctx.beginPath(); ctx.moveTo(x, MT); ctx.lineTo(x, MT + ph); ctx.stroke();
     ctx.fillStyle = '#5e7186'; ctx.fillText(f.toFixed(0), x + 2, H - 8);
   }
-  // amplitude gridlines + labels
+  // amplitude gridlines + labels (dB or linear)
   for (let g = 0; g <= 4; g++) {
     const y = MT + (ph * g) / 4;
     ctx.strokeStyle = 'rgba(33,69,100,0.45)';
     ctx.beginPath(); ctx.moveTo(ML, y); ctx.lineTo(ML + pw, y); ctx.stroke();
-    ctx.fillStyle = '#5e7186'; ctx.fillText(((amax * (4 - g)) / 4).toPrecision(2), 4, y + 3);
+    const v = vmax - ((vmax - vmin) * g) / 4;
+    ctx.fillStyle = '#5e7186'; ctx.fillText(dB ? v.toFixed(0) : v.toPrecision(2), 4, y + 3);
   }
 
   // filled spectrum curve
   ctx.beginPath();
-  ctx.moveTo(Xf(0), Yf(0));
+  ctx.moveTo(Xf(0), MT + ph);
   for (let k = 0; k < sp.amp.length; k++) ctx.lineTo(Xf(sp.freqs[k]), Yf(sp.amp[k]));
-  ctx.lineTo(Xf(sp.freqs[sp.freqs.length - 1]), Yf(0));
+  ctx.lineTo(Xf(sp.freqs[sp.freqs.length - 1]), MT + ph);
   ctx.closePath();
   const fill = ctx.createLinearGradient(0, MT, 0, MT + ph);
   fill.addColorStop(0, 'rgba(52,219,208,0.42)'); fill.addColorStop(1, 'rgba(52,219,208,0.04)');
@@ -1475,17 +1538,39 @@ function drawSpectrum(cv: HTMLCanvasElement, t: TraceData) {
   }
   ctx.stroke();
 
+  // −6 dB (half-amplitude) bandwidth: the freqs where amp first/last crosses
+  // amax/2, bracketing the peak. Shaded band + dashed edges.
+  const halfA = amax * 0.5;
+  let lo = pk, hi = pk;
+  while (lo > 0 && sp.amp[lo] >= halfA) lo--;
+  while (hi < sp.amp.length - 1 && sp.amp[hi] >= halfA) hi++;
+  const fLo = sp.freqs[lo], fHi = sp.freqs[hi];
+  if (fHi > fLo) {
+    ctx.fillStyle = 'rgba(255,180,84,0.10)';
+    ctx.fillRect(Xf(fLo), MT, Xf(fHi) - Xf(fLo), ph);
+    ctx.strokeStyle = 'rgba(255,180,84,0.7)'; ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
+    for (const f of [fLo, fHi]) { ctx.beginPath(); ctx.moveTo(Xf(f), MT); ctx.lineTo(Xf(f), MT + ph); ctx.stroke(); }
+    ctx.setLineDash([]);
+  }
+
   // peak marker
-  let pk = 1;
-  for (let k = 2; k < sp.amp.length; k++) if (sp.amp[k] > sp.amp[pk]) pk = k;
   const pkx = Xf(sp.freqs[pk]), pky = Yf(sp.amp[pk]);
   ctx.fillStyle = '#1fc8c0'; ctx.beginPath(); ctx.arc(pkx, pky, 3, 0, Math.PI * 2); ctx.fill();
   ctx.fillStyle = '#c8d2e0'; ctx.font = '11px "Segoe UI", sans-serif';
-  ctx.fillText(`peak ${sp.freqs[pk].toFixed(1)} Hz`, Math.min(pkx + 6, W - 84), Math.max(pky - 6, MT + 12));
+  ctx.fillText(`peak ${sp.freqs[pk].toFixed(1)} Hz`, Math.min(pkx + 6, W - 92), Math.max(pky - 6, MT + 12));
+  if (fHi > fLo) {
+    ctx.fillStyle = '#ffb454';
+    ctx.fillText(`−6 dB band ${fLo.toFixed(1)}–${fHi.toFixed(1)} Hz`, ML + 4, MT + ph - 6);
+  }
 
-  // axis title
+  // axis title + caption
   ctx.fillStyle = '#7e93ac'; ctx.font = '10px Consolas, monospace';
   ctx.fillText('Frequency (Hz) →', ML, MT - 6);
+  ctx.fillText(dB ? 'dB ↑' : 'amp ↑', 4, MT - 6);
+  if (opts.label) {
+    ctx.fillStyle = '#9fb0c4'; ctx.font = '11px "Segoe UI", sans-serif'; ctx.textAlign = 'right';
+    ctx.fillText(opts.label, W - MR, MT - 6); ctx.textAlign = 'left';
+  }
 }
 
 // ── File Viewer (section) ──
@@ -3109,6 +3194,8 @@ function gridInteractions() {
     if (lastTrace && $opt('panel-trace')?.style.display !== 'none') renderTrace();
     if ($opt('panel-workbench')?.style.display !== 'none') { drawWorkbench(); wbUpdateAnalysis(); }
     if (velResult && $opt('panel-vel')?.style.display !== 'none') drawVelocity();
+    // Spectrum tab: repaint whichever display is active (cached payloads, no re-fetch).
+    if ($opt('panel-spectrum')?.style.display !== 'none') repaintSpectrum();
   });
 }
 
@@ -3868,6 +3955,349 @@ async function exportPicks() {
   } catch (e) {
     $('velLabel').textContent = 'Failed: ' + errMsg(e);
   }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  SPECTRUM ANALYSIS
+//  Three frequency-domain QC views of the open file, switched by a segmented
+//  control: the record's AVERAGE amplitude spectrum (shares the Trace Inspector's
+//  drawSpectrum renderer), a single-trace SPECTROGRAM (STFT heatmap), and the
+//  section's F-K (frequency–wavenumber) spectrum. The two heatmaps clone
+//  drawVelocity's approach: fill an offscreen ImageData via getColor(...,'viridis')
+//  and blit it (unsmoothed) into the plot rect, with axis labels + a colorbar.
+// ════════════════════════════════════════════════════════════════════════════
+
+const SPEC_M = { ML: 56, MR: 64, MT: 14, MB: 30 }; // shared plot-rect margins (MR leaves room for the colorbar)
+
+/** Set the active display (segmented control) and (re)fetch/paint it. */
+function setSpecDisplay(d: SpecDisplay) {
+  if (specDisplay === d) return;
+  specDisplay = d;
+  $opt('specDispAvg')?.classList.toggle('on', d === 'avg');
+  $opt('specDispGram')?.classList.toggle('on', d === 'spectrogram');
+  $opt('specDispFk')?.classList.toggle('on', d === 'fk');
+  // Toggle which per-display control group is visible.
+  $opt('specCtlsAvg')?.classList.toggle('hidden', d !== 'avg');
+  $opt('specCtlsGram')?.classList.toggle('hidden', d !== 'spectrogram');
+  $opt('specCtlsFk')?.classList.toggle('hidden', d !== 'fk');
+  // The f-k explanatory note only applies to the F-K view.
+  $opt('specFkNote')?.classList.toggle('hidden', d !== 'fk');
+  void refreshSpectrum();
+}
+
+/** Fetch (if needed) + paint whichever spectrum display is active. Requires an
+ *  open file; otherwise paints the empty-state placeholder. */
+async function refreshSpectrum() {
+  if (!summary || summary.traceCount === 0) { drawSpecEmpty(); $('specLabel').textContent = 'Open a seismic file to analyse its spectrum.'; return; }
+  if (specDisplay === 'avg') return refreshSpecAvg();
+  if (specDisplay === 'spectrogram') return refreshSpecGram();
+  return refreshSpecFk();
+}
+
+/** AVERAGE amplitude spectrum: fetch the mean spectrum, draw via the SHARED
+ *  drawSpectrum renderer (dB|linear toggle, peak + bandwidth markers). */
+async function refreshSpecAvg() {
+  if (specBusy) return;
+  // Optional trace-range window (blank = whole file).
+  const t0i = ($opt('specTr0') as HTMLInputElement | null)?.value.trim();
+  const t1i = ($opt('specTr1') as HTMLInputElement | null)?.value.trim();
+  const opts: { traceStart?: number; traceEnd?: number } = {};
+  if (t0i) opts.traceStart = Math.max(0, parseInt(t0i, 10) || 0);
+  if (t1i) opts.traceEnd = Math.max(0, parseInt(t1i, 10) || 0);
+  specBusy = true;
+  $('specLabel').textContent = 'Computing average spectrum…';
+  try {
+    specAvg = await api.avgSpectrum(opts);
+    drawSpecAvg();
+    $('specLabel').textContent = specAvg.log || `Average over ${specAvg.nTraces} traces.`;
+    updateHeaderClear();
+  } catch (e) {
+    $('specLabel').textContent = 'Failed: ' + errMsg(e);
+  } finally { specBusy = false; }
+}
+
+/** Repaint the cached average spectrum (no fetch) — used on dB toggle / resize. */
+function drawSpecAvg() {
+  const cv = $('specCanvas') as HTMLCanvasElement;
+  if (!specAvg) { drawSpecEmpty(); return; }
+  drawSpectrum(cv, specAvg, { dB: specDb, label: `mean of ${specAvg.nTraces} traces${specAvg.decimated ? ' (decimated)' : ''}` });
+}
+
+/** SPECTROGRAM: fetch the STFT of the current trace, draw a time×frequency
+ *  heatmap (cloning drawVelocity's offscreen-ImageData approach). */
+async function refreshSpecGram() {
+  if (specBusy || !summary) return;
+  specTraceIdx = Math.max(0, Math.min(summary.traceCount - 1, specTraceIdx));
+  const winLen = Math.max(8, parseInt(($opt('specWin') as HTMLInputElement | null)?.value || '128', 10) || 128);
+  specBusy = true;
+  $('specLabel').textContent = 'Computing spectrogram…';
+  try {
+    specGram = await api.spectrogram({ index: specTraceIdx, winLen });
+    drawSpecGram();
+    const ny = specGram.siUs > 0 ? 1e6 / specGram.siUs / 2 : 0;
+    $('specLabel').textContent = `Trace ${specTraceIdx + 1} / ${summary.traceCount} · ${specGram.nFrames} frames × ${specGram.nBins} bins · 0–${ny.toFixed(0)} Hz`;
+    const idIn = $opt('specTraceIdx') as HTMLInputElement | null; if (idIn) idIn.value = String(specTraceIdx);
+  } catch (e) {
+    $('specLabel').textContent = 'Failed: ' + errMsg(e);
+  } finally { specBusy = false; }
+}
+
+function drawSpecGram() {
+  const cv = $('specCanvas') as HTMLCanvasElement;
+  const { ctx, W, H, plot } = setupHeatmapCanvas(cv);
+  if (!specGram || specGram.nFrames === 0 || specGram.nBins === 0) { drawSpecEmpty(); return; }
+  const { mag, nFrames, nBins, times, freqs, maxMag } = specGram;
+  // Offscreen image is nBins (x = freq) × nFrames (y = time): one pixel per cell.
+  // mag is row-major nFrames×nBins, so cell (frame f, bin k) = mag[f*nBins+k].
+  const off = document.createElement('canvas');
+  off.width = nBins; off.height = nFrames;
+  const octx = off.getContext('2d')!;
+  const img = octx.createImageData(nBins, nFrames);
+  const inv = maxMag > 0 ? 1 / maxMag : 1;
+  for (let f = 0; f < nFrames; f++) {
+    const base = f * nBins;
+    for (let k = 0; k < nBins; k++) {
+      const [r, g, b] = getColor(Math.max(0, Math.min(1, mag[base + k] * inv)) * 2 - 1, 'viridis');
+      const idx = (f * nBins + k) * 4;
+      img.data[idx] = r; img.data[idx + 1] = g; img.data[idx + 2] = b; img.data[idx + 3] = 255;
+    }
+  }
+  octx.putImageData(img, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(off, plot.x, plot.y, plot.w, plot.h);
+  ctx.strokeStyle = '#214564'; ctx.lineWidth = 1; ctx.strokeRect(plot.x, plot.y, plot.w, plot.h);
+
+  // Axes: x = frequency (Hz) across, y = time (s) down.
+  const fMax = freqs.length ? freqs[freqs.length - 1] : 0;
+  const tMax = times.length ? times[times.length - 1] : 0;
+  drawHeatAxes(ctx, plot, { xLabel: 'Frequency (Hz) →', xMax: fMax, yLabel: 'Time (s) ↓', yMax: tMax });
+  drawColorbar(ctx, plot, W, 'magnitude');
+}
+
+/** F-K spectrum: fetch + draw a wavenumber(kx)×frequency(f) heatmap (kx centred
+ *  at 0). Apparent velocity = f/kx (slope); dip + aliasing read off the panel. */
+async function refreshSpecFk() {
+  if (specBusy) return;
+  specBusy = true;
+  $('specLabel').textContent = 'Computing f-k spectrum…';
+  try {
+    specFk = await api.fk({});
+    drawSpecFk();
+    $('specLabel').textContent = specFk.log || `f-k grid ${specFk.nF}×${specFk.nKx}.`;
+  } catch (e) {
+    $('specLabel').textContent = 'Failed: ' + errMsg(e);
+  } finally { specBusy = false; }
+}
+
+function drawSpecFk() {
+  const cv = $('specCanvas') as HTMLCanvasElement;
+  const { ctx, W, H, plot } = setupHeatmapCanvas(cv);
+  if (!specFk || specFk.nF === 0 || specFk.nKx === 0) { drawSpecEmpty(); return; }
+  const { mag, nKx, nF, kAxis, fAxis, maxMag } = specFk;
+  // Offscreen image is nKx (x = wavenumber) × nF (y = frequency). mag is row-major
+  // nF×nKx, so cell (freq f, wavenumber c) = mag[f*nKx+c]. Log-compress amplitude
+  // so the (huge) DC/low-freq energy doesn't wash out the panel.
+  const off = document.createElement('canvas');
+  off.width = nKx; off.height = nF;
+  const octx = off.getContext('2d')!;
+  const img = octx.createImageData(nKx, nF);
+  const logMax = Math.log1p(maxMag > 0 ? maxMag : 1);
+  for (let f = 0; f < nF; f++) {
+    const base = f * nKx;
+    for (let c = 0; c < nKx; c++) {
+      const v = logMax > 0 ? Math.log1p(mag[base + c]) / logMax : 0;
+      const [r, g, b] = getColor(Math.max(0, Math.min(1, v)) * 2 - 1, 'viridis');
+      // Flip y so f = 0 sits at the BOTTOM (frequency increases upward, the usual
+      // f-k convention). Source row f → image row (nF-1-f).
+      const idx = ((nF - 1 - f) * nKx + c) * 4;
+      img.data[idx] = r; img.data[idx + 1] = g; img.data[idx + 2] = b; img.data[idx + 3] = 255;
+    }
+  }
+  octx.putImageData(img, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(off, plot.x, plot.y, plot.w, plot.h);
+  ctx.strokeStyle = '#214564'; ctx.lineWidth = 1; ctx.strokeRect(plot.x, plot.y, plot.w, plot.h);
+
+  // Axes: x = wavenumber kx (centred at 0), y = frequency (Hz, 0 at bottom).
+  const kMin = kAxis.length ? kAxis[0] : -0.5;
+  const kMax = kAxis.length ? kAxis[kAxis.length - 1] : 0.5;
+  const fMax = fAxis.length ? fAxis[fAxis.length - 1] : 0;
+  // kx = 0 centre line.
+  const kZeroX = plot.x + ((0 - kMin) / (kMax - kMin || 1)) * plot.w;
+  drawHeatAxesXY(ctx, plot, {
+    xLabel: 'Wavenumber kx (cyc/trace) →', xMin: kMin, xMax: kMax,
+    yLabel: 'Frequency (Hz) ↑', yMin: 0, yMax: fMax, yUp: true,
+  });
+  ctx.strokeStyle = 'rgba(255,180,84,0.5)'; ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
+  ctx.beginPath(); ctx.moveTo(kZeroX, plot.y); ctx.lineTo(kZeroX, plot.y + plot.h); ctx.stroke();
+  ctx.setLineDash([]);
+  drawColorbar(ctx, plot, W, 'log |F|');
+
+  ctx.fillStyle = '#9fb0c4'; ctx.font = '10px "Segoe UI", sans-serif';
+  ctx.fillText('Slope f/kx = apparent velocity · steep dips ↔ aliasing at the kx edges', plot.x + 4, plot.y + plot.h + 22);
+}
+
+// ── Heatmap helpers (shared by the spectrogram + f-k panels) ──
+
+/** DPR-correct size the spectrum canvas, paint the dark background, and return a
+ *  drawing context + the inner plot rectangle (margins from SPEC_M). */
+function setupHeatmapCanvas(cv: HTMLCanvasElement): { ctx: CanvasRenderingContext2D; W: number; H: number; plot: { x: number; y: number; w: number; h: number } } {
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth || 900, H = cv.clientHeight || 460;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  const ctx = cv.getContext('2d')!;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#0d1f33'; ctx.fillRect(0, 0, W, H);
+  const { ML, MR, MT, MB } = SPEC_M;
+  return { ctx, W, H, plot: { x: ML, y: MT, w: W - ML - MR, h: H - MT - MB } };
+}
+
+/** Empty-state placeholder for the spectrum canvas (no file / no data). */
+function drawSpecEmpty() {
+  const cv = $('specCanvas') as HTMLCanvasElement;
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth || 900, H = cv.clientHeight || 460;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  const ctx = cv.getContext('2d')!;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#0d1f33'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#5e7186'; ctx.font = '13px Consolas, monospace'; ctx.textAlign = 'center';
+  ctx.fillText('Open a seismic file to analyse its spectrum', W / 2, H / 2);
+  ctx.textAlign = 'left';
+}
+
+/** Axis labels for a heatmap whose X runs 0→xMax and Y runs 0→yMax (y down). */
+function drawHeatAxes(ctx: CanvasRenderingContext2D, plot: { x: number; y: number; w: number; h: number }, a: { xLabel: string; xMax: number; yLabel: string; yMax: number }) {
+  drawHeatAxesXY(ctx, plot, { xLabel: a.xLabel, xMin: 0, xMax: a.xMax, yLabel: a.yLabel, yMin: 0, yMax: a.yMax, yUp: false });
+}
+
+/** General heatmap axis labels: X from xMin→xMax, Y from yMin→yMax. `yUp` puts
+ *  yMin at the bottom (frequency-up convention); otherwise yMin is at the top. */
+function drawHeatAxesXY(
+  ctx: CanvasRenderingContext2D,
+  plot: { x: number; y: number; w: number; h: number },
+  a: { xLabel: string; xMin: number; xMax: number; yLabel: string; yMin: number; yMax: number; yUp: boolean },
+) {
+  ctx.font = '10px Consolas, monospace';
+  // X ticks.
+  const xSpan = a.xMax - a.xMin || 1;
+  const xStep = niceStep(xSpan, 8);
+  const xStart = Math.ceil(a.xMin / xStep) * xStep;
+  for (let v = xStart; v <= a.xMax + 1e-6; v += xStep) {
+    const x = plot.x + ((v - a.xMin) / xSpan) * plot.w;
+    if (x < plot.x - 0.5 || x > plot.x + plot.w + 0.5) continue;
+    ctx.strokeStyle = 'rgba(33,69,100,0.35)';
+    ctx.beginPath(); ctx.moveTo(x, plot.y); ctx.lineTo(x, plot.y + plot.h); ctx.stroke();
+    ctx.fillStyle = '#5e7186'; ctx.textAlign = 'center';
+    ctx.fillText(Math.abs(v) < 1 && v !== 0 ? v.toFixed(2) : v.toFixed(0), x, plot.y + plot.h + 14);
+  }
+  ctx.textAlign = 'left';
+  // Y ticks.
+  const ySpan = a.yMax - a.yMin || 1;
+  for (let g = 0; g <= 4; g++) {
+    const frac = g / 4;
+    const y = plot.y + frac * plot.h;
+    const val = a.yUp ? a.yMax - frac * ySpan : a.yMin + frac * ySpan;
+    ctx.strokeStyle = 'rgba(33,69,100,0.35)';
+    ctx.beginPath(); ctx.moveTo(plot.x, y); ctx.lineTo(plot.x + plot.w, y); ctx.stroke();
+    ctx.fillStyle = '#5e7186';
+    ctx.fillText(Math.abs(val) < 1 && val !== 0 ? val.toFixed(2) : val.toFixed(0), 4, y + 3);
+  }
+  // Axis titles.
+  ctx.fillStyle = '#7e93ac';
+  ctx.fillText(a.xLabel, plot.x, plot.y - 4);
+  ctx.fillText(a.yLabel, 4, plot.y - 4);
+}
+
+/** Vertical viridis colorbar (0..1 normalized) to the right of the plot rect. */
+function drawColorbar(ctx: CanvasRenderingContext2D, plot: { x: number; y: number; w: number; h: number }, W: number, label: string) {
+  const bw = 12, bh = Math.min(plot.h, 160);
+  const x0 = plot.x + plot.w + 14, y0 = plot.y + (plot.h - bh) / 2;
+  for (let p = 0; p < bh; p++) {
+    const t = 1 - p / (bh - 1); // 1 at top → 0 at bottom
+    const [r, g, b] = colorViridis(t * 2 - 1);
+    ctx.fillStyle = `rgb(${r},${g},${b})`;
+    ctx.fillRect(x0, y0 + p, bw, 1);
+  }
+  ctx.strokeStyle = 'rgba(200,210,224,0.5)'; ctx.lineWidth = 1;
+  ctx.strokeRect(x0 + 0.5, y0 + 0.5, bw, bh);
+  ctx.fillStyle = '#c8d2e0'; ctx.font = '10px Consolas, monospace'; ctx.textAlign = 'left';
+  ctx.fillText('hi', x0 + bw + 4, y0 + 8);
+  ctx.fillText('lo', x0 + bw + 4, y0 + bh);
+  ctx.fillStyle = '#9fb0c4'; ctx.save(); ctx.translate(x0 + bw + 26, y0 + bh / 2); ctx.rotate(Math.PI / 2);
+  ctx.textAlign = 'center'; ctx.fillText(label, 0, 0); ctx.restore(); ctx.textAlign = 'left';
+}
+
+/** Repaint the active display from cached data (no fetch) — for resize/theme. */
+function repaintSpectrum() {
+  if (!summary || summary.traceCount === 0) { drawSpecEmpty(); return; }
+  if (specDisplay === 'avg') drawSpecAvg();
+  else if (specDisplay === 'spectrogram') { if (specGram) drawSpecGram(); else drawSpecEmpty(); }
+  else { if (specFk) drawSpecFk(); else drawSpecEmpty(); }
+}
+
+/** Step the spectrogram's trace index by ±1 (clamped) and re-fetch. */
+function specStepTrace(delta: number) {
+  if (!summary) return;
+  specTraceIdx = Math.max(0, Math.min(summary.traceCount - 1, specTraceIdx + delta));
+  if (specDisplay === 'spectrogram') void refreshSpecGram();
+}
+
+/** Wire up the Spectrum tab's controls (called once from init). */
+function initSpectrum() {
+  // Display selector (segmented).
+  $opt('specDispAvg')?.addEventListener('click', () => setSpecDisplay('avg'));
+  $opt('specDispGram')?.addEventListener('click', () => setSpecDisplay('spectrogram'));
+  $opt('specDispFk')?.addEventListener('click', () => setSpecDisplay('fk'));
+
+  // ── Average-spectrum controls ──
+  $opt('specDbLin')?.addEventListener('click', () => setSpecDb(false));
+  $opt('specDbDb')?.addEventListener('click', () => setSpecDb(true));
+  $opt('specAvgCompute')?.addEventListener('click', () => void refreshSpecAvg());
+  // Enter in either trace-range box recomputes the average.
+  for (const id of ['specTr0', 'specTr1']) {
+    $opt(id)?.addEventListener('keydown', (e) => { if ((e as KeyboardEvent).key === 'Enter') { e.preventDefault(); void refreshSpecAvg(); } });
+  }
+
+  // ── Spectrogram controls ──
+  $opt('specPrev')?.addEventListener('click', () => specStepTrace(-1));
+  $opt('specNext')?.addEventListener('click', () => specStepTrace(1));
+  const idIn = $opt('specTraceIdx') as HTMLInputElement | null;
+  idIn?.addEventListener('change', () => {
+    if (!summary) return;
+    specTraceIdx = Math.max(0, Math.min(summary.traceCount - 1, parseInt(idIn.value, 10) || 0));
+    void refreshSpecGram();
+  });
+  $opt('specWin')?.addEventListener('change', () => void refreshSpecGram());
+
+  // ── F-K controls ──
+  $opt('specFkCompute')?.addEventListener('click', () => void refreshSpecFk());
+
+  // Initial segmented + control-group state, and an empty placeholder.
+  $opt('specDispAvg')?.classList.add('on');
+  $opt('specCtlsGram')?.classList.add('hidden');
+  $opt('specCtlsFk')?.classList.add('hidden');
+  $opt('specFkNote')?.classList.add('hidden'); // f-k note hidden until the F-K view
+  $opt('specDbLin')?.classList.add('on');
+  drawSpecEmpty();
+}
+
+/** Switch the Average view's amplitude axis between linear and dB + repaint. */
+function setSpecDb(dB: boolean) {
+  if (specDb === dB) return;
+  specDb = dB;
+  $opt('specDbLin')?.classList.toggle('on', !dB);
+  $opt('specDbDb')?.classList.toggle('on', dB);
+  if (specDisplay === 'avg' && specAvg) drawSpecAvg();
+}
+
+/** Clear the spectrum tab's cached payloads + repaint the empty placeholder. The
+ *  open seismic file is left untouched. */
+function clearSpectrum() {
+  specAvg = null; specGram = null; specFk = null;
+  drawSpecEmpty();
+  $('specLabel').textContent = 'Open a seismic file to analyse its spectrum.';
+  updateHeaderClear();
 }
 
 
@@ -5734,6 +6164,7 @@ function init() {
   $('velComputeBtn').addEventListener('click', () => void computeVelocity());
   $('velExportBtn').addEventListener('click', () => void exportPicks());
   ($('velCanvas') as HTMLCanvasElement).addEventListener('click', onVelClick);
+  initSpectrum();           // Spectrum tab: display selector + per-display controls
   workbenchInteractions(); // Trace Workbench: add/remove/clear + shared zoom/pan
   initObsLog();             // Observer Log: wizard + editable grid wiring
   // OS-aware key hints (replaces the hard-coded ⌘ glyphs everywhere).
@@ -5787,7 +6218,7 @@ function onKeyDown(e: KeyboardEvent) {
   // '[' / ']' step to the previous / next seismic file in the open file's folder.
   if (!mod && e.key === '[') { e.preventDefault(); void navFile(-1); return; }
   if (!mod && e.key === ']') { e.preventDefault(); void navFile(1); return; }
-  if (!mod && e.key >= '1' && e.key <= '6') {
+  if (!mod && e.key >= '1' && e.key <= '8') {
     const idx = parseInt(e.key, 10) - 1;
     if (idx >= 0 && idx < TABS.length) { e.preventDefault(); switchTab(TABS[idx]); }
   }

@@ -611,6 +611,27 @@ ipcMain.handle('seisconv:semblance', async (_e, opts: { velMin: number; velMax: 
   return { semb: r.semb, vels: r.vels, nT: r.nT, dt: r.dt, siUs: r.siUs, offNote: r.offNote };
 });
 
+// Spectrum Analysis tab: average amplitude spectrum, single-trace spectrogram
+// (STFT), and the section's f-k spectrum. Each forwards the open file's typed
+// arrays straight through from the worker (transferred, zero-copy).
+ipcMain.handle('seisconv:avgSpectrum', async (_e, opts: { traceStart?: number; traceEnd?: number }) => {
+  const r = await callWorker<{ ok: boolean; error?: string } & Record<string, any>>({ type: 'avgSpectrum', ...(opts || {}) });
+  if (!r.ok) throw new Error(r.error || 'avgSpectrum failed');
+  return { freqs: r.freqs, amp: r.amp, nyquist: r.nyquist, nTraces: r.nTraces, decimated: r.decimated, log: r.log };
+});
+
+ipcMain.handle('seisconv:spectrogram', async (_e, opts: { index: number; winLen?: number; hop?: number }) => {
+  const r = await callWorker<{ ok: boolean; error?: string } & Record<string, any>>({ type: 'spectrogram', ...(opts || {}) });
+  if (!r.ok) throw new Error(r.error || 'spectrogram failed');
+  return { mag: r.mag, nFrames: r.nFrames, nBins: r.nBins, freqs: r.freqs, times: r.times, maxMag: r.maxMag, siUs: r.siUs };
+});
+
+ipcMain.handle('seisconv:fk', async (_e, opts: { dx?: number }) => {
+  const r = await callWorker<{ ok: boolean; error?: string } & Record<string, any>>({ type: 'fk', ...(opts || {}) });
+  if (!r.ok) throw new Error(r.error || 'fk failed');
+  return { mag: r.mag, nKx: r.nKx, nF: r.nF, kAxis: r.kAxis, fAxis: r.fAxis, maxMag: r.maxMag, decimated: r.decimated, log: r.log };
+});
+
 ipcMain.handle('seisconv:exportText', async (_e, args: { name: string; text: string }) => {
   if (!win) return { ok: false };
   const save = await dialog.showSaveDialog(win, { defaultPath: args.name });
