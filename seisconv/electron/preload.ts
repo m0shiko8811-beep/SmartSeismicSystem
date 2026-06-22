@@ -260,6 +260,10 @@ const api = {
     ipcRenderer.invoke('seisconv:spsPointDetail', args),
   /** Reproject the loaded SPS survey to an EPSG target and save a ZIP. */
   spsReproject: (code: string): Promise<ConvertResult> => ipcRenderer.invoke('seisconv:spsReproject', code),
+  /** Export the loaded SPS survey as KML / GeoJSON / a CSV trio / a QC-report CSV.
+   *  Multi-file output (csv) is saved as a ZIP; single-file output via a Save dialog. */
+  spsExport: (args: { kind: 'kml' | 'geojson' | 'csv' | 'qcreport'; qcParams?: { srcInt?: number; rcvInt?: number; tol?: number; maxOff?: number; maxSrc?: number; maxRcv?: number } }): Promise<ConvertResult> =>
+    ipcRenderer.invoke('seisconv:spsExport', args),
   /** Compute an NMO semblance panel for the open file. */
   semblance: (opts: { velMin: number; velMax: number; velStep: number }): Promise<SemblanceData> => ipcRenderer.invoke('seisconv:semblance', opts),
   /** Save arbitrary text (e.g. velocity picks CSV) via a native dialog. */

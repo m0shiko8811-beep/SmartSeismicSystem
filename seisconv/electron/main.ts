@@ -394,6 +394,35 @@ ipcMain.handle('seisconv:spsReproject', async (_e, code: string) => {
   return { ok: true, path: save.filePath };
 });
 
+// SPS geographic / tabular exports (KML, GeoJSON, CSV trio, QC-report CSV). The
+// worker returns one-or-more {name,text} files; we save them with the SAME flow
+// as spsReproject: multi-file output is zipped (JSZip), single-file output uses a
+// plain native save dialog. The CSV kind yields three files → ZIP; kml / geojson /
+// qcreport each yield one file → single-file Save dialog.
+ipcMain.handle('seisconv:spsExport', async (_e, args: { kind: 'kml' | 'geojson' | 'csv' | 'qcreport'; qcParams?: Record<string, number> }) => {
+  const r = await callWorker<{ ok: boolean; files?: { name: string; text: string }[]; error?: string }>({ type: 'spsExport', kind: args?.kind, qcParams: args?.qcParams });
+  if (!r.ok || !r.files) return { ok: false, error: r.error ?? 'export failed' };
+  if (!win) return { ok: false, error: 'no window' };
+
+  if (r.files.length > 1) {
+    // Same packaging path as the reproject ZIP export.
+    const zip = new JSZip();
+    for (const f of r.files) zip.file(f.name, f.text);
+    const buf = await zip.generateAsync({ type: 'nodebuffer' });
+    const save = await dialog.showSaveDialog(win, { defaultPath: `sps_${args.kind}.zip`, filters: [{ name: 'ZIP archive', extensions: ['zip'] }] });
+    if (save.canceled || !save.filePath) return { ok: false, canceled: true };
+    await writeFile(save.filePath, buf);
+    return { ok: true, path: save.filePath };
+  }
+
+  // Single-file: same single-file Save flow as exportText.
+  const f = r.files[0];
+  const save = await dialog.showSaveDialog(win, { defaultPath: f.name });
+  if (save.canceled || !save.filePath) return { ok: false, canceled: true };
+  await writeFile(save.filePath, f.text, 'utf8');
+  return { ok: true, path: save.filePath };
+});
+
 ipcMain.handle('seisconv:semblance', async (_e, opts: { velMin: number; velMax: number; velStep: number }) => {
   const r = await callWorker<{ ok: boolean; error?: string } & Record<string, any>>({ type: 'semblance', ...opts });
   if (!r.ok) throw new Error(r.error || 'semblance failed');

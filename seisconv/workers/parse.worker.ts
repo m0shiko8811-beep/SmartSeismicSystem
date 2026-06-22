@@ -21,11 +21,14 @@ let currentSPSFiles: { name: string; text: string; type: 'S' | 'R' | 'X' | 'mixe
 
 interface Req {
   id: number;
-  type: 'open' | 'trace' | 'section' | 'convert' | 'convertPath' | 'reset' | 'openSPS' | 'spsGeometry' | 'spsXrefLines' | 'spsFold' | 'spsQC' | 'spsPointDetail' | 'spsReproject' | 'semblance';
+  type: 'open' | 'trace' | 'section' | 'convert' | 'convertPath' | 'reset' | 'openSPS' | 'spsGeometry' | 'spsXrefLines' | 'spsFold' | 'spsQC' | 'spsPointDetail' | 'spsReproject' | 'spsExport' | 'semblance';
   path?: string;
   paths?: string[];
   qc?: QCParams;
   code?: string;
+  // spsExport: which artifact to produce + optional QC params for the QC report.
+  kind?: 'kml' | 'geojson' | 'csv' | 'qcreport';
+  qcParams?: QCParams;
   // spsPointDetail lookup key: pick the matching S/R point by line + point (+ idx).
   rtype?: 'S' | 'R';
   lineName?: string;
@@ -63,6 +66,188 @@ function summarize(pf: ParsedFile) {
     sampleInt: pf.bh.sampleInt ?? null,
     errors: pf.errors,
   };
+}
+
+// ── SPS exports (CSV / GeoJSON / KML / QC-report) ──
+//
+// All of these read from the in-worker `currentSPS`. Geographic outputs reproject
+// projected E/N to WGS84 lon/lat with the SAME projToLatLon spsGeometry uses; when
+// the SPS header carries no projection they fall back to raw E/N (GeoJSON keeps the
+// numbers + flags it; KML refuses, since it is geographic-only by spec).
+
+type SPSExportProj = Parameters<typeof projToLatLon>[2];
+
+/** Number → fixed string, blank for non-finite (keeps CSV cells / coords clean). */
+function nz(v: unknown, dp = 6): string {
+  const n = typeof v === 'number' ? v : parseFloat(String(v));
+  return isFinite(n) ? n.toFixed(dp) : '';
+}
+
+/** Quote a CSV cell only when it contains a comma, quote, or newline (RFC-4180). */
+function csvCell(v: unknown): string {
+  if (v == null) return '';
+  const s = String(v);
+  return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+function csvRow(cells: unknown[]): string {
+  return cells.map(csvCell).join(',');
+}
+
+/** Escape the five XML metacharacters for KML text/attribute content. */
+function xmlEsc(v: unknown): string {
+  return String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+}
+
+/** Project a point's E/N to lon/lat when `proj` is set; else echo raw E/N as lon/lat. */
+function toLonLat(p: SPSPoint, proj: SPSExportProj | undefined): { lon: number; lat: number } {
+  if (proj && isFinite(p.easting) && isFinite(p.northing)) {
+    const ll = projToLatLon(p.easting, p.northing, proj, isFinite(p.elevation) ? p.elevation : 0);
+    return { lon: ll.lon, lat: ll.lat };
+  }
+  return { lon: p.easting, lat: p.northing };
+}
+
+function buildSPSCsv(d: SPSData): { name: string; text: string }[] {
+  const srcHdr = ['rtype', 'lineName', 'point', 'idx', 'easting', 'northing', 'elevation', 'srcType', 'upholeMs', 'date', 'time', 'ffid'];
+  const rcvHdr = ['rtype', 'lineName', 'point', 'idx', 'easting', 'northing', 'elevation', 'staticMs'];
+  const srcLines = [csvRow(srcHdr)];
+  for (const s of d.sources) {
+    srcLines.push(csvRow([s.rtype, s.lineName, s.point, s.idx, nz(s.easting, 3), nz(s.northing, 3), nz(s.elevation, 3), s.srcType ?? '', s.upholeMs ?? '', s.date ?? '', s.time ?? '', s.ffid ?? '']));
+  }
+  const rcvLines = [csvRow(rcvHdr)];
+  for (const r of d.receivers) {
+    rcvLines.push(csvRow([r.rtype, r.lineName, r.point, r.idx, nz(r.easting, 3), nz(r.northing, 3), nz(r.elevation, 3), r.staticMs ?? '']));
+  }
+
+  // X-refs: include the channel range only when present (SPS2.1 records carry it).
+  const hasCh = d.xrefs.some((x) => x.fromCh != null || x.toCh != null);
+  const xHdr = ['srcLine', 'srcPt', 'ffid', 'rcvLineFrom', 'rcvPtFrom', 'rcvPtTo', ...(hasCh ? ['fromCh', 'toCh'] : []), 'layout'];
+  const xLines = [csvRow(xHdr)];
+  for (const x of d.xrefs) {
+    const row: unknown[] = [x.srcLine ?? '', x.srcPt ?? '', x.ffid ?? '', x.rcvLineFrom ?? '', x.rcvPtFrom ?? '', x.rcvPtTo ?? ''];
+    if (hasCh) row.push(x.fromCh ?? '', x.toCh ?? '');
+    row.push(x.layout ?? '');
+    xLines.push(csvRow(row));
+  }
+
+  return [
+    { name: 'sources.csv', text: srcLines.join('\n') + '\n' },
+    { name: 'receivers.csv', text: rcvLines.join('\n') + '\n' },
+    { name: 'xrefs.csv', text: xLines.join('\n') + '\n' },
+  ];
+}
+
+function buildSPSGeoJSON(d: SPSData): { name: string; text: string }[] {
+  const proj = (d.projection && d.projection.type ? d.projection : undefined) as unknown as SPSExportProj | undefined;
+  const geographic = !!proj;
+  const features: unknown[] = [];
+
+  const pointFeature = (p: SPSPoint) => {
+    const { lon, lat } = toLonLat(p, proj);
+    if (!isFinite(lon) || !isFinite(lat)) return;
+    const props: Record<string, unknown> = { rtype: p.rtype, lineName: p.lineName, point: p.point, idx: p.idx, easting: p.easting, northing: p.northing, elevation: p.elevation };
+    if (p.rtype === 'S') { props.srcType = p.srcType; props.upholeMs = p.upholeMs; props.ffid = p.ffid; }
+    else props.staticMs = p.staticMs;
+    features.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [lon, lat] }, properties: props });
+  };
+  for (const s of d.sources) pointFeature(s);
+  for (const r of d.receivers) pointFeature(r);
+
+  // One LineString per survey line (sources then receivers), points ordered.
+  const lineFeatures = (pts: SPSPoint[], rtype: 'S' | 'R') => {
+    const groups = groupByLine(pts);
+    for (const name of Object.keys(groups)) {
+      const coords: number[][] = [];
+      for (const p of groups[name]) {
+        const { lon, lat } = toLonLat(p, proj);
+        if (isFinite(lon) && isFinite(lat)) coords.push([lon, lat]);
+      }
+      if (coords.length >= 2) features.push({ type: 'Feature', geometry: { type: 'LineString', coordinates: coords }, properties: { rtype, lineName: name, kind: 'surveyLine' } });
+    }
+  };
+  lineFeatures(d.sources, 'S');
+  lineFeatures(d.receivers, 'R');
+
+  const fc: Record<string, unknown> = { type: 'FeatureCollection', features };
+  if (geographic) fc.crs = { type: 'name', properties: { name: 'urn:ogc:def:crs:OGC:1.3:CRS84' } };
+  else fc.crsNote = 'projected, not WGS84 — coordinates are raw easting/northing (no projection in SPS header)';
+  return [{ name: 'survey.geojson', text: JSON.stringify(fc, null, 2) + '\n' }];
+}
+
+function buildSPSKml(d: SPSData): { ok: boolean; files: { name: string; text: string }[]; error?: string } {
+  const proj = (d.projection && d.projection.type ? d.projection : undefined) as unknown as SPSExportProj | undefined;
+  if (!proj) return { ok: false, files: [], error: 'KML export needs a projected CRS in the SPS header' };
+
+  const placemark = (p: SPSPoint, styleId: string): string => {
+    const { lon, lat } = toLonLat(p, proj);
+    if (!isFinite(lon) || !isFinite(lat)) return '';
+    const elev = isFinite(p.elevation) ? p.elevation : 0;
+    const name = `${p.lineName}/${p.point}${p.idx ? '.' + p.idx : ''}`;
+    return [
+      '      <Placemark>',
+      `        <name>${xmlEsc(name)}</name>`,
+      `        <styleUrl>#${styleId}</styleUrl>`,
+      `        <Point><coordinates>${lon},${lat},${elev}</coordinates></Point>`,
+      '      </Placemark>',
+    ].join('\n');
+  };
+
+  const srcMarks = d.sources.map((p) => placemark(p, 'srcStyle')).filter(Boolean).join('\n');
+  const rcvMarks = d.receivers.map((p) => placemark(p, 'rcvStyle')).filter(Boolean).join('\n');
+
+  const kml = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<kml xmlns="http://www.opengis.net/kml/2.2">',
+    '  <Document>',
+    '    <name>SeisConv survey</name>',
+    '    <Style id="srcStyle"><IconStyle><color>ff0000ff</color><scale>0.8</scale>',
+    '      <Icon><href>http://maps.google.com/mapfiles/kml/shapes/star.png</href></Icon></IconStyle></Style>',
+    '    <Style id="rcvStyle"><IconStyle><color>ffff9900</color><scale>0.7</scale>',
+    '      <Icon><href>http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png</href></Icon></IconStyle></Style>',
+    '    <Folder>',
+    '      <name>Sources</name>',
+    srcMarks,
+    '    </Folder>',
+    '    <Folder>',
+    '      <name>Receivers</name>',
+    rcvMarks,
+    '    </Folder>',
+    '  </Document>',
+    '</kml>',
+    '',
+  ].join('\n');
+  return { ok: true, files: [{ name: 'survey.kml', text: kml }] };
+}
+
+function buildSPSQCReport(d: SPSData, params: QCParams): { name: string; text: string }[] {
+  const results = runSPSQC(d, params);
+  let errors = 0, warns = 0, oks = 0;
+  for (const r of results) { if (r.sev === 'error') errors++; else if (r.sev === 'warn') warns++; else oks++; }
+
+  // A small comment-style header block (the data rows follow, machine-readable).
+  const lines: string[] = [];
+  lines.push('# SeisConv SPS QC report');
+  lines.push(`# sources,${d.sources.length}`);
+  lines.push(`# receivers,${d.receivers.length}`);
+  lines.push(`# xrefs,${d.xrefs.length}`);
+  lines.push(`# errors,${errors}`);
+  lines.push(`# warnings,${warns}`);
+  lines.push(`# ok,${oks}`);
+  lines.push(csvRow(['severity', 'category', 'message', 'easting', 'northing']));
+  for (const r of results) {
+    const pt = r.pts && r.pts.length ? r.pts[0] : undefined;
+    lines.push(csvRow([r.sev, r.cat, r.msg, pt ? nz(pt.easting, 3) : '', pt ? nz(pt.northing, 3) : '']));
+  }
+  return [{ name: 'sps_qc_report.csv', text: lines.join('\n') + '\n' }];
+}
+
+function buildSPSExport(d: SPSData, kind: 'kml' | 'geojson' | 'csv' | 'qcreport', qcParams: QCParams): { ok: boolean; files: { name: string; text: string }[]; error?: string } {
+  if (kind === 'csv') return { ok: true, files: buildSPSCsv(d) };
+  if (kind === 'geojson') return { ok: true, files: buildSPSGeoJSON(d) };
+  if (kind === 'kml') return buildSPSKml(d);
+  if (kind === 'qcreport') return { ok: true, files: buildSPSQCReport(d, qcParams) };
+  return { ok: false, files: [], error: `unknown export kind: ${kind}` };
 }
 
 port.on('message', (req: Req) => {
@@ -447,6 +632,20 @@ port.on('message', (req: Req) => {
         text: reprojectSPS(f.text.split('\n'), tgt, f.type === 'X' ? 'X' : f.type === 'R' ? 'R' : 'S', currentSPS!.projection!),
       }));
       port.postMessage({ id, ok: true, files });
+      return;
+    }
+
+    // SPS geographic / tabular EXPORTS: turn the loaded survey into CSV / GeoJSON /
+    // KML / a QC-report CSV. Single source of truth for coordinates is the SAME
+    // projToLatLon used by spsGeometry — KML/GeoJSON go to WGS84 lon/lat when a
+    // projected CRS is present in the SPS header, otherwise raw projected E/N.
+    if (type === 'spsExport') {
+      if (!currentSPS) {
+        port.postMessage({ id, ok: false, error: 'no SPS loaded' });
+        return;
+      }
+      const out = buildSPSExport(currentSPS, req.kind ?? 'csv', req.qcParams ?? {});
+      port.postMessage({ id, ok: out.ok, files: out.files, error: out.error });
       return;
     }
 

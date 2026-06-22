@@ -101,6 +101,7 @@ declare global {
       spsQC(qc?: QCParamsUI): Promise<QCRow[]>;
       spsPointDetail(args: { rtype: 'S' | 'R'; lineName: string; point: number; idx?: string }): Promise<SPSPointDetail | null>;
       spsReproject(code: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
+      spsExport(args: { kind: 'kml' | 'geojson' | 'csv' | 'qcreport'; qcParams?: QCParamsUI }): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
       semblance(opts: { velMin: number; velMax: number; velStep: number }): Promise<SemblanceData>;
       exportText(name: string, text: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
       // App-wide UI zoom (whole interface), backed by Electron's webFrame.
@@ -1637,6 +1638,7 @@ async function loadSPS() {
       return;
     }
     spsSummary = s;
+    setSpsExportEnabled(true);
     spsGeom = null;
     spsSpider = null;
     spsFold = null;
@@ -2213,6 +2215,38 @@ async function exportReprojected() {
   }
 }
 
+// Read the current QC inputs (same fields runQC sends) so the QC-report export
+// uses exactly what the user has dialed in.
+function currentQCParams(): QCParamsUI {
+  return { srcInt: numVal('qcSrcInt'), rcvInt: numVal('qcRcvInt'), tol: numVal('qcTol') || 1, maxOff: numVal('qcMaxOff') };
+}
+
+// Enable/disable the SPS export buttons (disabled until a survey is loaded).
+function setSpsExportEnabled(on: boolean) {
+  for (const id of ['spsExpKmlBtn', 'spsExpGeojsonBtn', 'spsExpCsvBtn', 'spsExpQcBtn']) {
+    ($(id) as HTMLButtonElement).disabled = !on;
+  }
+}
+
+// Geographic / tabular SPS export (KML, GeoJSON, CSV trio, QC-report CSV). Saves
+// EXACTLY like exportReprojected: the main side runs the same ZIP / single-file
+// Save flow and returns {ok, path | canceled | error}; we just surface it.
+async function exportSPS(kind: 'kml' | 'geojson' | 'csv' | 'qcreport') {
+  if (!spsSummary) {
+    $('spsExpStatus').textContent = 'Load SPS files first.';
+    return;
+  }
+  $('spsExpStatus').textContent = 'Exporting…';
+  try {
+    const r = await api.spsExport({ kind, qcParams: kind === 'qcreport' ? currentQCParams() : undefined });
+    if (r.ok) $('spsExpStatus').textContent = '✓ Saved ' + r.path;
+    else if (r.canceled) $('spsExpStatus').textContent = '';
+    else $('spsExpStatus').textContent = 'Failed: ' + (r.error || 'unknown');
+  } catch (e) {
+    $('spsExpStatus').textContent = 'Failed: ' + errMsg(e);
+  }
+}
+
 // ── Velocity / semblance ──
 function velGeom(cv: HTMLCanvasElement) {
   return { W: cv.clientWidth || 900, H: cv.clientHeight || 460, ML: 56, MR: 12, MT: 12, MB: 28 };
@@ -2466,6 +2500,10 @@ function init() {
   }
   epsgSel.value = 'EPSG:4326';
   $('spsExportBtn').addEventListener('click', () => void exportReprojected());
+  $('spsExpKmlBtn').addEventListener('click', () => void exportSPS('kml'));
+  $('spsExpGeojsonBtn').addEventListener('click', () => void exportSPS('geojson'));
+  $('spsExpCsvBtn').addEventListener('click', () => void exportSPS('csv'));
+  $('spsExpQcBtn').addEventListener('click', () => void exportSPS('qcreport'));
   $('velComputeBtn').addEventListener('click', () => void computeVelocity());
   $('velExportBtn').addEventListener('click', () => void exportPicks());
   ($('velCanvas') as HTMLCanvasElement).addEventListener('click', onVelClick);
