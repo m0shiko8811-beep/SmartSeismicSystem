@@ -162,6 +162,9 @@ const api = {
   semblance: (opts: { velMin: number; velMax: number; velStep: number }): Promise<SemblanceData> => ipcRenderer.invoke('seisconv:semblance', opts),
   /** Save arbitrary text (e.g. velocity picks CSV) via a native dialog. */
   exportText: (name: string, text: string): Promise<ConvertResult> => ipcRenderer.invoke('seisconv:exportText', { name, text }),
+  /** Recolor the native window-controls overlay (min/max/close) to match the active theme. */
+  setTitleBarOverlay: (opts: { color: string; symbolColor: string }): Promise<void> =>
+    ipcRenderer.invoke('seisconv:setTitleBarOverlay', opts),
 };
 
 export type SeisconvAPI = typeof api;

@@ -75,6 +75,17 @@ function createWindow(): void {
     minHeight: 560,
     backgroundColor: '#0d1f33',
     show: false,
+    // Frameless: drop the native OS title bar so the app's own header is the
+    // top of the window, but keep functional native min/max/close as a Windows
+    // Controls Overlay we recolor per theme (see seisconv:setTitleBarOverlay).
+    // Defaults match the LIGHT-theme header (--header-bg over --canvas) so the
+    // first paint is correct before the renderer's initTheme() runs.
+    titleBarStyle: 'hidden',
+    titleBarOverlay: {
+      color: '#f3f6fb',     // light header background (opaque equivalent)
+      symbolColor: '#15212f', // --ink (dark/navy glyphs)
+      height: 54,            // matches the app shell header row (grid 54px)
+    },
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -226,6 +237,12 @@ ipcMain.handle(
 // Clear the open file + cached state in the worker.
 ipcMain.handle('seisconv:resetState', async () => {
   await callWorker({ type: 'reset' });
+});
+
+// Recolor the native window-controls overlay (min/max/close) so it always
+// matches the app header — called by the renderer's applyTheme() per theme.
+ipcMain.handle('seisconv:setTitleBarOverlay', (_e, opts: { color: string; symbolColor: string }) => {
+  win?.setTitleBarOverlay(opts);
 });
 
 ipcMain.handle('seisconv:openSPS', async () => {

@@ -84,6 +84,8 @@ declare global {
       spsReproject(code: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
       semblance(opts: { velMin: number; velMax: number; velStep: number }): Promise<SemblanceData>;
       exportText(name: string, text: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
+      // Recolor the native window-controls overlay (min/max/close) to match the theme.
+      setTitleBarOverlay(opts: { color: string; symbolColor: string }): Promise<void>;
     };
   }
 }
@@ -94,10 +96,20 @@ const $opt = (id: string) => document.getElementById(id);
 
 // ── Theme (GUI C: light default + working dark toggle, persisted) ──
 type Theme = 'light' | 'dark';
+// Native window-controls overlay (min/max/close) colors per theme. `color` is
+// an OPAQUE equivalent of the header background (--header-bg is translucent over
+// --canvas); `symbolColor` matches the header glyph color (--ink). Keep these in
+// sync with the BrowserWindow `titleBarOverlay` defaults in electron/main.ts.
+const TITLEBAR_OVERLAY: Record<Theme, { color: string; symbolColor: string }> = {
+  light: { color: '#f3f6fb', symbolColor: '#15212f' }, // light header bg + dark glyphs
+  dark: { color: '#102438', symbolColor: '#e8eef6' },  // navy header bg + light glyphs
+};
 function applyTheme(t: Theme) {
   document.documentElement.setAttribute('data-theme', t);
   $opt('themeLight')?.classList.toggle('on', t === 'light');
   $opt('themeDark')?.classList.toggle('on', t === 'dark');
+  // Keep the native min/max/close overlay matching the header in this theme.
+  try { void api?.setTitleBarOverlay?.(TITLEBAR_OVERLAY[t]); } catch { /* ignore */ }
   try { localStorage.setItem('seisconv.theme', t); } catch { /* ignore */ }
   // Plot canvases keep their dark scientific background in both themes, so
   // re-draw whatever is visible to refresh chrome-derived colors if needed.

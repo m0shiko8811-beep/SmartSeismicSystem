@@ -130,16 +130,29 @@ body{
   overflow:hidden;
 }
 
-/* -------- Top header -------- */
+/* -------- Top header --------
+   Frameless window: this header IS the top of the window (native title bar is
+   hidden). The bar itself is the OS drag region; every interactive child opts
+   back out with -webkit-app-region:no-drag (below). The extra right padding
+   keeps Help + theme toggle clear of the native min/max/close overlay that the
+   OS paints into the top-right corner. */
 header.header{
   grid-area:head;
   display:flex; align-items:center; gap:14px;
-  padding:0 18px;
+  padding:0 140px 0 18px;
   background:var(--header-bg);
   backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px);
   border-bottom:1px solid var(--hair);
   z-index:5;
+  -webkit-app-region:drag;
 }
+/* Interactive elements in / overlapping the header must stay clickable, so they
+   opt out of the OS drag region. Includes the header's own buttons/toggle/logo
+   and the left icon-rail nav buttons (which sit under the overlay's left edge). */
+header.header button,
+header.header .toggle,
+header.header .logo,
+.rail .nav-item{ -webkit-app-region:no-drag; }
 .logo{display:flex;align-items:center;gap:10px;}
 .logo .mark{
   width:30px;height:30px;border-radius:9px;flex:none;
