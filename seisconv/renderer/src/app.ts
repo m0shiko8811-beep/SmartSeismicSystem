@@ -50,6 +50,37 @@ declare global {
 }
 const api = window.seisconvAPI;
 const $ = (id: string) => document.getElementById(id) as HTMLElement;
+/** Optional lookup — returns null instead of throwing when an id is absent. */
+const $opt = (id: string) => document.getElementById(id);
+
+// ── Theme (GUI C: light default + working dark toggle, persisted) ──
+type Theme = 'light' | 'dark';
+function applyTheme(t: Theme) {
+  document.documentElement.setAttribute('data-theme', t);
+  $opt('themeLight')?.classList.toggle('on', t === 'light');
+  $opt('themeDark')?.classList.toggle('on', t === 'dark');
+  try { localStorage.setItem('seisconv.theme', t); } catch { /* ignore */ }
+  // Plot canvases keep their dark scientific background in both themes, so
+  // re-draw whatever is visible to refresh chrome-derived colors if needed.
+  if (lastTrace && $opt('panel-trace')?.style.display !== 'none') renderTrace();
+  if (lastSection && $opt('panel-section')?.style.display !== 'none') redrawSection();
+}
+function initTheme() {
+  let t: Theme = 'light';
+  try { const s = localStorage.getItem('seisconv.theme'); if (s === 'dark' || s === 'light') t = s; } catch { /* ignore */ }
+  applyTheme(t);
+  $opt('themeLight')?.addEventListener('click', () => applyTheme('light'));
+  $opt('themeDark')?.addEventListener('click', () => applyTheme('dark'));
+}
+
+// Tab chrome metadata (title + breadcrumb + description in the tab header).
+const TAB_META: Record<string, { title: string; desc: string }> = {
+  conv: { title: 'Converter', desc: 'Read SEG-Y · SEG-D · SEG-2 / .dat · SU off the UI thread, then export to any supported format.' },
+  trace: { title: 'Trace Inspector', desc: 'Step through individual traces; inspect the waveform or amplitude spectrum.' },
+  section: { title: 'File Viewer', desc: 'Render the full record as a variable-density / wiggle section with gain and AGC.' },
+  sps: { title: 'SPS 2.1', desc: 'Plot source/receiver geometry on a survey grid or real basemap; QC and reproject.' },
+  vel: { title: 'Velocity', desc: 'Compute an NMO semblance panel and pick a stacking-velocity function.' },
+};
 
 let summary: Summary | null = null;
 let traceIndex = 0;
@@ -74,6 +105,12 @@ function switchTab(tab: Tab) {
     $(`tab-${t}`).classList.toggle('on', t === tab);
     $(`panel-${t}`).style.display = t === tab ? '' : 'none';
   }
+  const meta = TAB_META[tab];
+  if (meta) {
+    const ti = $opt('tabTitle'); if (ti) ti.textContent = meta.title;
+    const de = $opt('tabDesc'); if (de) de.textContent = meta.desc;
+    const cr = $opt('crumbTab'); if (cr) cr.textContent = meta.title;
+  }
   if (tab === 'trace' && summary) void refreshTrace();
   if (tab === 'section' && summary) void refreshSection();
   if (tab === 'sps' && spsSummary) void refreshSps();
@@ -90,9 +127,18 @@ function setStatus(id: string, msg: string, kind = '') {
   el.className = 'status' + (kind ? ' ' + kind : '');
 }
 
+/** Group-thousands integer with a thin space separator (tabular-nums friendly). */
+function grp(n: number | null): string {
+  if (n == null || !isFinite(n)) return '—';
+  return Math.round(n).toLocaleString('en-US').replace(/,/g, ' ');
+}
+function setText(id: string, txt: string) { const el = $opt(id); if (el) el.textContent = txt; }
+
 function renderInfo() {
   if (!summary) {
     $('fileInfo').style.display = 'none';
+    clearSummaryPanel();
+    updateStatusStrip();
     return;
   }
   $('fileInfo').style.display = '';
@@ -103,24 +149,133 @@ function renderInfo() {
     (summary.errors.length ? ` · ⚠ ${summary.errors.length}` : '');
   // enable controls that need a file
   ($('convertBtn') as HTMLButtonElement).disabled = !(summary.traceCount > 0);
+  renderSummaryPanel();
+  renderHeaderQc();
+  updateStatusStrip();
+}
+
+/** Right-rail File-summary card, populated from the openAndParse summary. */
+function renderSummaryPanel() {
+  if (!summary) { clearSummaryPanel(); return; }
+  const s = summary;
+  const fmtShort = s.format.replace(/^SEG-?Y$/i, 'SEG-Y');
+  setText('fsFormat', fmtShort + (s.revision ? ' R' + s.revision : ''));
+  setText('fsTraces', grp(s.traceCount));
+  setText('fsSamples', grp(s.samplesTrace));
+  setText('fsInterval', s.sampleInt != null ? `${(s.sampleInt / 1000).toFixed(3)} ms` : '—');
+  const recMs = s.samplesTrace != null && s.sampleInt != null ? (s.samplesTrace * s.sampleInt) / 1e6 : null;
+  setText('fsRecord', recMs != null ? `${recMs.toFixed(3)} s` : '—');
+  setText('fsData', s.format || '—');
+  setText('fsRevision', s.revision ? `Rev ${s.revision}` : '—');
+  setText('fsByteOrder', /seg-?y/i.test(s.format) ? 'big-endian' : '—');
+  setText('fsCrs', spsCrsLabel());
+}
+function clearSummaryPanel() {
+  for (const id of ['fsFormat', 'fsTraces', 'fsSamples', 'fsInterval', 'fsRecord', 'fsData', 'fsRevision', 'fsByteOrder', 'fsCrs']) setText(id, '—');
+  setText('fsCrs', spsCrsLabel());
+}
+
+/** Header-QC indicator: badge in the tab header + pill + flag list, driven by summary.errors. */
+function renderHeaderQc() {
+  const badge = $opt('hdrQcBadge');
+  const pill = $opt('hdrQcPill');
+  const list = $opt('hdrQcList');
+  if (!summary) {
+    if (badge) { badge.className = 'pill neutral'; badge.innerHTML = '<span class="dot" style="background:var(--ink-4)"></span>No file'; }
+    if (pill) { pill.className = 'pill neutral'; pill.textContent = '—'; }
+    if (list) list.innerHTML = '<div class="fl"><span class="pill neutral" style="justify-self:start">—</span><span class="msg">Open a file to run header QC.</span><span class="cat"></span></div>';
+    return;
+  }
+  const errs = summary.errors;
+  const n = errs.length;
+  if (badge) {
+    if (n === 0) { badge.className = 'pill green'; badge.innerHTML = '<span class="dot" style="background:var(--green)"></span>Headers OK'; }
+    else { badge.className = 'pill amber'; badge.innerHTML = `<span class="dot" style="background:var(--amber)"></span>${n} flag${n > 1 ? 's' : ''}`; }
+  }
+  if (pill) {
+    if (n === 0) { pill.className = 'pill green'; pill.textContent = 'OK'; }
+    else { pill.className = 'pill amber'; pill.textContent = `${n} warning${n > 1 ? 's' : ''}`; }
+  }
+  if (list) {
+    list.innerHTML = '';
+    if (n === 0) {
+      const fl = document.createElement('div');
+      fl.className = 'fl';
+      fl.innerHTML = '<span class="pill green" style="justify-self:start">OK</span><span class="msg">No header issues detected.</span><span class="cat"></span>';
+      list.appendChild(fl);
+    } else {
+      for (const e of errs) {
+        const fl = document.createElement('div');
+        fl.className = 'fl';
+        const sev = document.createElement('span');
+        sev.className = 'pill amber';
+        sev.style.justifySelf = 'start';
+        sev.textContent = 'WARN';
+        const msg = document.createElement('span');
+        msg.className = 'msg';
+        msg.textContent = e;
+        const cat = document.createElement('span');
+        cat.className = 'cat';
+        list.appendChild(fl);
+        fl.appendChild(sev);
+        fl.appendChild(msg);
+        fl.appendChild(cat);
+      }
+    }
+  }
+}
+
+/** Best-known CRS string from a loaded SPS survey, else a dash. */
+function spsCrsLabel(): string {
+  const p = spsSummary?.projection;
+  if (!p) return '—';
+  return p.desc || p.type || p.subtype || '—';
+}
+
+/** Bottom status strip: file · dt · traces · fmt · CRS + activity state. */
+function updateStatusStrip() {
+  if (!summary) {
+    setText('sbFile', '—'); setText('sbDt', '—'); setText('sbTraces', '—'); setText('sbFmt', '—');
+    setText('sbCrs', spsCrsLabel());
+    setState('idle', 'Idle');
+    return;
+  }
+  setText('sbFile', summary.name);
+  setText('sbDt', summary.sampleInt != null ? `${(summary.sampleInt / 1000).toFixed(3)} ms` : '—');
+  setText('sbTraces', grp(summary.traceCount));
+  setText('sbFmt', `${summary.format}${summary.revision ? ' Rev ' + summary.revision : ''}`);
+  setText('sbCrs', spsCrsLabel());
+}
+
+type StripState = 'idle' | 'busy' | 'ok' | 'err';
+function setState(kind: StripState, label: string) {
+  const el = $opt('sbState');
+  if (!el) return;
+  const col = kind === 'busy' ? 'var(--teal)' : kind === 'ok' ? 'var(--green)' : kind === 'err' ? 'var(--red)' : 'var(--ink-4)';
+  const txtCol = kind === 'busy' ? 'var(--teal-deep)' : kind === 'ok' ? 'var(--green)' : kind === 'err' ? 'var(--red)' : 'var(--ink-2)';
+  el.innerHTML = `<span class="dot" style="background:${col}"></span><b style="color:${txtCol}">${label}</b>`;
 }
 
 async function onOpen() {
   setStatus('convStatus', 'Opening…');
+  setState('busy', 'Opening…');
   try {
     const s = await api.openAndParse();
     if (!s) {
       setStatus('convStatus', '');
+      updateStatusStrip();
       return;
     }
     summary = s;
     traceIndex = 0;
     renderInfo();
     setStatus('convStatus', '');
+    setState(s.errors.length ? 'ok' : 'ok', s.errors.length ? `Loaded · ${s.errors.length} flag${s.errors.length > 1 ? 's' : ''}` : 'Loaded');
     if ($('panel-trace').style.display !== 'none') void refreshTrace();
     if ($('panel-section').style.display !== 'none') void refreshSection();
   } catch (e) {
     setStatus('convStatus', 'Could not read file: ' + errMsg(e), 'err');
+    setState('err', 'Open failed');
   }
 }
 
@@ -128,14 +283,16 @@ async function onOpen() {
 async function onConvert() {
   if (!summary) return;
   setStatus('convStatus', 'Converting…');
+  setState('busy', 'Converting…');
   ($('convertBtn') as HTMLButtonElement).disabled = true;
   try {
     const r = await api.convert(outFormat);
-    if (r.ok) setStatus('convStatus', '✓ Saved ' + r.path, 'ok');
-    else if (r.canceled) setStatus('convStatus', '');
-    else setStatus('convStatus', 'Conversion failed: ' + (r.error || 'unknown'), 'err');
+    if (r.ok) { setStatus('convStatus', '✓ Saved ' + r.path, 'ok'); setState('ok', 'Saved'); }
+    else if (r.canceled) { setStatus('convStatus', ''); updateStatusStrip(); }
+    else { setStatus('convStatus', 'Conversion failed: ' + (r.error || 'unknown'), 'err'); setState('err', 'Convert failed'); }
   } catch (e) {
     setStatus('convStatus', 'Conversion failed: ' + errMsg(e), 'err');
+    setState('err', 'Convert failed');
   } finally {
     ($('convertBtn') as HTMLButtonElement).disabled = !(summary && summary.traceCount > 0);
   }
@@ -469,6 +626,9 @@ async function loadSPS() {
     spsGeom = null;
     gridView.init = false;
     $('spsLabel').textContent = spsLabel(s);
+    // CRS is now known — refresh the File-summary + status-strip CRS cells.
+    renderSummaryPanel();
+    updateStatusStrip();
     await refreshSps();
   } catch (e) {
     $('spsLabel').textContent = 'SPS load failed: ' + errMsg(e);
@@ -969,6 +1129,7 @@ function errMsg(e: unknown): string {
 
 // ── Wire up ──
 function init() {
+  initTheme();
   for (const t of TABS) $(`tab-${t}`).addEventListener('click', () => switchTab(t));
   $('openBtn').addEventListener('click', onOpen);
   $('openBtn2').addEventListener('click', onOpen);
@@ -1017,6 +1178,10 @@ function init() {
   $('velComputeBtn').addEventListener('click', () => void computeVelocity());
   $('velExportBtn').addEventListener('click', () => void exportPicks());
   ($('velCanvas') as HTMLCanvasElement).addEventListener('click', onVelClick);
+  // Paint the empty File-summary / Header-QC / status-strip placeholders.
+  clearSummaryPanel();
+  renderHeaderQc();
+  updateStatusStrip();
   switchTab('conv');
 }
 

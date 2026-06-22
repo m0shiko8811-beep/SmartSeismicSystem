@@ -28,19 +28,23 @@
     "electron": "^33.0.0",
     "electron-builder": "^25.0.0",
     "esbuild": "^0.24.0",
+    "png-to-ico": "^3.0.1",
     "tsx": "^4.19.2",
     "typescript": "^5.6.0"
   },
   "build": {
     "appId": "com.smartseismic.seisconv",
     "productName": "SeisConv",
+    "icon": "build/icon.ico",
     "files": [
       "dist/**",
       "renderer/**",
+      "build/**",
       "package.json"
     ],
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "icon": "build/icon.ico"
     },
     "mac": {
       "target": "dmg"
