@@ -561,6 +561,21 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
 .statusbar .s b{color:var(--ink);font-weight:600;}
 .statusbar .grow{flex:1;border:none;}
 
+/* app-wide UI zoom control (status-bar group: [-] 100% [+]) */
+.statusbar .zoom{gap:4px;}
+.statusbar .zoom .zbtn{
+  width:18px;height:18px;border:1px solid var(--hair);border-radius:6px;
+  background:var(--card);color:var(--ink-2);cursor:pointer;font-family:inherit;
+  font-size:13px;font-weight:700;line-height:1;display:grid;place-items:center;padding:0;
+  transition:border-color .12s ease, color .12s ease;
+}
+.statusbar .zoom .zbtn:hover{border-color:var(--teal);color:var(--teal-deep);}
+.statusbar .zoom .zpct{
+  min-width:38px;text-align:center;cursor:pointer;color:var(--ink);font-weight:600;
+  background:none;border:none;font-family:inherit;font-size:11.5px;padding:0;
+}
+.statusbar .zoom .zpct:hover{color:var(--teal-deep);}
+
 .note{font-size:11px;color:var(--ink-4);margin-top:14px;}
 .kbd{font-family:var(--mono);font-size:10px;background:var(--surface);border:1px solid var(--hair);border-radius:5px;padding:1px 5px;color:var(--ink-2);}
 </style>
@@ -999,6 +1014,16 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
       <!-- ===================== FILE VIEWER (section) ===================== -->
       <section id="panel-section" style="display:none;">
         <div class="sec-bar">
+          <button class="btn sm" id="filePrevBtn" title="Previous file in folder ([)" disabled>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>
+            Prev
+          </button>
+          <button class="btn sm" id="fileNextBtn" title="Next file in folder (])" disabled>
+            Next
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+          </button>
+          <span class="trace-label" id="fileNavLabel">—</span>
+          <span style="flex:1"></span>
           <select id="secMode" class="ctl">
             <option value="vd">Variable Density</option>
             <option value="wiggle">Wiggle</option>
@@ -1013,6 +1038,11 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
           </select>
           <label class="ctl-lbl">Gain <input type="range" id="secGain" class="slider sm" min="0.2" max="6" step="0.1" value="1"></label>
           <label class="ctl-lbl"><input type="checkbox" id="secAgc"> AGC</label>
+          <span class="seg" title="Zoom into the seismic data (wheel over the section, drag to pan, double-click to fit)">
+            <button class="segbtn" id="secZoomOut" title="Zoom out (data)">&minus;</button>
+            <button class="segbtn" id="secZoomFit" title="Fit / reset data zoom">Fit</button>
+            <button class="segbtn" id="secZoomIn" title="Zoom in (data)">+</button>
+          </span>
           <span class="trace-label" id="secLabel">Open a file to view the section</span>
         </div>
         <canvas id="secCanvas" class="canvas"></canvas>
@@ -1068,6 +1098,12 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
       <div class="s"><span class="lk">traces</span><b id="sbTraces">—</b></div>
       <div class="s"><span class="lk">fmt</span><b id="sbFmt">—</b></div>
       <div class="s"><span class="lk">CRS</span><b id="sbCrs">—</b></div>
+      <div class="s zoom" title="Zoom the whole interface — Ctrl +/- , Ctrl 0 resets">
+        <span class="lk">zoom</span>
+        <button class="zbtn" id="zoomOut" title="Zoom out (Ctrl -)" aria-label="Zoom out">−</button>
+        <button class="zpct" id="zoomPct" title="Reset zoom to 100% (Ctrl 0)" aria-label="Reset zoom">100%</button>
+        <button class="zbtn" id="zoomIn" title="Zoom in (Ctrl +)" aria-label="Zoom in">+</button>
+      </div>
       <div class="s grow"></div>
       <div class="s" id="sbState"><span class="dot" style="background:var(--ink-4)"></span><b>Idle</b></div>
     </div>

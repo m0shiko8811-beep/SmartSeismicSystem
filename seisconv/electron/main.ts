@@ -24,6 +24,56 @@ const INPUT_EXTS = new Set(['.segy', '.sgy', '.segd', '.seg', '.seg2', '.dat', '
 let win: BrowserWindow | null = null;
 let lastOpenedPath = '';
 
+// Sibling-file navigation state: the sorted list of seismic files in the
+// CURRENTLY-open file's containing directory, plus the open file's index into
+// it. Rebuilt every time a file is opened (open dialog OR sibling step), so
+// Prev/Next can flip through neighbours without re-opening the picker.
+let siblingPaths: string[] = [];
+let siblingIndex = -1;
+
+// Enumerate the seismic siblings of `filePath` (same directory), sorted by name,
+// and remember the open file's position. Best-effort: on any fs error we fall
+// back to a one-element list containing just the open file so navigation is a
+// no-op rather than a crash.
+async function indexSiblings(filePath: string): Promise<void> {
+  const dir = path.dirname(filePath);
+  try {
+    const entries = await readdir(dir, { withFileTypes: true });
+    const names = entries
+      .filter((e) => e.isFile() && INPUT_EXTS.has(path.extname(e.name).toLowerCase()))
+      .map((e) => e.name)
+      .sort((a, b) => a.localeCompare(b));
+    siblingPaths = names.map((n) => path.join(dir, n));
+  } catch {
+    siblingPaths = [];
+  }
+  // Locate the open file in the list; if it (somehow) isn't present, seed the
+  // list with just it so index/count stay coherent.
+  let idx = siblingPaths.indexOf(filePath);
+  if (idx < 0) {
+    siblingPaths = [filePath];
+    idx = 0;
+  }
+  siblingIndex = idx;
+}
+
+// Build the standard open-summary envelope (path/name + nav fields + worker
+// summary), shared by openAndParse and openSiblingFile so the UI can label the
+// first-opened file exactly like a stepped-to one.
+function openEnvelope(filePath: string, summary: any) {
+  const count = siblingPaths.length;
+  const index = siblingIndex;
+  return {
+    path: filePath,
+    name: path.basename(filePath),
+    index,
+    count,
+    hasPrev: index > 0,
+    hasNext: index >= 0 && index < count - 1,
+    ...summary,
+  };
+}
+
 // Set true by a cancel signal; the running batch checks it between files.
 let cancelRequested = false;
 ipcMain.on('seisconv:cancelConvert', () => {
@@ -121,7 +171,28 @@ ipcMain.handle('seisconv:openAndParse', async () => {
   const r = await callWorker<{ ok: boolean; summary?: any; error?: string }>({ type: 'open', path: filePath });
   if (!r.ok) throw new Error(r.error || 'parse failed');
   lastOpenedPath = filePath;
-  return { path: filePath, name: path.basename(filePath), ...r.summary };
+  // Index the open file's seismic siblings so Prev/Next can step the folder.
+  await indexSiblings(filePath);
+  return openEnvelope(filePath, r.summary);
+});
+
+// Step to the previous/next seismic file in the open file's folder. `delta` is
+// usually ±1; the target index is clamped to the list bounds. Returns null when
+// the move would leave the index unchanged (already at an edge, or no file open),
+// otherwise parses the target the same way as open and returns the same summary
+// envelope (with updated index/count/hasPrev/hasNext).
+ipcMain.handle('seisconv:openSiblingFile', async (_e, delta: number) => {
+  const count = siblingPaths.length;
+  if (count === 0 || siblingIndex < 0) return null;
+  const d = Number.isFinite(delta) ? Math.trunc(delta) : 0;
+  const next = Math.max(0, Math.min(count - 1, siblingIndex + d));
+  if (next === siblingIndex) return null; // no move (clamped at an edge)
+  const filePath = siblingPaths[next];
+  const r = await callWorker<{ ok: boolean; summary?: any; error?: string }>({ type: 'open', path: filePath });
+  if (!r.ok) throw new Error(r.error || 'parse failed');
+  lastOpenedPath = filePath;
+  siblingIndex = next;
+  return openEnvelope(filePath, r.summary);
 });
 
 ipcMain.handle('seisconv:getTrace', async (_e, index: number) => {
@@ -133,7 +204,10 @@ ipcMain.handle('seisconv:getTrace', async (_e, index: number) => {
 ipcMain.handle('seisconv:getSection', async (_e, opts: Record<string, unknown>) => {
   const r = await callWorker<{ ok: boolean; error?: string } & Record<string, any>>({ type: 'section', ...(opts || {}) });
   if (!r.ok) throw new Error(r.error || 'section failed');
-  return { numTraces: r.numTraces, colLen: r.colLen, norm: r.norm, sampleInt: r.sampleInt, traceStep: r.traceStep, data: r.data };
+  return {
+    numTraces: r.numTraces, colLen: r.colLen, norm: r.norm, sampleInt: r.sampleInt, traceStep: r.traceStep, data: r.data,
+    traceStart: r.traceStart, traceEnd: r.traceEnd, sampStart: r.sampStart, sampEnd: r.sampEnd, fullTraces: r.fullTraces, fullSamples: r.fullSamples,
+  };
 });
 
 // Pick a folder and enumerate its seismic files (by extension), sorted by name.
@@ -249,6 +323,9 @@ ipcMain.handle(
 // Clear the open file + cached state in the worker.
 ipcMain.handle('seisconv:resetState', async () => {
   await callWorker({ type: 'reset' });
+  lastOpenedPath = '';
+  siblingPaths = [];
+  siblingIndex = -1;
 });
 
 ipcMain.handle('seisconv:openSPS', async () => {

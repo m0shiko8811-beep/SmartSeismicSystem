@@ -34,6 +34,13 @@ interface Req {
   format?: string;
   maxTraces?: number;
   maxSamples?: number;
+  // Optional visible sub-window for the section view (full-data indices). When
+  // present, only this trace/sample range is decimated/returned, so zooming
+  // re-fetches the visible region at full detail instead of magnifying pixels.
+  traceStart?: number;
+  traceEnd?: number;
+  sampStart?: number;
+  sampEnd?: number;
   agc?: boolean;
   agcType?: AGCType;
   agcWindowMs?: number;
@@ -220,16 +227,34 @@ port.on('message', (req: Req) => {
       const maxSamples = req.maxSamples ?? 1500;
       const si = current.bh.sampleInt ?? 2000;
       const tc = current.traceCount;
-      const traceStep = Math.max(1, Math.ceil(tc / maxTraces));
+      // Full sample count (most files share a trace length; fall back to trace 0).
+      const fullSamps = current.bh.samplesTrace ?? current.traces[0]?.nSamples ?? 0;
+
+      // Visible sub-window in full-data indices. Defaults to the whole record so
+      // the very first (un-zoomed) request behaves exactly as before. End indices
+      // are exclusive; clamp + order them so a bad request can never throw.
+      let t0 = Math.max(0, Math.min(tc, (req.traceStart ?? 0) | 0));
+      let t1 = Math.max(0, Math.min(tc, (req.traceEnd ?? tc) | 0));
+      if (t1 <= t0) { t0 = 0; t1 = tc; }
+      let s0 = Math.max(0, Math.min(fullSamps, (req.sampStart ?? 0) | 0));
+      let s1 = Math.max(0, Math.min(fullSamps, (req.sampEnd ?? fullSamps) | 0));
+      if (s1 <= s0) { s0 = 0; s1 = fullSamps || 0; }
+      const winTraces = t1 - t0;
+      const winSamps = s1 - s0;
+      const traceStep = Math.max(1, Math.ceil(winTraces / maxTraces));
 
       // First pass: collect decimated columns + a global normalization factor.
+      // AGC is computed on the FULL trace (its window is time-based), then the
+      // visible sample range is sliced out, then time-preserving downsampled.
       const columns: Float32Array[] = [];
       let norm = 0;
-      for (let t = 0; t < tc; t += traceStep) {
+      for (let t = t0; t < t1; t += traceStep) {
         const tr = current.traces[t];
         if (!tr?.samples) continue;
         let s = tr.samples;
         if (req.agc) s = applyAGC(s, req.agcWindowMs ?? 200, si, req.agcType ?? 'rms');
+        // Slice to the visible sample window (no-op when it's the whole trace).
+        if (s0 > 0 || s1 < s.length) s = s.subarray(Math.min(s0, s.length), Math.min(s1, s.length));
         const nf = normFactorPercentile(s, 0.95);
         if (nf > norm) norm = nf;
         // Time-preserving downsample (clean vertical axis for VD; good enough for wiggle).
@@ -247,7 +272,11 @@ port.on('message', (req: Req) => {
         const n = Math.min(colLen, col.length);
         for (let k = 0; k < n; k++) data[base + k] = col[k];
       }
-      port.postMessage({ id, ok: true, numTraces, colLen, norm, sampleInt: si, traceStep, data }, [data.buffer]);
+      // Echo the window + full extents so the renderer can label axes and clamp.
+      port.postMessage(
+        { id, ok: true, numTraces, colLen, norm, sampleInt: si, traceStep, data, traceStart: t0, traceEnd: t1, sampStart: s0, sampEnd: s1, fullTraces: tc, fullSamples: fullSamps, winSamps },
+        [data.buffer],
+      );
       return;
     }
 

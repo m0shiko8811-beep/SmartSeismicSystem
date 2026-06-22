@@ -18,10 +18,16 @@ type Summary = {
   samplesTrace: number | null;
   sampleInt: number | null;
   errors: string[];
+  // Sibling-file navigation (open file's folder): 0-based index, total count,
+  // and edge flags. Present on every open/openSiblingFile result.
+  index: number;
+  count: number;
+  hasPrev: boolean;
+  hasNext: boolean;
 };
 type TraceData = { index: number; nSamples: number; sampleInt: number; hdr: Record<string, number | string>; samples: Float32Array };
-type SectionOpts = { maxTraces?: number; maxSamples?: number; agc?: boolean; agcType?: 'rms' | 'median' | 'mean'; agcWindowMs?: number };
-type SectionData = { numTraces: number; colLen: number; norm: number; sampleInt: number; traceStep: number; data: Float32Array };
+type SectionOpts = { maxTraces?: number; maxSamples?: number; traceStart?: number; traceEnd?: number; sampStart?: number; sampEnd?: number; agc?: boolean; agcType?: 'rms' | 'median' | 'mean'; agcWindowMs?: number };
+type SectionData = { numTraces: number; colLen: number; norm: number; sampleInt: number; traceStep: number; data: Float32Array; traceStart: number; traceEnd: number; sampStart: number; sampEnd: number; fullTraces: number; fullSamples: number };
 type SpsSummary = { sources: number; receivers: number; xrefs: number; layout: string | null; projection: { type: string | null; subtype: string | null; desc?: string } | null; errors: string[] };
 type SpsLines = { x: Float32Array; y: Float32Array; line: Int32Array; pt: Float32Array; names: string[] };
 type SpsGeometry = { geo: boolean; src: SpsLines; rcv: SpsLines; bbox: { minX: number; maxX: number; minY: number; maxY: number } };
@@ -60,6 +66,8 @@ declare global {
       // OS for key hints ('win32' | 'darwin' | 'linux' | …), set at preload load.
       platform: string;
       openAndParse(): Promise<Summary | null>;
+      // Step ±delta through the seismic files in the open file's folder; null on a no-op.
+      openSiblingFile(delta: number): Promise<Summary | null>;
       getTrace(i: number): Promise<TraceData>;
       getSection(o?: SectionOpts): Promise<SectionData>;
       // Single-file conversion of the currently-open file (save dialog).
@@ -84,6 +92,9 @@ declare global {
       spsReproject(code: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
       semblance(opts: { velMin: number; velMax: number; velStep: number }): Promise<SemblanceData>;
       exportText(name: string, text: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
+      // App-wide UI zoom (whole interface), backed by Electron's webFrame.
+      getZoom(): number;
+      setZoom(factor: number): void;
       // Custom window controls — the frameless window draws its own min/max/close.
       winMinimize(): void;
       winMaximizeToggle(): void;
@@ -115,6 +126,44 @@ function initTheme() {
   applyTheme(t);
   $opt('themeLight')?.addEventListener('click', () => applyTheme('light'));
   $opt('themeDark')?.addEventListener('click', () => applyTheme('dark'));
+}
+
+// ── App-wide UI zoom (whole interface, like a browser's Ctrl +/- / Ctrl 0) ──
+// Backed by Electron's webFrame (exposed through the preload bridge). The factor
+// is clamped to 0.5–2.5 in ~0.1 steps, persisted in localStorage, applied on
+// init, and mirrored into the status-bar [-] 100% [+] control.
+const ZOOM_MIN = 0.5;
+const ZOOM_MAX = 2.5;
+const ZOOM_STEP = 0.1;
+const ZOOM_KEY = 'seisconv.zoom';
+let zoomFactor = 1;
+
+/** Clamp to range and round to a clean 0.1 step (avoids float drift like 1.0000001). */
+function clampZoom(f: number): number {
+  if (!Number.isFinite(f)) return 1;
+  const stepped = Math.round(f / ZOOM_STEP) * ZOOM_STEP;
+  return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(stepped * 100) / 100));
+}
+
+/** Apply a zoom factor everywhere: webFrame, persisted store, and the status-bar control. */
+function applyZoom(f: number) {
+  zoomFactor = clampZoom(f);
+  try { api?.setZoom?.(zoomFactor); } catch { /* ignore */ }
+  try { localStorage.setItem(ZOOM_KEY, String(zoomFactor)); } catch { /* ignore */ }
+  const pct = $opt('zoomPct');
+  if (pct) pct.textContent = `${Math.round(zoomFactor * 100)}%`;
+}
+/** Nudge the zoom by N steps (sign = direction). */
+function zoomBy(steps: number) { applyZoom(zoomFactor + steps * ZOOM_STEP); }
+function zoomReset() { applyZoom(1); }
+
+function initZoom() {
+  let f = 1;
+  try { const s = localStorage.getItem(ZOOM_KEY); if (s != null) f = parseFloat(s); } catch { /* ignore */ }
+  applyZoom(f); // clamps, pushes to webFrame, paints the control
+  $opt('zoomIn')?.addEventListener('click', () => zoomBy(1));
+  $opt('zoomOut')?.addEventListener('click', () => zoomBy(-1));
+  $opt('zoomPct')?.addEventListener('click', () => zoomReset());
 }
 
 // ── Help / Manual modal ──
@@ -162,6 +211,12 @@ let lastTrace: TraceData | null = null;
 let traceMode: 'wave' | 'spectrum' = 'wave';
 let outFormat = 'segy1';
 let lastSection: SectionData | null = null;
+// Section data-zoom view-state: the visible window in FULL-data indices
+// (trace t0..t1, sample s0..s1, end exclusive). The worker re-decimates this
+// window at full detail on every change, so zoom reveals real samples. `full*`
+// caches the record extent for clamping; init=false ⇒ "fit whole record".
+const secView = { t0: 0, t1: 0, s0: 0, s1: 0, fullT: 0, fullS: 0, init: false };
+let secFetchPending = false; // coalesce rapid wheel/drag re-fetches
 let spsSummary: SpsSummary | null = null;
 let spsGeom: SpsGeometry | null = null;
 let spsView: 'grid' | 'map' = 'grid';
@@ -347,6 +402,26 @@ function setState(kind: StripState, label: string) {
   el.innerHTML = `<span class="dot" style="background:${col}"></span><b style="color:${txtCol}">${label}</b>`;
 }
 
+/**
+ * Adopt a freshly-parsed file (from the open dialog OR a Prev/Next sibling step)
+ * as the loaded file: store its summary, reset the trace cursor, repaint the
+ * info/summary/QC panels + single-file wizard, refresh the file-nav label, and
+ * re-render whichever QC view is visible. Shared by onOpen and the sibling-nav so
+ * both paths behave identically.
+ */
+function applyOpenedFile(s: Summary) {
+  summary = s;
+  traceIndex = 0;
+  renderInfo();
+  showSingleLoaded();      // banner + light up the single-file wizard
+  updateNamePreview();
+  updateFileNav();         // Prev/Next enable + 'X / N' label
+  setStatus('convStatus', '');
+  setState('ok', s.errors.length ? `Loaded · ${s.errors.length} flag${s.errors.length > 1 ? 's' : ''}` : 'Loaded');
+  if ($('panel-trace').style.display !== 'none') void refreshTrace();
+  if ($('panel-section').style.display !== 'none') void refreshSection();
+}
+
 async function onOpen() {
   setStatus('convStatus', 'Opening…');
   setState('busy', 'Opening…');
@@ -357,15 +432,39 @@ async function onOpen() {
       updateStatusStrip();
       return;
     }
-    summary = s;
-    traceIndex = 0;
-    renderInfo();
-    showSingleLoaded();      // banner + light up the single-file wizard
-    updateNamePreview();
-    setStatus('convStatus', '');
-    setState(s.errors.length ? 'ok' : 'ok', s.errors.length ? `Loaded · ${s.errors.length} flag${s.errors.length > 1 ? 's' : ''}` : 'Loaded');
-    if ($('panel-trace').style.display !== 'none') void refreshTrace();
-    if ($('panel-section').style.display !== 'none') void refreshSection();
+    applyOpenedFile(s);
+  } catch (e) {
+    setStatus('convStatus', 'Could not read file: ' + errMsg(e), 'err');
+    setState('err', 'Open failed');
+  }
+}
+
+/** Refresh the File Viewer's Prev/Next buttons + 'file X / N' label from `summary`. */
+function updateFileNav() {
+  const prev = $opt('filePrevBtn') as HTMLButtonElement | null;
+  const next = $opt('fileNextBtn') as HTMLButtonElement | null;
+  const lbl = $opt('fileNavLabel');
+  if (!summary || summary.count <= 0) {
+    if (prev) prev.disabled = true;
+    if (next) next.disabled = true;
+    if (lbl) lbl.textContent = summary ? '' : '—';
+    return;
+  }
+  if (prev) prev.disabled = !summary.hasPrev;
+  if (next) next.disabled = !summary.hasNext;
+  if (lbl) lbl.textContent = `file ${summary.index + 1} / ${summary.count}`;
+}
+
+/** Step ±delta to a sibling file in the open file's folder; no-op when none loaded. */
+async function navFile(delta: number) {
+  if (!summary) return;                 // guard: nothing loaded
+  if (delta < 0 && !summary.hasPrev) return;
+  if (delta > 0 && !summary.hasNext) return;
+  setState('busy', delta < 0 ? 'Opening previous…' : 'Opening next…');
+  try {
+    const s = await api.openSiblingFile(delta);
+    if (!s) { updateFileNav(); updateStatusStrip(); return; } // edge / no move
+    applyOpenedFile(s);                 // updates summary, re-renders, resets trace
   } catch (e) {
     setStatus('convStatus', 'Could not read file: ' + errMsg(e), 'err');
     setState('err', 'Open failed');
@@ -758,6 +857,7 @@ async function clearConverter() {
   summary = null;
   lastTrace = null;
   lastSection = null;
+  secView.init = false; // forget the data-zoom window so the next file opens fitted
   traceIndex = 0;
   // batch state
   batchFiles = [];
@@ -788,6 +888,7 @@ async function clearConverter() {
   // labels back on the empty Trace / Section views
   setText('traceLabel', 'Open a file to inspect traces');
   setText('secLabel', 'Open a file to view the section');
+  updateFileNav();       // disable Prev/Next + clear the 'file X / N' label
   renderTraceHeader();   // clear the trace-header table (lastTrace is now null)
 }
 
@@ -1116,18 +1217,86 @@ function drawSpectrum(cv: HTMLCanvasElement, t: TraceData) {
 }
 
 // ── File Viewer (section) ──
-async function refreshSection() {
+// Plot-rectangle margins (shared by drawSection + the data-zoom interactions so
+// a cursor pixel maps to the exact same data window the renderer paints).
+const SEC_ML = 58, SEC_MR = 12, SEC_MT = 10, SEC_MB = 24;
+
+/** Reset the data-zoom window to the whole record (called on open / AGC change / fit). */
+function secFit() {
+  if (!summary) return;
+  secView.fullT = summary.traceCount;
+  secView.fullS = summary.samplesTrace ?? lastSection?.fullSamples ?? 0;
+  secView.t0 = 0;
+  secView.t1 = secView.fullT;
+  secView.s0 = 0;
+  secView.s1 = secView.fullS;
+  secView.init = true;
+}
+
+/** Keep the visible window inside the record (never pan/zoom off the data). */
+function secClamp() {
+  const fT = secView.fullT, fS = secView.fullS;
+  // Minimum window: a few traces / samples so we can't zoom into nothing.
+  const minT = Math.min(fT, 2), minS = Math.min(fS, 4);
+  let { t0, t1, s0, s1 } = secView;
+  if (t1 - t0 < minT) t1 = t0 + minT;
+  if (s1 - s0 < minS) s1 = s0 + minS;
+  if (t1 - t0 > fT) { t0 = 0; t1 = fT; }
+  if (s1 - s0 > fS) { s0 = 0; s1 = fS; }
+  if (t0 < 0) { t1 -= t0; t0 = 0; }
+  if (t1 > fT) { t0 -= t1 - fT; t1 = fT; }
+  if (s0 < 0) { s1 -= s0; s0 = 0; }
+  if (s1 > fS) { s0 -= s1 - fS; s1 = fS; }
+  secView.t0 = Math.max(0, Math.round(t0));
+  secView.t1 = Math.min(fT, Math.round(t1));
+  secView.s0 = Math.max(0, Math.round(s0));
+  secView.s1 = Math.min(fS, Math.round(s1));
+}
+
+/** Re-request the current visible window at full detail and repaint. Coalesces
+ *  bursts of wheel/drag events so the worker is never flooded. */
+async function fetchSectionWindow() {
   if (!summary || summary.traceCount === 0) return;
+  if (secFetchPending) return; // a fetch is in flight; it will repaint with the latest secView on completion
+  secFetchPending = true;
   const agc = ($('secAgc') as HTMLInputElement).checked;
-  $('secLabel').textContent = 'Rendering…';
   try {
-    const sec = await api.getSection({ maxTraces: 2000, maxSamples: 2000, agc, agcType: 'rms', agcWindowMs: 250 });
-    lastSection = sec;
-    drawSection($('secCanvas') as HTMLCanvasElement, sec);
-    $('secLabel').textContent = `${sec.numTraces} traces (step ${sec.traceStep}) · ${sec.colLen} samples`;
+    let again = true;
+    let snap = '';
+    while (again) {
+      secClamp();
+      snap = `${secView.t0},${secView.t1},${secView.s0},${secView.s1}`;
+      const sec = await api.getSection({
+        maxTraces: 2000, maxSamples: 2000,
+        traceStart: secView.t0, traceEnd: secView.t1, sampStart: secView.s0, sampEnd: secView.s1,
+        agc, agcType: 'rms', agcWindowMs: 250,
+      });
+      lastSection = sec;
+      // Worker echoes the window it actually used (clamped to real trace lengths);
+      // mirror it so axis labels + interactions stay perfectly in sync.
+      secView.t0 = sec.traceStart; secView.t1 = sec.traceEnd;
+      secView.s0 = sec.sampStart; secView.s1 = sec.sampEnd;
+      secView.fullT = sec.fullTraces; secView.fullS = sec.fullSamples;
+      drawSection($('secCanvas') as HTMLCanvasElement, sec);
+      const zoomed = sec.traceStart > 0 || sec.traceEnd < sec.fullTraces || sec.sampStart > 0 || sec.sampEnd < sec.fullSamples;
+      $('secLabel').textContent =
+        `${sec.numTraces} traces (step ${sec.traceStep}) · ${sec.colLen} samples` +
+        (zoomed ? ` · tr ${sec.traceStart}–${sec.traceEnd} · smp ${sec.sampStart}–${sec.sampEnd}` : '');
+      // If the user kept interacting while we awaited, secView changed — fetch again.
+      again = `${secView.t0},${secView.t1},${secView.s0},${secView.s1}` !== snap;
+    }
   } catch (e) {
     $('secLabel').textContent = 'Render failed: ' + errMsg(e);
+  } finally {
+    secFetchPending = false;
   }
+}
+
+async function refreshSection() {
+  if (!summary || summary.traceCount === 0) return;
+  $('secLabel').textContent = 'Rendering…';
+  secFit(); // open / AGC toggle / re-open ⇒ start fitted to the whole record
+  await fetchSectionWindow();
 }
 
 function redrawSection() {
@@ -1150,7 +1319,7 @@ function drawSection(cv: HTMLCanvasElement, sec: SectionData) {
 
   const { numTraces, colLen, norm, data } = sec;
   if (!numTraces || !colLen) return;
-  const ML = 58, MR = 12, MT = 10, MB = 24;
+  const ML = SEC_ML, MR = SEC_MR, MT = SEC_MT, MB = SEC_MB;
   const pw = W - ML - MR;
   const ph = H - MT - MB;
   const g = gain / (norm || 1);
@@ -1211,13 +1380,100 @@ function drawSection(cv: HTMLCanvasElement, sec: SectionData) {
     }
   }
 
+  // Axes reflect the VISIBLE data-zoom window (worker echoes it on `sec`):
+  //   time  ← sample window [sampStart, sampEnd) × sampleInt
+  //   trace ← trace  window [traceStart, traceEnd)
   ctx.fillStyle = '#7e93ac';
   ctx.font = '10px Consolas, monospace';
-  const totalMs = ((summary?.samplesTrace ?? colLen) * (summary?.sampleInt ?? sec.sampleInt)) / 1000;
+  const siUs = summary?.sampleInt ?? sec.sampleInt; // µs/sample
+  const t0ms = (sec.sampStart * siUs) / 1000;
+  const t1ms = (sec.sampEnd * siUs) / 1000;
+  ctx.textAlign = 'left';
   for (let k = 0; k <= 5; k++) {
     const y = MT + (ph * k) / 5;
-    ctx.fillText(((totalMs * k) / 5).toFixed(0) + ' ms', 6, y + 3);
+    const ms = t0ms + ((t1ms - t0ms) * k) / 5;
+    ctx.fillText(ms.toFixed(0) + ' ms', 6, y + 3);
   }
+  // Trace-index axis along the bottom edge of the plot.
+  ctx.textAlign = 'center';
+  const tr0 = sec.traceStart, tr1 = sec.traceEnd;
+  for (let k = 0; k <= 5; k++) {
+    const x = ML + (pw * k) / 5;
+    const tr = Math.round(tr0 + ((tr1 - tr0) * k) / 5);
+    ctx.fillText('#' + tr, Math.max(ML + 10, Math.min(W - MR - 10, x)), H - 4);
+  }
+  ctx.textAlign = 'left';
+}
+
+// ── Section data-zoom / pan (mirrors the SPS survey-grid interaction) ──
+// Distinct from the app-wide UI zoom: this zooms into the seismic DATA by
+// re-fetching the visible [t0,t1)×[s0,s1) window at full detail.
+
+/** Map a cursor pixel inside the section canvas to a fractional position in the
+ *  plot rectangle (0..1 along trace-x and sample-y), clamped to the data area. */
+function secPlotFrac(cv: HTMLCanvasElement, e: MouseEvent): { fx: number; fy: number } {
+  const r = cv.getBoundingClientRect();
+  const W = cv.clientWidth || 900, H = cv.clientHeight || 500;
+  const pw = W - SEC_ML - SEC_MR, ph = H - SEC_MT - SEC_MB;
+  const px = e.clientX - r.left - SEC_ML, py = e.clientY - r.top - SEC_MT;
+  return { fx: Math.max(0, Math.min(1, px / pw)), fy: Math.max(0, Math.min(1, py / ph)) };
+}
+
+/** Zoom the visible window toward the cursor by `factor` (<1 zooms in). */
+function secZoomAt(fx: number, fy: number, factor: number) {
+  if (!secView.init) secFit();
+  // Data index under the cursor (anchor point that stays put).
+  const at = secView.t0 + fx * (secView.t1 - secView.t0);
+  const as = secView.s0 + fy * (secView.s1 - secView.s0);
+  const wt = (secView.t1 - secView.t0) * factor;
+  const ws = (secView.s1 - secView.s0) * factor;
+  secView.t0 = at - fx * wt; secView.t1 = at + (1 - fx) * wt;
+  secView.s0 = as - fy * ws; secView.s1 = as + (1 - fy) * ws;
+}
+
+/** Zoom both axes toward the canvas centre (toolbar +/- buttons). */
+function secZoomButton(factor: number) {
+  if (!summary || summary.traceCount === 0) return;
+  secZoomAt(0.5, 0.5, factor);
+  void fetchSectionWindow();
+}
+
+/** Attach wheel-zoom / drag-pan / double-click-fit to the section canvas (once). */
+function sectionInteractions() {
+  const cv = $('secCanvas') as HTMLCanvasElement;
+  let dragging = false, lx = 0, ly = 0;
+  cv.addEventListener('wheel', (e) => {
+    if ($('panel-section').style.display === 'none' || !summary || summary.traceCount === 0) return;
+    e.preventDefault();
+    const { fx, fy } = secPlotFrac(cv, e);
+    secZoomAt(fx, fy, e.deltaY < 0 ? 1 / 1.15 : 1.15);
+    void fetchSectionWindow();
+  }, { passive: false });
+  cv.addEventListener('mousedown', (e) => {
+    if ($('panel-section').style.display === 'none' || !summary) return;
+    dragging = true; lx = e.clientX; ly = e.clientY; cv.style.cursor = 'grabbing';
+  });
+  window.addEventListener('mouseup', () => { dragging = false; cv.style.cursor = ''; });
+  cv.addEventListener('mousemove', (e) => {
+    if (!dragging || !secView.init) return;
+    const W = cv.clientWidth || 900, H = cv.clientHeight || 500;
+    const pw = W - SEC_ML - SEC_MR, ph = H - SEC_MT - SEC_MB;
+    // Pixel drag → index drag (drag right ⇒ window moves left, like grabbing the image).
+    const dt = ((e.clientX - lx) / pw) * (secView.t1 - secView.t0);
+    const ds = ((e.clientY - ly) / ph) * (secView.s1 - secView.s0);
+    secView.t0 -= dt; secView.t1 -= dt;
+    secView.s0 -= ds; secView.s1 -= ds;
+    lx = e.clientX; ly = e.clientY;
+    void fetchSectionWindow();
+  });
+  cv.addEventListener('dblclick', () => {
+    if ($('panel-section').style.display === 'none' || !summary) return;
+    secFit(); void fetchSectionWindow();
+  });
+  // Toolbar buttons (added in index.html alongside the section controls).
+  $opt('secZoomIn')?.addEventListener('click', () => secZoomButton(1 / 1.4));
+  $opt('secZoomOut')?.addEventListener('click', () => secZoomButton(1.4));
+  $opt('secZoomFit')?.addEventListener('click', () => { secFit(); void fetchSectionWindow(); });
 }
 
 // ── SPS 2.1 (survey geometry) ──
@@ -1751,6 +2007,7 @@ function initWindowControls() {
 // ── Wire up ──
 function init() {
   initTheme();
+  initZoom();
   initWindowControls();
   for (const t of TABS) $(`tab-${t}`).addEventListener('click', () => switchTab(t));
   $('openBtn').addEventListener('click', onOpen);
@@ -1815,6 +2072,10 @@ function init() {
   for (const id of ['secMode', 'secColor']) ($(id) as HTMLSelectElement).addEventListener('change', redrawSection);
   ($('secGain') as HTMLInputElement).addEventListener('input', redrawSection);
   ($('secAgc') as HTMLInputElement).addEventListener('change', () => void refreshSection());
+  sectionInteractions(); // wheel-zoom / drag-pan / dblclick-fit + toolbar on the section DATA
+  // File Viewer: step to the previous/next seismic file in the open file's folder.
+  $opt('filePrevBtn')?.addEventListener('click', () => void navFile(-1));
+  $opt('fileNextBtn')?.addEventListener('click', () => void navFile(1));
   $('spsLoadBtn').addEventListener('click', () => void loadSPS());
   ($('spsShowS') as HTMLInputElement).addEventListener('change', () => void refreshSps());
   ($('spsShowR') as HTMLInputElement).addEventListener('change', () => void refreshSps());
@@ -1840,6 +2101,14 @@ function init() {
   // Global keyboard shortcuts.
   document.addEventListener('keydown', onKeyDown);
 
+  // Ctrl/Cmd + mouse-wheel zooms the whole UI (browser-style). Non-passive so we
+  // can preventDefault and stop the page from scrolling while pinch-zooming.
+  window.addEventListener('wheel', (e: WheelEvent) => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    e.preventDefault();
+    if (e.deltaY !== 0) zoomBy(e.deltaY < 0 ? 1 : -1);
+  }, { passive: false });
+
   // Tidy the progress subscription on teardown.
   window.addEventListener('beforeunload', () => { convProgressOff?.(); });
 
@@ -1847,6 +2116,7 @@ function init() {
   clearSummaryPanel();
   renderHeaderQc();
   updateStatusStrip();
+  updateFileNav();
   setConvMode('single');
   refreshWizard();
   switchTab('conv');
@@ -1856,6 +2126,14 @@ function init() {
 function onKeyDown(e: KeyboardEvent) {
   // Esc always closes the manual.
   if (e.key === 'Escape' && manualOpen()) { closeManual(); return; }
+  // App-wide UI zoom (browser-style): Ctrl/Cmd + '='/'+' in, Ctrl/Cmd + '-' out,
+  // Ctrl/Cmd + '0' reset. Handled before the typing-in-a-field guard so it works
+  // with any element focused, just like a browser.
+  if (e.ctrlKey || e.metaKey) {
+    if (e.key === '=' || e.key === '+') { e.preventDefault(); zoomBy(1); return; }
+    if (e.key === '-' || e.key === '_') { e.preventDefault(); zoomBy(-1); return; }
+    if (e.key === '0') { e.preventDefault(); zoomReset(); return; }
+  }
   // Ignore when typing in a field.
   const tgt = e.target as HTMLElement | null;
   if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'SELECT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)) return;
@@ -1864,6 +2142,9 @@ function onKeyDown(e: KeyboardEvent) {
   if (!mod && (e.key === '?' )) { e.preventDefault(); manualOpen() ? closeManual() : openManual(); return; }
   if (mod && (e.key === 'o' || e.key === 'O')) { e.preventDefault(); void onOpen(); return; }
   if (mod && (e.key === 'b' || e.key === 'B')) { e.preventDefault(); switchTab('conv'); setConvMode('batch'); return; }
+  // '[' / ']' step to the previous / next seismic file in the open file's folder.
+  if (!mod && e.key === '[') { e.preventDefault(); void navFile(-1); return; }
+  if (!mod && e.key === ']') { e.preventDefault(); void navFile(1); return; }
   if (!mod && e.key >= '1' && e.key <= '5') {
     const idx = parseInt(e.key, 10) - 1;
     if (idx >= 0 && idx < TABS.length) { e.preventDefault(); switchTab(TABS[idx]); }

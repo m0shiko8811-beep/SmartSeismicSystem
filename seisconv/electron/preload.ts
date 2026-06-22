@@ -4,7 +4,13 @@
 // tiny, typed `window.seisconvAPI`; everything privileged (fs, dialogs, the
 // worker) stays in the main process behind these IPC calls.
 
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webFrame } from 'electron';
+
+/** Clamp a zoom factor to the app's allowed UI-zoom range (50 %–250 %). */
+function clampZoom(factor: number): number {
+  if (!Number.isFinite(factor)) return 1;
+  return Math.min(2.5, Math.max(0.5, factor));
+}
 
 export interface ParseSummary {
   path: string;
@@ -15,6 +21,14 @@ export interface ParseSummary {
   samplesTrace: number | null;
   sampleInt: number | null;
   errors: string[];
+  /** 0-based position of this file among its seismic siblings (open file's folder). */
+  index: number;
+  /** Number of seismic siblings in the open file's folder. */
+  count: number;
+  /** Whether a previous sibling exists (index > 0). */
+  hasPrev: boolean;
+  /** Whether a next sibling exists (index < count - 1). */
+  hasNext: boolean;
 }
 
 export interface TraceData {
@@ -28,6 +42,12 @@ export interface TraceData {
 export interface SectionOpts {
   maxTraces?: number;
   maxSamples?: number;
+  // Optional visible sub-window in full-data indices (end exclusive). When set,
+  // only this trace/sample range is decimated, so zoom re-fetches real detail.
+  traceStart?: number;
+  traceEnd?: number;
+  sampStart?: number;
+  sampEnd?: number;
   agc?: boolean;
   agcType?: 'rms' | 'median' | 'mean';
   agcWindowMs?: number;
@@ -40,6 +60,14 @@ export interface SectionData {
   sampleInt: number;
   traceStep: number;
   data: Float32Array; // numTraces × colLen, row-major (row = trace)
+  // Window actually returned (full-data indices, end exclusive) + full extents,
+  // so the renderer can label the time/trace axes and clamp pan/zoom.
+  traceStart: number;
+  traceEnd: number;
+  sampStart: number;
+  sampEnd: number;
+  fullTraces: number;
+  fullSamples: number;
 }
 
 export interface ConvertResult {
@@ -125,6 +153,10 @@ const api = {
   platform: process.platform as string,
   /** Open a file picker, parse the chosen file off-thread; returns a summary (or null if cancelled). */
   openAndParse: (): Promise<ParseSummary | null> => ipcRenderer.invoke('seisconv:openAndParse'),
+  /** Step ±delta through the seismic files in the open file's folder; parses the
+   *  target and returns the same summary shape, or null if the move is a no-op
+   *  (already at an edge, or no file open). */
+  openSiblingFile: (delta: number): Promise<ParseSummary | null> => ipcRenderer.invoke('seisconv:openSiblingFile', delta),
   /** Get one trace's samples + header from the currently-open file. */
   getTrace: (index: number): Promise<TraceData> => ipcRenderer.invoke('seisconv:getTrace', index),
   /** Get a decimated section matrix (for variable-density / wiggle display). */
@@ -162,6 +194,10 @@ const api = {
   semblance: (opts: { velMin: number; velMax: number; velStep: number }): Promise<SemblanceData> => ipcRenderer.invoke('seisconv:semblance', opts),
   /** Save arbitrary text (e.g. velocity picks CSV) via a native dialog. */
   exportText: (name: string, text: string): Promise<ConvertResult> => ipcRenderer.invoke('seisconv:exportText', { name, text }),
+  /** Current application-wide UI zoom factor (1 = 100 %); reads webFrame state. */
+  getZoom: (): number => webFrame.getZoomFactor(),
+  /** Set the application-wide UI zoom factor (clamped to 0.5–2.5) via webFrame. */
+  setZoom: (factor: number): void => webFrame.setZoomFactor(clampZoom(factor)),
   /** Minimize the window (custom header control). */
   winMinimize: (): void => ipcRenderer.send('seisconv:win-minimize'),
   /** Toggle maximize / restore (custom header control). */
