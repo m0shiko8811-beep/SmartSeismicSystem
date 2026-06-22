@@ -315,7 +315,15 @@ export function detectSPSType(filename: string, firstLines?: string): 'S' | 'R' 
 
 /** Merge two parsed SPS files (e.g. an S file + an R file), de-duplicating points. */
 export function mergeSPSData(a: SPSData, b: SPSData): SPSData {
-  const keyOf = (p: SPSPoint) => `${(p.lineName || '').trim()}|${p.point}|${p.idx || ''}`;
+  // Round a coordinate to its nearest integer for the dedup key; non-finite
+  // values (unparsed coords) collapse to a stable 'nan' token so two records
+  // that are truly identical still match.
+  const rc = (v: number) => (isFinite(v) ? String(Math.round(v)) : 'nan');
+  // Include rounded E/N in the key so a station from set B with the SAME
+  // line|point|idx as set A is kept when its coordinates differ — production
+  // sets routinely reuse numbering across surveys. Re-loading the identical
+  // file still collapses (same line|point|idx|E|N), so duplicates don't double.
+  const keyOf = (p: SPSPoint) => `${(p.lineName || '').trim()}|${p.point}|${p.idx || ''}|${rc(p.easting)}|${rc(p.northing)}`;
   const seen = new Set<string>();
   const dedup = (arr: SPSPoint[]): SPSPoint[] => {
     const out: SPSPoint[] = [];
@@ -331,7 +339,11 @@ export function mergeSPSData(a: SPSData, b: SPSData): SPSData {
   const xseen = new Set<string>();
   const xrefs: SPSXref[] = [];
   for (const x of [...a.xrefs, ...b.xrefs]) {
-    const k = `${x.srcLine}|${x.srcPt}|${x.ffid}|${x.rcvLineFrom}|${x.rcvPtFrom}`;
+    // Add a relation discriminator (the receiver range END + channel range) so
+    // two genuinely-distinct relations that share src/ffid/rcvLineFrom/rcvPtFrom
+    // but differ in their receiver span aren't dropped. An exact re-load of the
+    // same X-file still collapses, since every component matches.
+    const k = `${x.srcLine}|${x.srcPt}|${x.ffid}|${x.rcvLineFrom}|${x.rcvPtFrom}|${x.rcvPtTo}|${x.fromCh ?? ''}|${x.toCh ?? ''}`;
     if (!xseen.has(k)) { xseen.add(k); xrefs.push(x); }
   }
   const projection = a.projection && a.projection.type ? a.projection : b.projection && b.projection.type ? b.projection : undefined;

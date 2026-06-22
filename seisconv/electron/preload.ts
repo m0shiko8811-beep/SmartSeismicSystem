@@ -269,6 +269,8 @@ const api = {
   resetState: (): Promise<void> => ipcRenderer.invoke('seisconv:resetState'),
   /** Open one or more SPS files (S/R/X), parse + merge them, return a summary. */
   openSPS: (): Promise<SPSSummary | null> => ipcRenderer.invoke('seisconv:openSPS'),
+  /** Clear ONLY the loaded SPS survey in the worker (keeps any open seismic file). */
+  spsClear: (): Promise<void> => ipcRenderer.invoke('seisconv:spsClear'),
   /** Get line-grouped survey geometry (projected E/N, or WGS84 lon/lat when geo=true). */
   spsGeometry: (geo: boolean): Promise<SpsGeometry> => ipcRenderer.invoke('seisconv:spsGeometry', geo),
   /** Get shot→receiver "spider" segments (projected E/N, or WGS84 lon/lat when geo=true). */

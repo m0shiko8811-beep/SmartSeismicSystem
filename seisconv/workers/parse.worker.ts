@@ -21,7 +21,7 @@ let currentSPSFiles: { name: string; text: string; type: 'S' | 'R' | 'X' | 'mixe
 
 interface Req {
   id: number;
-  type: 'open' | 'trace' | 'extractTrace' | 'section' | 'convert' | 'convertPath' | 'convertTraces' | 'reset' | 'openSPS' | 'spsGeometry' | 'spsXrefLines' | 'spsFold' | 'spsQC' | 'spsPointDetail' | 'spsReproject' | 'spsExport' | 'semblance';
+  type: 'open' | 'trace' | 'extractTrace' | 'section' | 'convert' | 'convertPath' | 'convertTraces' | 'reset' | 'openSPS' | 'spsClear' | 'spsGeometry' | 'spsXrefLines' | 'spsFold' | 'spsQC' | 'spsPointDetail' | 'spsReproject' | 'spsExport' | 'semblance';
   path?: string;
   paths?: string[];
   qc?: QCParams;
@@ -272,6 +272,17 @@ port.on('message', (req: Req) => {
       return;
     }
 
+    // Clear ONLY the SPS survey state, leaving any open seismic file untouched
+    // (distinct from 'reset', which also drops `current`). Backs the SPS tab's
+    // dedicated "Clear SPS" control so the user can start a fresh survey without
+    // closing the file they're converting/inspecting.
+    if (type === 'spsClear') {
+      currentSPS = null;
+      currentSPSFiles = [];
+      port.postMessage({ id, ok: true });
+      return;
+    }
+
     if (type === 'convertPath') {
       const writer = getWriter(req.format!);
       if (!writer) {
@@ -287,8 +298,11 @@ port.on('message', (req: Req) => {
     }
 
     if (type === 'openSPS') {
-      let merged: SPSData | null = null;
-      currentSPSFiles = [];
+      // ACCUMULATE: each Load APPENDS to the in-worker survey instead of
+      // replacing it. Seed `merged` from whatever's already loaded so a 2nd/3rd
+      // Load adds its stations to the existing survey, and APPEND to
+      // currentSPSFiles (never reset) so reproject/export see every loaded file.
+      let merged: SPSData | null = currentSPS;
       for (const p of req.paths ?? []) {
         const text = readFileSync(p, 'utf8');
         const name = basename(p);

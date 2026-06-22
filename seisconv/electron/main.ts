@@ -422,6 +422,13 @@ ipcMain.handle('seisconv:openSPS', async () => {
   return r.summary;
 });
 
+// Clear ONLY the loaded SPS survey in the worker (currentSPS + currentSPSFiles),
+// leaving any open seismic file intact. Distinct from resetState, which also
+// drops the open file; this backs the SPS tab's dedicated "Clear SPS" button.
+ipcMain.handle('seisconv:spsClear', async () => {
+  await callWorker({ type: 'spsClear' });
+});
+
 ipcMain.handle('seisconv:spsGeometry', async (_e, geo: boolean) => {
   const r = await callWorker<{ ok: boolean; error?: string } & Record<string, any>>({ type: 'spsGeometry', geo });
   if (!r.ok) throw new Error(r.error || 'sps geometry failed');

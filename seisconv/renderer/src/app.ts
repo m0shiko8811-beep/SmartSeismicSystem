@@ -108,6 +108,8 @@ declare global {
       // Clear the open file + cached state in the worker.
       resetState(): Promise<void>;
       openSPS(): Promise<SpsSummary | null>;
+      // Clear ONLY the loaded SPS survey in the worker (keeps any open seismic file).
+      spsClear(): Promise<void>;
       spsGeometry(geo: boolean): Promise<SpsGeometry>;
       spsXrefLines(geo: boolean): Promise<SpsXrefLines>;
       spsFold(opts: { binX: number; binY: number }): Promise<SpsFold>;
@@ -2492,6 +2494,51 @@ async function loadSPS() {
   }
 }
 
+/** Clear the loaded survey: drop the worker's SPS state (keeping any open
+ *  seismic file), null every renderer cache + summary, clear the inspector / QC
+ *  results, disable exports, and repaint the empty grid + label. */
+async function clearSPS() {
+  try { await api.spsClear(); } catch { /* best-effort — clear the UI regardless */ }
+  spsSummary = null;
+  spsGeom = null;
+  spsSpider = null;
+  spsFold = null;
+  spsFoldBin = 0;
+  highlightedShot = null;
+  gridView.init = false;
+  gridHighlight = null;
+  setSpsExportEnabled(false);
+  clearInspector();
+  $('qcResults').textContent = '';
+  $('spsLabel').textContent = 'Load S/R/X files to plot the survey';
+  updateSpsStats();
+  renderSummaryPanel();
+  updateStatusStrip();
+  // Repaint the (now empty) grid; the map, if active, is cleared by hiding it
+  // and falling back to the grid view on the next load.
+  if (spsView === 'grid') drawEmptyGrid();
+}
+
+/** Paint the survey-grid canvas as an empty placeholder (no geometry loaded). */
+function drawEmptyGrid() {
+  const cv = $opt('spsCanvas') as HTMLCanvasElement | null;
+  if (!cv) return;
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth || 900, H = cv.clientHeight || 500;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  const ctx = cv.getContext('2d');
+  if (!ctx) return;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#0f2540'); bg.addColorStop(1, '#0b1a2c');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#5e7186';
+  ctx.font = '13px Consolas, monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('Load S/R/X files to plot the survey', W / 2, H / 2);
+  ctx.textAlign = 'start';
+}
+
 /** Fetch geometry for the active view (projected E/N for grid, WGS84 lon/lat for map) and render. */
 async function refreshSps() {
   if (!spsSummary) return;
@@ -3323,6 +3370,7 @@ function init() {
   $opt('filePrevBtn')?.addEventListener('click', () => void navFile(-1));
   $opt('fileNextBtn')?.addEventListener('click', () => void navFile(1));
   $('spsLoadBtn').addEventListener('click', () => void loadSPS());
+  $opt('spsClearBtn')?.addEventListener('click', () => void clearSPS());
   ($('spsShowS') as HTMLInputElement).addEventListener('change', () => void refreshSps());
   ($('spsShowR') as HTMLInputElement).addEventListener('change', () => void refreshSps());
   $opt('spsShowXrefs')?.addEventListener('change', () => {
