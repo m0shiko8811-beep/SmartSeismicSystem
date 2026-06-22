@@ -131,15 +131,15 @@ body{
 }
 
 /* -------- Top header --------
-   Frameless window: this header IS the top of the window (native title bar is
-   hidden). The bar itself is the OS drag region; every interactive child opts
-   back out with -webkit-app-region:no-drag (below). The extra right padding
-   keeps Help + theme toggle clear of the native min/max/close overlay that the
-   OS paints into the top-right corner. */
+   Frameless window: this header IS the top of the window (native title bar AND
+   the OS window-controls overlay are gone). The bar itself is the OS drag region;
+   every interactive child opts back out with -webkit-app-region:no-drag (below).
+   Our own min/max/close buttons (.win-controls) sit flush to the right edge — no
+   padding reservation is needed since nothing native is painted there anymore. */
 header.header{
   grid-area:head;
   display:flex; align-items:center; gap:14px;
-  padding:0 140px 0 18px;
+  padding:0 0 0 18px;
   background:var(--header-bg);
   backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px);
   border-bottom:1px solid var(--hair);
@@ -147,12 +147,37 @@ header.header{
   -webkit-app-region:drag;
 }
 /* Interactive elements in / overlapping the header must stay clickable, so they
-   opt out of the OS drag region. Includes the header's own buttons/toggle/logo
-   and the left icon-rail nav buttons (which sit under the overlay's left edge). */
+   opt out of the OS drag region. Includes the header's own buttons/toggle/logo,
+   our custom window controls, and the left icon-rail nav buttons. */
 header.header button,
 header.header .toggle,
 header.header .logo,
+header.header .win-controls,
 .rail .nav-item{ -webkit-app-region:no-drag; }
+
+/* -------- Custom window controls (min / maximize-restore / close) --------
+   App-styled replacements for the native WCO buttons. Each is ~46px wide and
+   spans the full 54px header height so it reads as part of the title bar. Glyphs
+   use --ink and inherit the theme; close gets the Windows-convention red wash. */
+.win-controls{
+  display:flex; align-items:stretch; height:54px; margin-left:8px;
+  align-self:stretch;
+}
+.win-controls .wc{
+  width:46px; height:54px; border:none; background:transparent; padding:0;
+  display:grid; place-items:center; cursor:default;
+  color:var(--ink); transition:background .12s ease, color .12s ease;
+}
+.win-controls .wc svg{ display:block; pointer-events:none; }
+.win-controls .wc:hover{ background:rgba(0,0,0,.06); }
+html[data-theme="dark"] .win-controls .wc:hover{ background:rgba(255,255,255,.08); }
+.win-controls .wc-close:hover{ background:#e81123; color:#fff; }
+html[data-theme="dark"] .win-controls .wc-close:hover{ background:#e81123; color:#fff; }
+/* Maximize button shows a single square by default and two overlapping squares
+   (the "restore" glyph) once the window is maximized, toggled via .maximized. */
+.win-controls .wc-max .ico-restore{ display:none; }
+.win-controls .wc-max.maximized .ico-max{ display:none; }
+.win-controls .wc-max.maximized .ico-restore{ display:block; }
 .logo{display:flex;align-items:center;gap:10px;}
 .logo .mark{
   width:30px;height:30px;border-radius:9px;flex:none;
@@ -456,6 +481,19 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
 .kv .v{color:var(--ink);font-weight:600;}
 .kv .v.mono{font-weight:500;font-family:var(--mono);}
 
+/* Trace-header table (#traceHdrGrid) — grouped two-column key/value, reuses .kv */
+.hdr-card>summary.ch{cursor:pointer;list-style:none;user-select:none;}
+.hdr-card>summary.ch::-webkit-details-marker{display:none;}
+.hdr-card>summary.ch::after{content:'▾';margin-left:8px;color:var(--ink-3);font-size:11px;transition:transform .15s;}
+.hdr-card:not([open])>summary.ch::after{transform:rotate(-90deg);}
+.hdr-card:not([open])>summary.ch{border-bottom:none;}
+.hdr-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:0 28px;}
+.hdr-grp{break-inside:avoid;}
+.hdr-grp h3{font-size:11px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:var(--ink-3);margin:10px 0 2px;padding-top:6px;border-top:1px solid var(--hair-soft);}
+.hdr-grp:first-child h3{border-top:none;padding-top:0;}
+.hdr-grp .kv .v{font-family:var(--mono);font-weight:500;}
+.hdr-empty{color:var(--ink-3);font-size:12.5px;padding:8px 0;}
+
 /* status line (#convStatus / labels) */
 .status{margin-top:14px;font-size:13px;min-height:18px;color:var(--ink-2);}
 .status.ok{color:var(--green);} .status.err{color:var(--red);}
@@ -569,6 +607,18 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 5v14M5 12h14"/></svg>
         Open file…
       </button>
+      <div class="win-controls">
+        <button class="wc wc-min" id="winMin" title="Minimize" aria-label="Minimize">
+          <svg width="11" height="11" viewBox="0 0 11 11"><rect x="1" y="5" width="9" height="1" fill="currentColor"/></svg>
+        </button>
+        <button class="wc wc-max" id="winMax" title="Maximize" aria-label="Maximize / Restore">
+          <svg class="ico-max" width="11" height="11" viewBox="0 0 11 11" fill="none" stroke="currentColor" stroke-width="1"><rect x="1.5" y="1.5" width="8" height="8" rx="0.5"/></svg>
+          <svg class="ico-restore" width="11" height="11" viewBox="0 0 11 11" fill="none" stroke="currentColor" stroke-width="1"><rect x="1.5" y="3.5" width="6" height="6" rx="0.5"/><path d="M3.7 3.5V1.5h6v6H7.5"/></svg>
+        </button>
+        <button class="wc wc-close" id="winClose" title="Close" aria-label="Close">
+          <svg width="11" height="11" viewBox="0 0 11 11" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"><path d="M1.8 1.8l7.4 7.4M9.2 1.8L1.8 9.2"/></svg>
+        </button>
+      </div>
     </div>
   </header>
 
@@ -930,6 +980,20 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
           <span class="trace-label" id="traceLabel">Open a file to inspect traces</span>
         </div>
         <canvas id="traceCanvas" class="canvas"></canvas>
+
+        <!-- Live SEG-Y trace-header table — updates on every prev/next/slider move -->
+        <details class="card hdr-card" id="traceHdrCard" open style="margin-top:16px;">
+          <summary class="ch">
+            <h2>Trace header</h2>
+            <span class="hint">Live SEG-Y header for the current trace</span>
+            <div class="right"><span class="pill neutral mono" id="traceHdrTrace">—</span></div>
+          </summary>
+          <div class="cb" style="padding-top:6px;padding-bottom:8px;">
+            <div class="hdr-grid" id="traceHdrGrid">
+              <div class="hdr-empty">Open a file and pick a trace to view its header.</div>
+            </div>
+          </div>
+        </details>
       </section>
 
       <!-- ===================== FILE VIEWER (section) ===================== -->

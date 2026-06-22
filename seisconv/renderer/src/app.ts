@@ -84,8 +84,11 @@ declare global {
       spsReproject(code: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
       semblance(opts: { velMin: number; velMax: number; velStep: number }): Promise<SemblanceData>;
       exportText(name: string, text: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
-      // Recolor the native window-controls overlay (min/max/close) to match the theme.
-      setTitleBarOverlay(opts: { color: string; symbolColor: string }): Promise<void>;
+      // Custom window controls — the frameless window draws its own min/max/close.
+      winMinimize(): void;
+      winMaximizeToggle(): void;
+      winClose(): void;
+      onWinMaximized(cb: (maximized: boolean) => void): () => void;
     };
   }
 }
@@ -96,20 +99,10 @@ const $opt = (id: string) => document.getElementById(id);
 
 // ── Theme (GUI C: light default + working dark toggle, persisted) ──
 type Theme = 'light' | 'dark';
-// Native window-controls overlay (min/max/close) colors per theme. `color` is
-// an OPAQUE equivalent of the header background (--header-bg is translucent over
-// --canvas); `symbolColor` matches the header glyph color (--ink). Keep these in
-// sync with the BrowserWindow `titleBarOverlay` defaults in electron/main.ts.
-const TITLEBAR_OVERLAY: Record<Theme, { color: string; symbolColor: string }> = {
-  light: { color: '#f3f6fb', symbolColor: '#15212f' }, // light header bg + dark glyphs
-  dark: { color: '#102438', symbolColor: '#e8eef6' },  // navy header bg + light glyphs
-};
 function applyTheme(t: Theme) {
   document.documentElement.setAttribute('data-theme', t);
   $opt('themeLight')?.classList.toggle('on', t === 'light');
   $opt('themeDark')?.classList.toggle('on', t === 'dark');
-  // Keep the native min/max/close overlay matching the header in this theme.
-  try { void api?.setTitleBarOverlay?.(TITLEBAR_OVERLAY[t]); } catch { /* ignore */ }
   try { localStorage.setItem('seisconv.theme', t); } catch { /* ignore */ }
   // Plot canvases keep their dark scientific background in both themes, so
   // re-draw whatever is visible to refresh chrome-derived colors if needed.
@@ -795,6 +788,7 @@ async function clearConverter() {
   // labels back on the empty Trace / Section views
   setText('traceLabel', 'Open a file to inspect traces');
   setText('secLabel', 'Open a file to view the section');
+  renderTraceHeader();   // clear the trace-header table (lastTrace is now null)
 }
 
 // ── Trace Inspector ──
@@ -811,6 +805,168 @@ async function refreshTrace() {
   }
 }
 
+// ── Trace-header table ───────────────────────────────────────────────────────
+// Live, grouped key/value view of the per-trace SEG-Y header the worker already
+// returns on `lastTrace.hdr`. Field keys below MUST match the names populated by
+// the SEG-Y parser (core/formats/segy.ts) — anything absent is simply skipped.
+
+type HdrFmt = 'int' | 'raw' | 'scaled' | 'gain' | 'mute' | 'traceId';
+type HdrField = { key: string; label: string; fmt?: HdrFmt };
+type HdrGroup = { title: string; fields: HdrField[] };
+
+// SEG-Y data-use & trace-id enumerations, decoded to readable text.
+const TRACE_ID_LABEL: Record<number, string> = {
+  1: 'seismic', 2: 'dead', 3: 'dummy', 4: 'time-break', 5: 'uphole', 6: 'sweep',
+  7: 'timing', 8: 'water-break', 9: 'near-gun', 11: 'pressure', 12: 'vert-vel',
+};
+
+const HDR_GROUPS: HdrGroup[] = [
+  {
+    title: 'Identification',
+    fields: [
+      { key: 'fieldRec', label: 'Field record (FFID)' },
+      { key: 'trcField', label: 'Channel / trace no.' },
+      { key: 'srcPt', label: 'Shotpoint' },
+      { key: 'ensemble', label: 'Ensemble / CDP' },
+      { key: 'trcEns', label: 'Trace in ensemble' },
+      { key: 'seqLine', label: 'Seq. no. in line' },
+      { key: 'seqFile', label: 'Seq. no. in file' },
+      { key: 'traceId', label: 'Trace ID', fmt: 'traceId' },
+      { key: 'dataUse', label: 'Data use' },
+    ],
+  },
+  {
+    title: 'Geometry',
+    fields: [
+      { key: 'offset', label: 'Source–receiver offset' },
+      { key: 'srcX', label: 'Source X', fmt: 'scaled' },
+      { key: 'srcY', label: 'Source Y', fmt: 'scaled' },
+      { key: 'rcvX', label: 'Group X', fmt: 'scaled' },
+      { key: 'rcvY', label: 'Group Y', fmt: 'scaled' },
+      { key: 'srcDepth', label: 'Source depth' },
+      { key: 'rcvElev', label: 'Receiver elevation' },
+      { key: 'surfElev', label: 'Surface elevation @ src' },
+      { key: 'elevScalar', label: 'Elevation scalar', fmt: 'raw' },
+      { key: 'coordScalar', label: 'Coordinate scalar', fmt: 'raw' },
+      { key: 'coordUnit', label: 'Coordinate units', fmt: 'raw' },
+    ],
+  },
+  {
+    title: 'Timing',
+    fields: [
+      { key: 'nSamples', label: 'Samples in trace' },
+      { key: 'sampInt', label: 'Sample interval (µs)' },
+      { key: 'muteStart', label: 'Mute start', fmt: 'mute' },
+      { key: 'muteEnd', label: 'Mute end', fmt: 'mute' },
+      { key: 'year', label: 'Recording year', fmt: 'raw' },
+      { key: 'day', label: 'Day of year', fmt: 'raw' },
+      { key: '__time', label: 'Recording time' },
+    ],
+  },
+  {
+    title: 'Gain & filter',
+    fields: [
+      { key: 'gainType', label: 'Gain type', fmt: 'gain' },
+      { key: 'gainConst', label: 'Gain constant (dB)' },
+      { key: 'lowCut', label: 'Low-cut (Hz)' },
+      { key: 'highCut', label: 'High-cut (Hz)' },
+      { key: 'traceWeight', label: 'Trace weighting' },
+    ],
+  },
+];
+
+const GAIN_TYPE_LABEL: Record<number, string> = { 1: 'fixed', 2: 'binary', 3: 'floating' };
+
+function hdrNum(h: Record<string, number | string>, k: string): number | null {
+  const v = h[k];
+  if (typeof v === 'number' && isFinite(v)) return v;
+  if (typeof v === 'string' && v.trim() !== '' && isFinite(Number(v))) return Number(v);
+  return null;
+}
+
+/** Two zero-padded digits. */
+function pad2(n: number): string { return String(n).padStart(2, '0'); }
+
+/** Format one header field → display string, or null to omit (blank/zero where it carries no meaning). */
+function fmtHdrField(h: Record<string, number | string>, f: HdrField): string | null {
+  // Composite recording time HH:MM:SS, built from hour/minute/second.
+  if (f.key === '__time') {
+    const hh = hdrNum(h, 'hour'), mm = hdrNum(h, 'minute'), ss = hdrNum(h, 'second');
+    if (hh == null && mm == null && ss == null) return null;
+    if (!hh && !mm && !ss) return null;
+    return `${pad2(hh ?? 0)}:${pad2(mm ?? 0)}:${pad2(ss ?? 0)}`;
+  }
+  const v = hdrNum(h, f.key);
+  if (v == null) return null;
+  switch (f.fmt) {
+    case 'raw': // show even zeros (scalars/units/dates are meaningful at 0)
+      return grp(v);
+    case 'traceId':
+      return TRACE_ID_LABEL[v] ? `${v} · ${TRACE_ID_LABEL[v]}` : grp(v);
+    case 'gain':
+      return GAIN_TYPE_LABEL[v] ? `${v} · ${GAIN_TYPE_LABEL[v]}` : (v === 0 ? null : grp(v));
+    case 'mute':
+      return v === 0 ? null : `${grp(v)} ms`;
+    case 'scaled': // coordinate — apply the SEG-Y coordinate scalar, but only if set
+      if (v === 0) return null;
+      return grp(applyCoordScalar(v, hdrNum(h, 'coordScalar')));
+    default: // 'int' — omit unset (0) numeric fields to keep the table tidy
+      return v === 0 ? null : grp(v);
+  }
+}
+
+/** Apply the SEG-Y coordinate scalar convention: +n multiplies, −n divides. */
+function applyCoordScalar(v: number, scalar: number | null): number {
+  if (scalar == null || scalar === 0) return v;
+  return scalar > 0 ? v * scalar : v / -scalar;
+}
+
+/** Render the active trace's SEG-Y header into the grouped table. */
+function renderTraceHeader() {
+  const grid = $opt('traceHdrGrid');
+  const tag = $opt('traceHdrTrace');
+  if (!grid) return;
+  if (!summary || !lastTrace) {
+    grid.innerHTML = '<div class="hdr-empty">Open a file and pick a trace to view its header.</div>';
+    if (tag) tag.textContent = '—';
+    return;
+  }
+  const h = lastTrace.hdr || {};
+  if (tag) tag.textContent = `Trace ${lastTrace.index + 1} / ${summary.traceCount}`;
+  grid.innerHTML = '';
+  let anyField = false;
+  for (const group of HDR_GROUPS) {
+    const rows: { label: string; value: string }[] = [];
+    for (const f of group.fields) {
+      const val = fmtHdrField(h, f);
+      if (val == null) continue;
+      rows.push({ label: f.label, value: val });
+    }
+    if (!rows.length) continue;
+    anyField = true;
+    const sec = document.createElement('div');
+    sec.className = 'hdr-grp';
+    const h3 = document.createElement('h3');
+    h3.textContent = group.title;
+    sec.appendChild(h3);
+    for (const r of rows) {
+      const kv = document.createElement('div');
+      kv.className = 'kv';
+      const k = document.createElement('span');
+      k.className = 'k';
+      k.textContent = r.label;
+      const v = document.createElement('span');
+      v.className = 'v mono';
+      v.textContent = r.value;
+      kv.appendChild(k);
+      kv.appendChild(v);
+      sec.appendChild(kv);
+    }
+    grid.appendChild(sec);
+  }
+  if (!anyField) grid.innerHTML = '<div class="hdr-empty">This trace carries no populated header fields.</div>';
+}
+
 /** Draw the active trace in the current mode (waveform or amplitude spectrum). */
 function renderTrace() {
   if (!summary || !lastTrace) return;
@@ -824,6 +980,8 @@ function renderTrace() {
     drawTrace(cv, t);
     $('traceLabel').textContent = `Trace ${t.index + 1} / ${summary.traceCount}  ·  ${t.nSamples} samples`;
   }
+  // Header table tracks the active trace regardless of plot mode.
+  renderTraceHeader();
 }
 
 function setTraceMode(m: 'wave' | 'spectrum') {
@@ -1581,9 +1739,19 @@ function errMsg(e: unknown): string {
   return e && typeof e === 'object' && 'message' in e ? String((e as { message: unknown }).message) : String(e);
 }
 
+// Wire the custom window-control buttons (frameless window) to the main process
+// and keep the maximize/restore icon in sync with the real window state.
+function initWindowControls() {
+  $opt('winMin')?.addEventListener('click', () => api?.winMinimize?.());
+  $opt('winMax')?.addEventListener('click', () => api?.winMaximizeToggle?.());
+  $opt('winClose')?.addEventListener('click', () => api?.winClose?.());
+  api?.onWinMaximized?.((m) => $opt('winMax')?.classList.toggle('maximized', m));
+}
+
 // ── Wire up ──
 function init() {
   initTheme();
+  initWindowControls();
   for (const t of TABS) $(`tab-${t}`).addEventListener('click', () => switchTab(t));
   $('openBtn').addEventListener('click', onOpen);
   $('openBtn2').addEventListener('click', onOpen);

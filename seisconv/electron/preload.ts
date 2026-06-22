@@ -162,9 +162,18 @@ const api = {
   semblance: (opts: { velMin: number; velMax: number; velStep: number }): Promise<SemblanceData> => ipcRenderer.invoke('seisconv:semblance', opts),
   /** Save arbitrary text (e.g. velocity picks CSV) via a native dialog. */
   exportText: (name: string, text: string): Promise<ConvertResult> => ipcRenderer.invoke('seisconv:exportText', { name, text }),
-  /** Recolor the native window-controls overlay (min/max/close) to match the active theme. */
-  setTitleBarOverlay: (opts: { color: string; symbolColor: string }): Promise<void> =>
-    ipcRenderer.invoke('seisconv:setTitleBarOverlay', opts),
+  /** Minimize the window (custom header control). */
+  winMinimize: (): void => ipcRenderer.send('seisconv:win-minimize'),
+  /** Toggle maximize / restore (custom header control). */
+  winMaximizeToggle: (): void => ipcRenderer.send('seisconv:win-maximize-toggle'),
+  /** Close the window (custom header control). */
+  winClose: (): void => ipcRenderer.send('seisconv:win-close'),
+  /** Subscribe to maximize-state changes so the UI can swap the maximize/restore icon; returns an unsubscribe fn. */
+  onWinMaximized: (cb: (maximized: boolean) => void): (() => void) => {
+    const listener = (_e: unknown, maximized: boolean) => cb(maximized);
+    ipcRenderer.on('seisconv:win-maximized', listener);
+    return () => ipcRenderer.removeListener('seisconv:win-maximized', listener);
+  },
 };
 
 export type SeisconvAPI = typeof api;

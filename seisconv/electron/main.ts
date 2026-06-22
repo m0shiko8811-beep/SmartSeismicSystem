@@ -13,14 +13,6 @@ import JSZip from 'jszip';
 
 const WORKER_PATH = path.join(__dirname, 'parse.worker.js');
 
-// Native title-bar overlay height (DIPs). MUST equal the app-shell header row
-// (renderer grid-template-rows:54px) so the min/max/close controls sit exactly
-// inside the header. Single source of truth: every setTitleBarOverlay() call
-// forces it, because Electron RESETS the overlay height to the system default
-// whenever a setTitleBarOverlay() call OMITS `height` — that reset (triggered by
-// the renderer's per-theme recolor) is what detached the controls in packaged builds.
-const TITLEBAR_HEIGHT = 54;
-
 const SEISMIC_FILTERS = [
   { name: 'Seismic files', extensions: ['segy', 'sgy', 'segd', 'seg', 'su', 'seg2', 'dat', 'bat'] },
   { name: 'All files', extensions: ['*'] },
@@ -83,17 +75,13 @@ function createWindow(): void {
     minHeight: 560,
     backgroundColor: '#0d1f33',
     show: false,
-    // Frameless: drop the native OS title bar so the app's own header is the
-    // top of the window, but keep functional native min/max/close as a Windows
-    // Controls Overlay we recolor per theme (see seisconv:setTitleBarOverlay).
-    // Defaults match the LIGHT-theme header (--header-bg over --canvas) so the
-    // first paint is correct before the renderer's initTheme() runs.
+    // Frameless: drop the native OS title bar AND the OS window-controls overlay
+    // so the app's own header is the entire top of the window. The renderer draws
+    // its own min/max/close buttons (.win-controls) that match the theme, and the
+    // header acts as the drag region (-webkit-app-region:drag). titleBarStyle
+    // 'hidden' with NO titleBarOverlay yields a frameless window with zero native
+    // controls on Windows while keeping the rounded-corners / shadow chrome.
     titleBarStyle: 'hidden',
-    titleBarOverlay: {
-      color: '#f3f6fb',     // light header background (opaque equivalent)
-      symbolColor: '#15212f', // --ink (dark/navy glyphs)
-      height: TITLEBAR_HEIGHT, // matches the app-shell header row (renderer grid 54px)
-    },
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -105,8 +93,24 @@ function createWindow(): void {
   // Hardening: a local-only app never opens new windows or navigates elsewhere.
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   win.webContents.on('will-navigate', (event) => event.preventDefault());
+  // Keep the renderer's custom maximize/restore button in sync with the real
+  // window state (covers OS-level maximize via Win+Up, double-click, snap, etc.).
+  win.on('maximize', () => win?.webContents.send('seisconv:win-maximized', true));
+  win.on('unmaximize', () => win?.webContents.send('seisconv:win-maximized', false));
+  // Push the initial state once the renderer is ready to receive it.
+  win.webContents.once('did-finish-load', () =>
+    win?.webContents.send('seisconv:win-maximized', win.isMaximized()),
+  );
   void win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
 }
+
+// ── Custom window controls (renderer draws its own min/max/close buttons) ──
+ipcMain.on('seisconv:win-minimize', () => win?.minimize());
+ipcMain.on('seisconv:win-maximize-toggle', () => {
+  if (!win) return;
+  win.isMaximized() ? win.unmaximize() : win.maximize();
+});
+ipcMain.on('seisconv:win-close', () => win?.close());
 
 // ── IPC ──
 ipcMain.handle('seisconv:openAndParse', async () => {
@@ -245,14 +249,6 @@ ipcMain.handle(
 // Clear the open file + cached state in the worker.
 ipcMain.handle('seisconv:resetState', async () => {
   await callWorker({ type: 'reset' });
-});
-
-// Recolor the native window-controls overlay (min/max/close) so it always
-// matches the app header — called by the renderer's applyTheme() per theme.
-ipcMain.handle('seisconv:setTitleBarOverlay', (_e, opts: { color: string; symbolColor: string }) => {
-  // Force the height on every call: Electron resets it to the system default when
-  // omitted, which detaches the controls from the 54px header row (the packaged bug).
-  win?.setTitleBarOverlay({ ...opts, height: TITLEBAR_HEIGHT });
 });
 
 ipcMain.handle('seisconv:openSPS', async () => {
