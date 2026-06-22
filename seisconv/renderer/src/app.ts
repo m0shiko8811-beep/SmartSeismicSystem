@@ -355,6 +355,7 @@ async function onOpen() {
     summary = s;
     traceIndex = 0;
     renderInfo();
+    showSingleLoaded();      // banner + light up the single-file wizard
     updateNamePreview();
     setStatus('convStatus', '');
     setState(s.errors.length ? 'ok' : 'ok', s.errors.length ? `Loaded · ${s.errors.length} flag${s.errors.length > 1 ? 's' : ''}` : 'Loaded');
@@ -446,6 +447,18 @@ function updateNamePreview() {
   prev.className = 'status';
 }
 
+/**
+ * Move the shared output-name card into the slot for the active mode. Both modes
+ * read the same #outNameTpl/#outNameDate/#outNamePreview ids, so the template
+ * engine keeps working regardless of where the card currently lives in the DOM —
+ * single mode hosts it inside wizard step 3, batch mode above the folder wizard.
+ */
+function relocateOutNameCard(m: ConvMode) {
+  const card = $opt('outNameCard');
+  const slot = $opt(m === 'single' ? 'outNameSlotSingle' : 'outNameSlotBatch');
+  if (card && slot && card.parentElement !== slot) slot.appendChild(card);
+}
+
 /** Switch the Converter between single-file and folder-batch modes. */
 function setConvMode(m: ConvMode) {
   if (batchRunning) return; // don't tear the UI out from under a running batch
@@ -456,9 +469,12 @@ function setConvMode(m: ConvMode) {
   $opt('modeBatch')?.setAttribute('aria-pressed', String(m === 'batch'));
   $opt('convSingle')?.classList.toggle('hidden', m !== 'single');
   $opt('convBatch')?.classList.toggle('hidden', m !== 'batch');
+  // Host the shared output-name card in the active mode's slot.
+  relocateOutNameCard(m);
   // Tape Image is a batch-only writer; if it was picked in batch, fall back to a
   // valid single-mode format when switching to single so the chip stays in sync.
   if (m === 'single' && outFormat === 'tpimage') selectFormat('segy1');
+  if (m === 'single') refreshSingleWizard();
   updateNamePreview();
 }
 
@@ -470,7 +486,45 @@ function selectFormat(fmt: string) {
     if (!g) continue;
     for (const b of g.querySelectorAll('button')) b.classList.toggle('sel', b.getAttribute('data-fmt') === fmt);
   }
+  if (convMode === 'single') refreshSingleWizard();
   updateNamePreview();
+}
+
+/**
+ * Light up the single-file wizard steps + gate later steps, mirroring the batch
+ * wizard (refreshWizard). Step 1 = a file is open; step 2 = output format chosen
+ * (a default is always selected); step 3 = name + Convert & Save. No file → the
+ * format chips and the Convert button are disabled, just like batch gates its run.
+ */
+function refreshSingleWizard() {
+  const haveFile = !!summary && summary.traceCount > 0;
+  // step 1 — pick file
+  $opt('wizStepFile')?.classList.toggle('done', haveFile);
+  $opt('wizStepFile')?.classList.toggle('active', !haveFile);
+  // step 2 — output format (a format is always pre-selected, so it's done once a file is open)
+  $opt('wizStepSingleFormat')?.classList.toggle('done', haveFile);
+  $opt('wizStepSingleFormat')?.classList.toggle('active', false);
+  // step 3 — name & save (the actionable step once a file is open)
+  $opt('wizStepSingleSave')?.classList.toggle('active', haveFile);
+  $opt('wizStepSingleSave')?.classList.toggle('done', false);
+  // gate: no file → can't pick a format or convert
+  const chips = $opt('fmtChips');
+  if (chips) for (const b of chips.querySelectorAll('button')) (b as HTMLButtonElement).disabled = !haveFile || batchRunning;
+  const conv = $opt('convertBtn') as HTMLButtonElement | null;
+  if (conv) conv.disabled = !haveFile || batchRunning;
+}
+
+/** Fill the single-file loaded banner (name + format + trace/sample summary) and advance the wizard. */
+function showSingleLoaded() {
+  const found = $opt('singleFound');
+  if (!summary) { found?.classList.toggle('hidden', true); refreshSingleWizard(); return; }
+  found?.classList.toggle('hidden', false);
+  setText('singleFoundName', summary.name);
+  const rev = summary.revision ? ` Rev ${summary.revision}` : '';
+  setText('singleFoundMeta',
+    `${summary.format}${rev} · ${grp(summary.traceCount)} traces · ${summary.samplesTrace ?? '—'} samples · ${fmtRate(summary.sampleInt)}`);
+  setText('wizFileSub', `${summary.format}${rev} — ${grp(summary.traceCount)} traces, ${summary.samplesTrace ?? '—'} samples.`);
+  refreshSingleWizard();
 }
 
 // ── Single-file convert ──
@@ -709,6 +763,10 @@ async function clearConverter() {
   setStatus('convStatus', '');
   showSingleProgress(false);
   ($('convertBtn') as HTMLButtonElement).disabled = true;
+  // single-file wizard back to step 1
+  $opt('singleFound')?.classList.toggle('hidden', true);
+  setText('wizFileSub', 'SEG-Y · SEG-D · SEG-2 / .dat (Geode) · SU — parsed off the UI thread, so big files stay responsive.');
+  refreshSingleWizard();
   // batch UI back to empty
   $opt('batchFound')?.classList.toggle('hidden', true);
   $opt('batchProg')?.classList.toggle('hidden', true);

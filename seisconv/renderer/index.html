@@ -649,7 +649,11 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
           </button>
         </div>
 
-        <!-- ============ OUTPUT NAME (shared: single + batch) ============ -->
+        <!-- ============ OUTPUT NAME (shared engine: single step 3 + batch) ============ -->
+        <!-- The card lives here in the DOM; app.ts relocates it into the active
+             mode's slot (#outNameSlotSingle / #outNameSlotBatch) on mode switch,
+             so the SAME template engine (#outNameTpl/#outNameDate/#outNamePreview)
+             drives BOTH modes without duplicate ids. -->
         <div class="card" id="outNameCard" style="margin-bottom:16px;">
           <div class="ch">
             <h2>Output name</h2>
@@ -678,35 +682,41 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
           </div>
         </div>
 
-        <!-- ============ SINGLE-FILE MODE ============ -->
+        <!-- ============ SINGLE-FILE MODE — STEP WIZARD ============ -->
         <div id="convSingle">
-          <div class="drop">
-            <div class="ic">
-              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M12 18v-6m0 0-2.5 2.5M12 12l2.5 2.5"/></svg>
+          <div class="card">
+            <div class="ch">
+              <h2>Convert a single file</h2>
+              <span class="hint">Open one seismic file → inspect it → export to any format</span>
+              <div class="right"><span class="pill teal">single</span></div>
             </div>
-            <div>
-              <h3>Open a seismic file to begin</h3>
-              <p class="muted" style="margin-top:3px;">SEG-Y · SEG-D · SEG-2 / .dat (Geode) · SU — parsed off the UI thread, so big files stay responsive.</p>
-            </div>
-            <div class="acts">
-              <button class="btn btn-primary" id="openBtn2">Open seismic file…</button>
-            </div>
-          </div>
+            <div class="cb">
 
-          <div class="conv-grid">
+              <!-- loaded-file banner (shown once a file is opened) -->
+              <div class="found hidden" id="singleFound">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="color:var(--teal-deep);flex:none;"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>
+                <span>Loaded <b id="singleFoundName">—</b></span>
+                <span class="fdir" id="singleFoundMeta">—</span>
+              </div>
 
-            <!-- LEFT: format chips + convert -->
-            <div style="display:flex;flex-direction:column;gap:16px;">
-
-              <div class="card">
-                <div class="ch">
-                  <h2>Convert to</h2>
-                  <span class="hint">Pick one output format</span>
-                  <div class="right"><span class="pill teal">8 formats</span></div>
+              <!-- WIZARD -->
+              <!-- step 1: pick the seismic file -->
+              <div class="wiz-step active" id="wizStepFile">
+                <span class="wiz-num">1</span>
+                <div class="wiz-body">
+                  <div class="wt">Pick a seismic file</div>
+                  <div class="ws" id="wizFileSub">SEG-Y · SEG-D · SEG-2 / .dat (Geode) · SU — parsed off the UI thread, so big files stay responsive.</div>
                 </div>
-                <div class="cb">
-                  <div class="chips" id="fmtChips">
+                <button class="btn btn-primary sm" id="openBtn2">Pick a seismic file…</button>
+              </div>
+
+              <!-- step 2: output format (8 single-mode writers, no tpimage) -->
+              <div class="wiz-step" id="wizStepSingleFormat">
+                <span class="wiz-num">2</span>
+                <div class="wiz-body">
+                  <div class="wt">Output format</div>
+                  <div class="ws">Pick one of the 8 single-file writers.</div>
+                  <div class="chips" id="fmtChips" style="margin-top:10px;">
                     <button class="chip sel" data-fmt="segy1"><span class="nm">SEG-Y Rev 1</span><span class="ex">.sgy</span></button>
                     <button class="chip" data-fmt="segy0"><span class="nm">SEG-Y Rev 0</span><span class="ex">.sgy</span></button>
                     <button class="chip" data-fmt="segy2"><span class="nm">SEG-Y Rev 2</span><span class="ex">.sgy</span></button>
@@ -716,32 +726,47 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
                     <button class="chip" data-fmt="segd3"><span class="nm">SEG-D Rev 3</span><span class="ex">.segd</span></button>
                     <button class="chip" data-fmt="csv"><span class="nm">CSV / ASCII</span><span class="ex">.csv</span></button>
                   </div>
-
-                  <div style="margin-top:16px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
-                    <button class="btn btn-primary lg" id="convertBtn" disabled>
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14m0 0-5-5m5 5-5 5"/></svg>
-                      Convert &amp; Save…
-                    </button>
-                    <button class="btn sm" id="clearBtn">
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M6 6l1 14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-14"/></svg>
-                      Clear
-                    </button>
-                  </div>
-
-                  <!-- single-file converting indicator -->
-                  <div class="prog-wrap hidden" id="singleProg">
-                    <div class="prog-head"><span class="pt" id="singleProgTitle">Converting…</span></div>
-                    <div class="prog-bar"><div class="prog-fill indet" id="singleProgFill"></div></div>
-                  </div>
-
-                  <div class="status" id="convStatus"></div>
                 </div>
               </div>
+
+              <!-- step 3: output name + convert & save (hosts the shared #outNameCard) -->
+              <div class="wiz-step" id="wizStepSingleSave">
+                <span class="wiz-num">3</span>
+                <div class="wiz-body">
+                  <div class="wt">Output name &amp; save</div>
+                  <div class="ws">Name the converted file, then choose where it goes.</div>
+                  <!-- the shared output-name card is relocated here in single mode -->
+                  <div id="outNameSlotSingle" style="margin-top:10px;"></div>
+                </div>
+              </div>
+
+              <!-- convert / clear -->
+              <div class="wiz-actions">
+                <button class="btn btn-primary lg" id="convertBtn" disabled>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14m0 0-5-5m5 5-5 5"/></svg>
+                  Convert &amp; Save…
+                </button>
+                <button class="btn sm" id="clearBtn">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M6 6l1 14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-14"/></svg>
+                  Clear
+                </button>
+              </div>
+
+              <!-- single-file converting indicator -->
+              <div class="prog-wrap hidden" id="singleProg">
+                <div class="prog-head"><span class="pt" id="singleProgTitle">Converting…</span></div>
+                <div class="prog-bar"><div class="prog-fill indet" id="singleProgFill"></div></div>
+              </div>
+
+              <div class="status" id="convStatus"></div>
             </div>
+          </div>
 
-            <!-- RIGHT: file summary + header QC -->
+          <!-- File summary + Header QC stay populated after a file loads, as today -->
+          <div class="conv-grid" style="margin-top:16px;">
+
+            <!-- col 1: file summary -->
             <div style="display:flex;flex-direction:column;gap:16px;">
-
               <div class="card">
                 <div class="ch">
                   <h2>File summary</h2>
@@ -758,7 +783,10 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
                   <div class="kv"><span class="k">CRS</span><span class="v mono" id="fsCrs">—</span></div>
                 </div>
               </div>
+            </div>
 
+            <!-- col 2: header QC -->
+            <div style="display:flex;flex-direction:column;gap:16px;">
               <div class="card">
                 <div class="ch">
                   <h2>Header QC</h2>
@@ -774,12 +802,15 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
                   </div>
                 </div>
               </div>
-
             </div>
+
           </div>
         </div>
 
         <!-- ============ BATCH (FOLDER) MODE ============ -->
+        <!-- slot that hosts the shared #outNameCard while in batch mode (above the
+             folder wizard, as before) — app.ts moves the card here on mode switch. -->
+        <div id="outNameSlotBatch"></div>
         <div id="convBatch" class="hidden">
           <div class="card">
             <div class="ch">
