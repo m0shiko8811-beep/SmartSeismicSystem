@@ -6,7 +6,7 @@
 // only through the typed `seisconvAPI` in preload.
 
 import { app, BrowserWindow, dialog, ipcMain, Menu } from 'electron';
-import { writeFile, readFile, readdir } from 'node:fs/promises';
+import { writeFile, readFile, readdir, stat } from 'node:fs/promises';
 import { Worker } from 'node:worker_threads';
 import * as dgram from 'node:dgram';
 import * as path from 'node:path';
@@ -542,9 +542,9 @@ ipcMain.handle(
     _e,
     req: {
       scope: 'shared' | string;
-      edits: { code: string; val: string }[];
+      edits: { code: string; val: string; oldVal?: string }[];
       adds: { code: string; desc?: string; val: string }[];
-      removes: string[];
+      removes: (string | { code: string; oldVal?: string })[];
       crs?: Record<string, unknown>;
     },
   ) => {
@@ -651,6 +651,18 @@ ipcMain.handle('seisconv:exportBinary', async (_e, args: { name: string; bytes: 
   return { ok: true, path: save.filePath };
 });
 
+// Read a user-picked JSON file with a size bound, so a pathologically large file
+// can't be slurped + JSON.parse'd + materialized into renderer state unbounded.
+// Observer-log / template JSON is at most a few MB in practice; 64 MB is generous.
+const MAX_JSON_BYTES = 64 * 1024 * 1024;
+async function readJsonFileBounded(path: string): Promise<unknown> {
+  const st = await stat(path);
+  if (st.size > MAX_JSON_BYTES) {
+    throw new Error(`file too large (${st.size} bytes > ${MAX_JSON_BYTES} cap)`);
+  }
+  return JSON.parse(await readFile(path, 'utf8')) as unknown;
+}
+
 // Observer Log RELOAD: open a .json picker, read + parse it, and return the
 // {meta, columns, rows} payload (or null if cancelled / unreadable). The shape
 // matches what the renderer saves via exportText('observer-log.json', …).
@@ -664,8 +676,7 @@ ipcMain.handle('seisconv:openLogJson', async () => {
     ],
   });
   if (res.canceled || !res.filePaths.length) return null;
-  const text = await readFile(res.filePaths[0], 'utf8');
-  const o = JSON.parse(text) as { meta?: unknown; columns?: unknown; rows?: unknown };
+  const o = (await readJsonFileBounded(res.filePaths[0])) as { meta?: unknown; columns?: unknown; rows?: unknown };
   return {
     meta: o && typeof o.meta === 'object' && o.meta ? o.meta : {},
     columns: Array.isArray(o?.columns) ? o.columns : [],
@@ -687,8 +698,7 @@ ipcMain.handle('seisconv:openTemplateJson', async () => {
     ],
   });
   if (res.canceled || !res.filePaths.length) return null;
-  const text = await readFile(res.filePaths[0], 'utf8');
-  return JSON.parse(text) as unknown;
+  return readJsonFileBounded(res.filePaths[0]);
 });
 
 // Observer Log "Sync clock": query an SNTP server over UDP and return the offset

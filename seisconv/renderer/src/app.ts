@@ -164,9 +164,9 @@ declare global {
       // touches S/R coordinate lines. Returns the refreshed header list.
       spsApplyHeaders(req: {
         scope: 'shared' | string;
-        edits: { code: string; val: string }[];
+        edits: { code: string; val: string; oldVal?: string }[];
         adds: { code: string; desc?: string; val: string }[];
-        removes: string[];
+        removes: (string | { code: string; oldVal?: string })[];
         crs?: {
           datum?: string; projType?: string; zone?: number; hemi?: 'N' | 'S'; units?: string;
           centralMeridian?: number; latOrigin?: number; falseEasting?: number;
@@ -369,6 +369,11 @@ let specFk: FkData | null = null;
 let specTraceIdx = 0;
 let specDb = false;
 let specBusy = false;
+// Set when the user switches the spectrum display (or trace) while a compute is
+// in flight: the active refresher early-returns on specBusy, so the in-flight
+// compute's `finally` re-dispatches refreshSpectrum() to paint the new selection
+// instead of leaving the canvas on the previous image.
+let specRerunPending = false;
 
 // ── Trace Workbench state ──
 // A collection of traces pulled from arbitrary files (or the open file), drawn
@@ -634,6 +639,15 @@ function applyOpenedFile(s: Summary) {
   // summary.name with the OLD samples (a silent label/data desync). When the
   // trace panel is visible, refreshTrace() below repopulates it for the new file.
   lastTrace = null;
+  // Invalidate the Spectrum + Velocity caches: they're module-level and keyed to
+  // the previously-open file, so stepping files with ]/[ on those tabs would keep
+  // showing the OLD file's spectra/semblance. Drop the payloads, reset the
+  // spectrogram trace cursor, clear the velocity result + picks, then re-render
+  // whichever of those panels is visible so it reflects the NEW file.
+  specAvg = null; specGram = null; specFk = null;
+  specTraceIdx = 0;
+  velResult = null;
+  velPicks = [];
   renderInfo();
   showSingleLoaded();      // banner + light up the single-file wizard
   updateNamePreview();
@@ -642,6 +656,8 @@ function applyOpenedFile(s: Summary) {
   setState('ok', s.errors.length ? `Loaded · ${s.errors.length} flag${s.errors.length > 1 ? 's' : ''}` : 'Loaded');
   if ($('panel-trace').style.display !== 'none') void refreshTrace();
   if ($('panel-section').style.display !== 'none') void refreshSection();
+  if ($opt('panel-spectrum')?.style.display !== 'none') void refreshSpectrum();
+  if ($opt('panel-vel')?.style.display !== 'none') { renderVelPicks(); drawVelocity(); $('velLabel').textContent = 'Open a file, then compute a velocity scan.'; }
 }
 
 async function onOpen() {
@@ -3442,8 +3458,11 @@ type SpsHeaderState = {
 // Live snapshot of the last header list pulled from the worker (drives every
 // sub-view); null while the modal is closed / nothing loaded.
 let spsHdrState: SpsHeaderState | null = null;
-// Working copy of the raw H-records the user edits in the Raw tab.
-let spsHdrRawDraft: { code: string; val: string; desc: string; orig: boolean }[] = [];
+// Working copy of the raw H-records the user edits in the Raw tab. `origCode`/
+// `origVal` snapshot the record's loaded identity (null for user-added rows) so
+// an edit/remove can target THAT record by code+value, not by code alone — two
+// records sharing a code must not be rewritten/dropped together.
+let spsHdrRawDraft: { code: string; val: string; desc: string; orig: boolean; origCode: string | null; origVal: string | null }[] = [];
 
 // Grouping of H-record codes into human sections for the VIEW table. Order here
 // is the display order; an "Other" bucket catches anything unmatched.
@@ -3575,7 +3594,7 @@ function renderSpsHdrAdmin() {
 
 /** RAW tab: build the editable record list from a fresh draft of every H-record. */
 function renderSpsHdrRaw() {
-  spsHdrRawDraft = (spsHdrState?.headers || []).map((h) => ({ code: h.code, val: h.val, desc: h.desc, orig: true }));
+  spsHdrRawDraft = (spsHdrState?.headers || []).map((h) => ({ code: h.code, val: h.val, desc: h.desc, orig: true, origCode: h.code, origVal: h.val }));
   paintSpsHdrRaw();
 }
 function paintSpsHdrRaw() {
@@ -3603,7 +3622,7 @@ function spsHdrAddRaw() {
   const code = (($('spsHdrAddCode') as HTMLInputElement).value || '').trim().toUpperCase();
   const val = ($('spsHdrAddVal') as HTMLInputElement).value || '';
   if (!/^H\d{1,3}$/.test(code)) { $('spsHdrStatus').textContent = 'Enter a valid H-record code (e.g. H05).'; return; }
-  spsHdrRawDraft.push({ code, val, desc: '', orig: false });
+  spsHdrRawDraft.push({ code, val, desc: '', orig: false, origCode: null, origVal: null });
   ($('spsHdrAddCode') as HTMLInputElement).value = '';
   ($('spsHdrAddVal') as HTMLInputElement).value = '';
   $('spsHdrStatus').textContent = '';
@@ -3629,37 +3648,51 @@ function spsHdrStampCrs() {
 /** Build the spsApplyHeaders request from the Raw draft + Admin fields + (active CRS form). */
 function buildApplyRequest(): {
   scope: string;
-  edits: { code: string; val: string }[];
+  edits: { code: string; val: string; oldVal?: string }[];
   adds: { code: string; desc?: string; val: string }[];
-  removes: string[];
+  removes: (string | { code: string; oldVal?: string })[];
   crs?: Record<string, unknown>;
 } | null {
   const st = spsHdrState;
   if (!st) return null;
   const scope = ($('spsHdrScope') as HTMLSelectElement).value || 'shared';
-  const orig = new Map(st.headers.map((h) => [h.code, h.val] as const));
+  // Which codes still exist somewhere in the draft (used to decide a code-only
+  // Admin upsert vs. an add, and to keep the section's existing-code semantics).
+  const draftCodes = new Set(spsHdrRawDraft.map((r) => r.code).filter(Boolean));
 
-  const edits: { code: string; val: string }[] = [];
+  const edits: { code: string; val: string; oldVal?: string }[] = [];
   const adds: { code: string; desc?: string; val: string }[] = [];
-  const seen = new Set<string>();
+  const removes: (string | { code: string; oldVal?: string })[] = [];
 
-  // Raw draft drives edits/adds for existing-ish codes; the order/values there
-  // already reflect the user's per-record changes.
+  // Raw draft drives edits/adds. Each row carries its loaded identity (origVal),
+  // so an edit is targeted by code+origVal — a record sharing a code with another
+  // is no longer rewritten alongside it. A row whose code changed is treated as a
+  // remove (of the old identity) + an add (of the new code/value).
   for (const rec of spsHdrRawDraft) {
     if (!rec.code) continue;
-    seen.add(rec.code);
-    if (orig.has(rec.code)) {
-      if (orig.get(rec.code) !== rec.val) edits.push({ code: rec.code, val: rec.val });
+    if (rec.origVal != null && rec.origCode != null) {
+      if (rec.code !== rec.origCode) {
+        removes.push({ code: rec.origCode, oldVal: rec.origVal });
+        adds.push({ code: rec.code, val: rec.val, desc: rec.desc || undefined });
+      } else if (rec.val !== rec.origVal) {
+        edits.push({ code: rec.code, val: rec.val, oldVal: rec.origVal });
+      }
     } else {
       adds.push({ code: rec.code, val: rec.val, desc: rec.desc || undefined });
     }
   }
-  // Anything in the original block the user deleted from the Raw draft → remove.
-  const removes: string[] = [];
-  for (const h of st.headers) if (!seen.has(h.code)) removes.push(h.code);
+  // Original records the user deleted from the draft → remove by code+value so
+  // only that specific record is dropped (not every sibling sharing its code).
+  const draftIds = new Set(
+    spsHdrRawDraft.filter((r) => r.origVal != null && r.origCode != null).map((r) => r.origCode + ' ' + r.origVal),
+  );
+  for (const h of st.headers) {
+    if (!draftIds.has(h.code + ' ' + h.val)) removes.push({ code: h.code, oldVal: h.val });
+  }
 
   // Admin fields → map to H01/H02/H03/H04. A field overrides whatever the Raw
-  // draft produced for that code (Admin is the friendlier surface for them).
+  // draft produced for that code (Admin is the friendlier surface for them). These
+  // are unique-code records, so a plain code-keyed edit/add is correct here.
   const admin: [string, string][] = [
     ['H01', ($('admArea') as HTMLInputElement).value.trim()],
     ['H02', ($('admDate') as HTMLInputElement).value.trim()],
@@ -3668,12 +3701,16 @@ function buildApplyRequest(): {
   ];
   for (const [code, val] of admin) {
     if (val === '') continue; // blank = leave untouched
-    if (orig.has(code)) {
-      if (orig.get(code) !== val) upsertEdit(edits, code, val);
+    if (draftCodes.has(code)) {
+      upsertEdit(edits, code, val);
     } else if (!adds.some((a) => a.code === code)) {
       adds.push({ code, val });
     }
-    const ri = removes.indexOf(code); if (ri >= 0) removes.splice(ri, 1);
+    // The Admin field is authoritative for this code — undo any remove of it.
+    for (let i = removes.length - 1; i >= 0; i--) {
+      const r = removes[i];
+      if (typeof r === 'string' ? r === code : r.code === code) removes.splice(i, 1);
+    }
   }
 
   const req: ReturnType<typeof buildApplyRequest> = { scope, edits, adds, removes };
@@ -3682,10 +3719,13 @@ function buildApplyRequest(): {
   // the user chose label-only mode. Reproject mode hands off elsewhere.
   return req;
 }
-/** Replace-or-add an edit entry for `code` (Admin can override a Raw edit). */
-function upsertEdit(edits: { code: string; val: string }[], code: string, val: string) {
+/** Replace-or-add a code-keyed edit entry for `code` (Admin can override a Raw
+ *  edit). Admin codes are unique, so dropping any `oldVal` discriminator and
+ *  matching the per-code edit is correct; it also strips a stale value-keyed
+ *  edit for the same code so the Admin value wins. */
+function upsertEdit(edits: { code: string; val: string; oldVal?: string }[], code: string, val: string) {
   const e = edits.find((x) => x.code === code);
-  if (e) e.val = val; else edits.push({ code, val });
+  if (e) { e.val = val; delete e.oldVal; } else edits.push({ code, val });
 }
 
 /** Read the CRS form into the spsApplyHeaders.crs shape. */
@@ -3982,6 +4022,9 @@ function setSpecDisplay(d: SpecDisplay) {
   $opt('specCtlsFk')?.classList.toggle('hidden', d !== 'fk');
   // The f-k explanatory note only applies to the F-K view.
   $opt('specFkNote')?.classList.toggle('hidden', d !== 'fk');
+  // If a compute is already running, the active refresher will early-return on
+  // specBusy; flag a rerun so its finally re-dispatches and paints THIS display.
+  if (specBusy) { specRerunPending = true; return; }
   void refreshSpectrum();
 }
 
@@ -4013,7 +4056,7 @@ async function refreshSpecAvg() {
     updateHeaderClear();
   } catch (e) {
     $('specLabel').textContent = 'Failed: ' + errMsg(e);
-  } finally { specBusy = false; }
+  } finally { specBusy = false; if (specRerunPending) { specRerunPending = false; void refreshSpectrum(); } }
 }
 
 /** Repaint the cached average spectrum (no fetch) — used on dB toggle / resize. */
@@ -4028,7 +4071,9 @@ function drawSpecAvg() {
 async function refreshSpecGram() {
   if (specBusy || !summary) return;
   specTraceIdx = Math.max(0, Math.min(summary.traceCount - 1, specTraceIdx));
-  const winLen = Math.max(8, parseInt(($opt('specWin') as HTMLInputElement | null)?.value || '128', 10) || 128);
+  // Clamp the window to an absolute ceiling (the worker enforces the same cap, but
+  // bounding it here keeps the control from requesting an absurd FFT size).
+  const winLen = Math.min(65536, Math.max(8, parseInt(($opt('specWin') as HTMLInputElement | null)?.value || '128', 10) || 128));
   specBusy = true;
   $('specLabel').textContent = 'Computing spectrogram…';
   try {
@@ -4039,7 +4084,7 @@ async function refreshSpecGram() {
     const idIn = $opt('specTraceIdx') as HTMLInputElement | null; if (idIn) idIn.value = String(specTraceIdx);
   } catch (e) {
     $('specLabel').textContent = 'Failed: ' + errMsg(e);
-  } finally { specBusy = false; }
+  } finally { specBusy = false; if (specRerunPending) { specRerunPending = false; void refreshSpectrum(); } }
 }
 
 function drawSpecGram() {
@@ -4086,7 +4131,7 @@ async function refreshSpecFk() {
     $('specLabel').textContent = specFk.log || `f-k grid ${specFk.nF}×${specFk.nKx}.`;
   } catch (e) {
     $('specLabel').textContent = 'Failed: ' + errMsg(e);
-  } finally { specBusy = false; }
+  } finally { specBusy = false; if (specRerunPending) { specRerunPending = false; void refreshSpectrum(); } }
 }
 
 function drawSpecFk() {
@@ -5115,9 +5160,14 @@ function setSpsLookupHook(fn: SpsLookupHook | null): void { spsLookupHook = fn; 
 // invalidated whenever the loaded survey changes (loadSPS / clearSPS null it).
 let spsSourceCache: SpsSourceRecord[] | null = null;
 let spsSourceFetch: Promise<SpsSourceRecord[]> | null = null;
+// Bumped on every invalidation. An in-flight fetch captures the generation it was
+// started under and only writes the cache if it still matches — so a fetch for
+// survey A that resolves after A was cleared/replaced can't repopulate the cache
+// (or service later lookups) with A's stale sources.
+let spsSourceGen = 0;
 
 /** Drop the cached SPS source list (call when the loaded survey changes). */
-function invalidateSpsSourceCache(): void { spsSourceCache = null; spsSourceFetch = null; }
+function invalidateSpsSourceCache(): void { spsSourceCache = null; spsSourceFetch = null; spsSourceGen++; }
 
 /** Fetch (and cache) the loaded survey's source list. Resolves to [] — never
  *  rejects — when no SPS is loaded or the IPC is unavailable. */
@@ -5125,9 +5175,11 @@ async function getSpsSources(): Promise<SpsSourceRecord[]> {
   if (spsSourceCache) return spsSourceCache;
   if (!api?.spsSourceList) { spsSourceCache = []; return spsSourceCache; }
   if (!spsSourceFetch) {
+    const gen = spsSourceGen;
+    const fresh = () => gen === spsSourceGen; // false once invalidated mid-flight
     spsSourceFetch = api.spsSourceList()
-      .then((r) => { spsSourceCache = Array.isArray(r?.sources) ? r.sources : []; return spsSourceCache; })
-      .catch(() => { spsSourceCache = []; return spsSourceCache; });
+      .then((r) => { const s = Array.isArray(r?.sources) ? r.sources : []; if (fresh()) spsSourceCache = s; return s; })
+      .catch(() => { if (fresh()) spsSourceCache = []; return []; });
   }
   return spsSourceFetch;
 }

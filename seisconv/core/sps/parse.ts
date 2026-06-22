@@ -411,9 +411,20 @@ export function mergeSPSData(a: SPSData, b: SPSData): SPSData {
     if (!xseen.has(k)) { xseen.add(k); xrefs.push(x); }
   }
   const projection = a.projection && a.projection.type ? a.projection : b.projection && b.projection.type ? b.projection : undefined;
+  // De-duplicate H-record headers: an S file and an R file from the same survey
+  // carry identical project headers, and re-loading a file would otherwise double
+  // every shared record in the Viewer/Raw editor. Key on the full raw line (the
+  // exact 80-col text) so genuinely-distinct records survive while exact repeats
+  // collapse. Fall back to code|val when raw is empty.
+  const hseen = new Set<string>();
+  const headers: SPSHeader[] = [];
+  for (const h of [...a.headers, ...b.headers]) {
+    const k = h.raw && h.raw.length ? h.raw : `${h.code} ${h.val}`;
+    if (!hseen.has(k)) { hseen.add(k); headers.push(h); }
+  }
   return {
     sources, receivers, xrefs,
-    headers: [...a.headers, ...b.headers],
+    headers,
     errors: [...a.errors, ...b.errors],
     skipped: a.skipped + b.skipped,
     layout: a.layout || b.layout,

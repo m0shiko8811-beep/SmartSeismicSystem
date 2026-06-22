@@ -26,9 +26,12 @@ interface Req {
   // spsApplyHeaders: scope ('shared' = all loaded files, else a file name) + the
   // edit/add/remove batch and an optional CRS rewrite. Mirrors the IPC contract.
   scope?: 'shared' | string;
-  edits?: { code: string; val: string }[];
+  // `oldVal` (when present) targets a specific record by code+value so two
+  // records sharing a code aren't edited/removed together. A `string` remove is
+  // still accepted for code-only drops (back-compat).
+  edits?: { code: string; val: string; oldVal?: string }[];
   adds?: { code: string; desc?: string; val: string }[];
-  removes?: string[];
+  removes?: (string | { code: string; oldVal?: string })[];
   crs?: CRSSpec;
   paths?: string[];
   qc?: QCParams;
@@ -284,6 +287,17 @@ function hRecCode(raw: string): string {
   return ln.substring(0, 4).trim();
 }
 
+/** Read the DATA field (cols 33-80) of an H-record line the way parseSPSText does:
+ *  everything from col 33 on, with a trailing `;…` stripped, then trimmed. Used to
+ *  disambiguate two records that share a code but differ in value. */
+function hRecData(raw: string): string {
+  const ln = raw || '';
+  let data = ln.length > 32 ? ln.substring(32) : '';
+  const semi = data.indexOf(';');
+  if (semi >= 0) data = data.substring(0, semi);
+  return data.trim();
+}
+
 /** Rewrite the DATA field (cols 33-80) of an H-record line, keeping cols 1-32
  *  (code + description) intact and re-terminating with `;`. Pads to 80. */
 function rewriteHData(raw: string, val: string): string {
@@ -316,9 +330,9 @@ function buildHRecord(code: string, desc: string | undefined, val: string): stri
  */
 function applyHeaderEditsToText(
   text: string,
-  edits: { code: string; val: string }[],
+  edits: { code: string; val: string; oldVal?: string }[],
   adds: { code: string; desc?: string; val: string }[],
-  removes: string[],
+  removes: (string | { code: string; oldVal?: string })[],
   crsLines: Record<string, string> | null,
 ): string {
   const hadCRLF = /\r\n/.test(text);
@@ -328,9 +342,25 @@ function applyHeaderEditsToText(
   // Strip a leading BOM from line 0 (parseSPSText does the same).
   if (lines.length && lines[0].charCodeAt(0) === 0xfeff) lines[0] = lines[0].slice(1);
 
-  const editMap = new Map<string, string>();
-  for (const e of edits || []) editMap.set(e.code, e.val);
-  const removeSet = new Set(removes || []);
+  // Edits/removes can carry an optional `oldVal` so a record is matched by
+  // code+value, not code alone — without it, two records sharing a code (e.g. two
+  // H22x lines with different content) would all be rewritten/dropped together.
+  // Keys: `code` for the code-only entries (back-compat: Admin/CRS upserts, adds
+  // reconcile) and `code oldVal` for the value-discriminated ones.
+  const SEP = ' ';
+  const editByCode = new Map<string, string>();
+  const editByCodeVal = new Map<string, string>();
+  for (const e of edits || []) {
+    if (e.oldVal != null) editByCodeVal.set(e.code + SEP + e.oldVal, e.val);
+    else editByCode.set(e.code, e.val);
+  }
+  const removeCodes = new Set<string>();
+  const removeCodeVals = new Set<string>();
+  for (const r of removes || []) {
+    if (typeof r === 'string') removeCodes.add(r);
+    else if (r.oldVal != null) removeCodeVals.add(r.code + SEP + r.oldVal);
+    else removeCodes.add(r.code);
+  }
   // CRS rewrite codes still pending insertion (those not matched in place).
   const crsPending = new Set(crsLines ? Object.keys(crsLines) : []);
 
@@ -339,17 +369,24 @@ function applyHeaderEditsToText(
   for (const raw of lines) {
     const code = hRecCode(raw);
     if (code) {
+      const cv = code + SEP + hRecData(raw);
+      const removed = removeCodes.has(code) || removeCodeVals.has(cv);
       // CRS projection-record rewrite takes precedence over a plain edit.
       if (crsLines && crsLines[code] != null) {
-        if (removeSet.has(code)) { continue; } // user removed it → skip even under CRS
+        if (removed) { continue; } // user removed it → skip even under CRS
         out.push(crsLines[code]);
         crsPending.delete(code);
         lastHIdx = out.length - 1;
         continue;
       }
-      if (removeSet.has(code)) continue; // drop this H-record
-      if (editMap.has(code)) {
-        out.push(rewriteHData(raw, editMap.get(code)!));
+      if (removed) continue; // drop this H-record
+      if (editByCodeVal.has(cv)) {
+        out.push(rewriteHData(raw, editByCodeVal.get(cv)!));
+        lastHIdx = out.length - 1;
+        continue;
+      }
+      if (editByCode.has(code)) {
+        out.push(rewriteHData(raw, editByCode.get(code)!));
         lastHIdx = out.length - 1;
         continue;
       }
@@ -365,7 +402,7 @@ function applyHeaderEditsToText(
   const inserts: string[] = [];
   if (crsLines) {
     for (const code of PROJ_HEADER_CODES) {
-      if (crsPending.has(code) && !removeSet.has(code)) inserts.push(crsLines[code]);
+      if (crsPending.has(code) && !removeCodes.has(code)) inserts.push(crsLines[code]);
     }
   }
   for (const a of adds || []) inserts.push(buildHRecord(a.code, a.desc, a.val));
@@ -467,6 +504,11 @@ port.on('message', (req: Req) => {
       for (const p of req.paths ?? []) {
         const text = readFileSync(p, 'utf8');
         const name = basename(p);
+        // Skip a file that's already loaded with identical content: re-loading the
+        // same set would otherwise add duplicate scope-selector entries and make
+        // spsSaveCorrected zip two files with the same name. Point dedup in
+        // mergeSPSData already collapses the stations, but the file list does not.
+        if (currentSPSFiles.some((f) => f.name === name && f.text === text)) continue;
         currentSPSFiles.push({ name, text, type: detectSPSType(name, text) });
         const sps = parseSPSText(text);
         merged = merged ? mergeSPSData(merged, sps) : sps;
@@ -877,9 +919,15 @@ port.on('message', (req: Req) => {
         return;
       }
       const scope = req.scope ?? 'shared';
-      const edits = req.edits ?? [];
-      const adds = req.adds ?? [];
-      const removes = req.removes ?? [];
+      // Bound the batch so a malformed/oversized IPC payload can't fan out into a
+      // huge text rewrite (one 80-char line per add, × every targeted file). A
+      // real header block has a few dozen records; cap generously.
+      const MAX_HDR_OPS = 1000;
+      const MAX_HDR_VAL = 4096; // per-value char cap (the line itself is clamped to 80)
+      const clampVal = (v: string) => (typeof v === 'string' ? v.slice(0, MAX_HDR_VAL) : '');
+      const edits = (req.edits ?? []).slice(0, MAX_HDR_OPS).map((e) => ({ code: e.code, val: clampVal(e.val), oldVal: e.oldVal }));
+      const adds = (req.adds ?? []).slice(0, MAX_HDR_OPS).map((a) => ({ code: a.code, desc: a.desc, val: clampVal(a.val) }));
+      const removes = (req.removes ?? []).slice(0, MAX_HDR_OPS);
       let crsLines: Record<string, string> | null = null;
       if (req.crs) {
         try { crsLines = generateProjHeaders(crsFromSpec(req.crs)); }
@@ -1129,12 +1177,16 @@ port.on('message', (req: Req) => {
       // Decimate the trace COUNT if the window is huge (same idea as the section
       // handler's traceStep): keep at most MAX_TRACES, every Nth across the window.
       const MAX_TRACES = 4000;
+      // Also cap each trace's sample length (like the fk handler) so averageSpectrum's
+      // N = nextPow2(maxTraceLen) can't force a huge per-trace FFT from one over-long
+      // trace; resample longer traces down to MAX_SAMPLES before averaging.
+      const MAX_SAMPLES = 8192;
       const winTraces = t1 - t0;
       const stride = Math.max(1, Math.ceil(winTraces / MAX_TRACES));
       const traces: Float32Array[] = [];
       for (let t = t0; t < t1; t += stride) {
         const s = current.traces[t]?.samples;
-        if (s) traces.push(s);
+        if (s) traces.push(s.length > MAX_SAMPLES ? resampleLinear(s, MAX_SAMPLES) : s);
       }
       if (!traces.length) {
         port.postMessage({ id, ok: false, error: 'no traces with samples' });
@@ -1163,7 +1215,12 @@ port.on('message', (req: Req) => {
       // Cap the output grid (nFrames*nBins) so a long trace with a tiny hop can't
       // allocate a huge image; grow the hop just enough to fit the budget.
       const MAX_CELLS = 4_000_000;
-      let winLen = Math.max(2, (req.winLen ?? 128) | 0);
+      // Cap the window so nextPow2(winLen) can't force a multi-GB FFT buffer
+      // (spectrogram allocates Float64Array(nextPow2(winLen)) for re AND im). A
+      // window longer than the trace yields a single zero-padded frame anyway, so
+      // clamp to the trace length and an absolute ceiling.
+      const MAX_WIN = 65_536;
+      let winLen = Math.max(2, Math.min(MAX_WIN, s.length, (req.winLen ?? 128) | 0));
       let hop = Math.max(1, (req.hop ?? (winLen >> 1)) | 0);
       const nBins = nextPow2(winLen) >> 1;
       const framesFor = (h: number) => (s.length >= winLen ? Math.floor((s.length - winLen) / h) + 1 : 1);

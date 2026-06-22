@@ -321,9 +321,12 @@ export interface SPSCrsEdit {
  *  is 'shared' (all loaded SPS files) or a single loaded file's name. */
 export interface SPSApplyHeadersReq {
   scope: 'shared' | string;
-  edits: { code: string; val: string }[];
+  // `oldVal` (optional) targets a specific record by code+value so two records
+  // sharing a code aren't edited/removed together. A bare `string` remove is the
+  // code-only form (kept for back-compat).
+  edits: { code: string; val: string; oldVal?: string }[];
   adds: { code: string; desc?: string; val: string }[];
-  removes: string[];
+  removes: (string | { code: string; oldVal?: string })[];
   crs?: SPSCrsEdit;
 }
 

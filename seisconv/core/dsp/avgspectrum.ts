@@ -6,7 +6,6 @@
 // Pure — no DOM, no deps. Reuses amplitudeSpectrum (FFT + Hann) from ./fft.
 
 import { amplitudeSpectrum, nextPow2 } from './fft';
-import { resampleLinear } from './interpolate';
 
 export interface AvgSpectrum {
   freqs: Float32Array; // Hz, length N/2
@@ -56,8 +55,25 @@ export function averageSpectrum(
     // amplitudeSpectrum pads to nextPow2(s.length); when that differs from the
     // common N its bins won't align, so resample its amp curve onto the common
     // half-length grid. When they match this is a cheap copy.
-    const a = sp.amp.length === half ? sp.amp : resampleLinear(sp.amp, half);
-    for (let k = 0; k < half; k++) acc[k] += a[k];
+    if (sp.amp.length === half) {
+      for (let k = 0; k < half; k++) acc[k] += sp.amp[k];
+    } else {
+      // Resample by FREQUENCY, not by bin index: the per-trace spectrum has bin
+      // spacing fs/Nown while the common grid has fs/N, so common bin k (freq
+      // k*fs/N) maps to the source position k*Nown/N — NOT a uniform index
+      // stretch over [0..lenOwn-1], which would smear energy near the band edges
+      // when sample counts differ. Linear-interpolate at that source position.
+      const src = sp.amp;
+      const lenOwn = src.length; // = Nown/2
+      const ratio = lenOwn / half; // = Nown/N, the bin-spacing ratio
+      for (let k = 0; k < half; k++) {
+        const x = k * ratio;
+        const i0 = Math.floor(x);
+        if (i0 >= lenOwn - 1) { acc[k] += src[lenOwn - 1]; continue; }
+        const t = x - i0;
+        acc[k] += src[i0] * (1 - t) + src[i0 + 1] * t;
+      }
+    }
     nTraces++;
   }
 

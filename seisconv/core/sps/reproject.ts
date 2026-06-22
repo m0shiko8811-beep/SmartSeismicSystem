@@ -162,9 +162,20 @@ export function crsFromSpec(spec: CRSSpec): CRS {
     }
   }
 
-  const crs: CRS = base
-    ? { ...base }
-    : { code: '', name: spec.datum || spec.projType || 'Custom', subtype };
+  // When the matched entry's subtype differs from the requested one (e.g. a
+  // generic 'WGS 84' datum substring-matched the first UTM-zone-1N row but the
+  // user asked for a TM grid), only the datum-level fields (ellipsoid a/f +
+  // Helmert) are meaningful — its projection parameters (lon0/lat0/k0/FE/FN/zone)
+  // belong to a different grid and would seed a silently-wrong central meridian /
+  // false-easting. Carry over only the safe fields in that case.
+  let crs: CRS;
+  if (base && base.subtype !== subtype) {
+    crs = { code: '', name: spec.datum || spec.projType || 'Custom', subtype, a: base.a, f: base.f, helmert: base.helmert };
+  } else if (base) {
+    crs = { ...base };
+  } else {
+    crs = { code: '', name: spec.datum || spec.projType || 'Custom', subtype };
+  }
   crs.subtype = subtype;
   if (spec.zone != null) crs.zone = spec.zone;
   if (spec.hemi != null) crs.hemi = spec.hemi;
