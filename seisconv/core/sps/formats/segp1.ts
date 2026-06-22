@@ -25,6 +25,7 @@
 // PURE: no DOM, no Node — runs in the worker AND in unit tests.
 
 import { spsExtractProjection, type SPSData, type SPSPoint, type SPSHeader, type SPSProjection } from '../parse';
+import { latLonToProj, type Projection } from '../../coords';
 
 // ── DoS bounds (mirror the binary parsers' MAX_TRACES / MAX_SAMPLES discipline) ──
 /** Hard cap on total point records materialized from one file. */
@@ -54,6 +55,51 @@ function intField(s: string, a: number, b: number): number {
   // non-digits by extracting the leading signed-integer token.
   const m = /^[+-]?\d+/.exec(v);
   return m ? parseInt(m[0], 10) : NaN;
+}
+
+/**
+ * Parse a grid (E/N/elevation) field, returning a value already SCALED TO METRES.
+ *
+ * SEG-P1 has two field conventions for grid coordinates:
+ *  - the IHS/AccuMap variant uses integer DECIMETRES (no decimal point) → /10 → m;
+ *  - the original SEG-P1 / Golden Software SP1 variant uses F-format FLOATING-POINT
+ *    grid units in METRES (a decimal point present) → used as-is.
+ * We detect the form per field: a '.' means floating-point metres (no /10); a pure
+ * integer is decimetres. This avoids the 10× position error a meters file ('660000.0')
+ * would otherwise suffer. Returns NaN when blank/garbage (never throws).
+ */
+function gridFieldMetres(s: string, a: number, b: number): number {
+  const v = col(s, a, b);
+  if (!v) return NaN;
+  // Floating-point form (decimal point present) → already metres, do NOT divide.
+  if (v.indexOf('.') >= 0) {
+    const m = /^[+-]?\d*\.\d+|^[+-]?\d+\.\d*/.exec(v);
+    const f = m ? parseFloat(m[0]) : NaN;
+    return isFinite(f) ? f : NaN;
+  }
+  // Pure-integer form → DECIMETRES; scale to metres.
+  const mi = /^[+-]?\d+/.exec(v);
+  const iv = mi ? parseInt(mi[0], 10) : NaN;
+  return isFinite(iv) ? iv / 10 : NaN;
+}
+
+/** Map an {@link SPSProjection} onto the coords {@link Projection} that
+ *  {@link latLonToProj} consumes (forward-direction param names). */
+function toProj(p: SPSProjection): Projection {
+  return {
+    subtype: p.subtype ?? undefined,
+    zone: p.zone ?? undefined,
+    hemi: p.hemi ?? undefined,
+    a: p.a ?? undefined,
+    invF: p.invF ?? undefined,
+    f: p.invF ? 1 / p.invF : undefined,
+    lon0: p.centralMeridian ?? undefined,
+    lat0: p.latOrigin ?? undefined,
+    k0: p.scaleFactor ?? undefined,
+    FE: p.falseEasting ?? undefined,
+    FN: p.falseNorthing ?? undefined,
+    helmert: p.helmert ?? undefined,
+  };
 }
 
 /**
@@ -181,6 +227,26 @@ export function parseSegP1(text: string): SPSData {
   // (SEG-P1 is overwhelmingly a shotpoint file; the header rarely overrides this.)
   let headerDefault: 'S' | 'R' = 'S';
 
+  // Pre-scan the leading 'H' block so the header-derived projection is available
+  // WHILE parsing point records — a lat/long-only record must be projected to E/N
+  // using this projection (otherwise its real position would be silently lost). We
+  // collect the header lines again below; this is only the projection pre-pass.
+  for (let li = 0; li < rawLines.length; li++) {
+    const r = rawLines[li];
+    if (!r || !r.trim()) continue;
+    const rr = r.length > MAX_LINE_LEN ? r.slice(0, MAX_LINE_LEN) : r;
+    if (rr[0].toUpperCase() === 'H') {
+      if (headerLines.length < MAX_HEADERS) headerLines.push(rr);
+      continue;
+    }
+    // First non-header, non-blank line ends the leading header block.
+    if (rr[0] !== '*' && rr[0] !== '!' && rr[0] !== '#') break;
+  }
+  const headerProj = projectionFromHeaderText(headerLines);
+  const headerProjCoords = headerProj ? toProj(headerProj) : null;
+  // Reset the accumulator the main pass rebuilds (it also appends to out.headers).
+  headerLines.length = 0;
+
   for (let li = 0; li < rawLines.length; li++) {
     const rawFull = rawLines[li];
     if (!rawFull || !rawFull.trim()) continue;
@@ -219,12 +285,13 @@ export function parseSegP1(text: string): SPSData {
     const idxChar = col(ln, 25, 26); // reshoot code → used as idx
     const lat = parsePackedDMS(col(ln, 26, 35), 2);
     const lon = parsePackedDMS(col(ln, 35, 45), 3);
-    // Easting / Northing / Elevation are integers in DECIMETRES → meters = /10.
-    const eDm = intField(ln, 45, 53);
-    const nDm = intField(ln, 53, 61);
-    const zDm = intField(ln, 61, 66);
+    // Easting / Northing / Elevation — gridFieldMetres returns METRES (it handles
+    // both the integer-decimetres and the F-format float-metres conventions).
+    let easting = gridFieldMetres(ln, 45, 53);
+    let northing = gridFieldMetres(ln, 53, 61);
+    const elevation = gridFieldMetres(ln, 61, 66);
 
-    const hasGrid = isFinite(eDm) && isFinite(nDm) && (Math.abs(eDm) > 0 || Math.abs(nDm) > 0);
+    let hasGrid = isFinite(easting) && isFinite(northing) && (Math.abs(easting) > 0 || Math.abs(northing) > 0);
     const hasGeo = lat != null && lon != null;
 
     if (!isFinite(point) && !hasGrid && !hasGeo) {
@@ -234,9 +301,27 @@ export function parseSegP1(text: string): SPSData {
       continue;
     }
 
-    const easting = hasGrid ? eDm / 10 : NaN;
-    const northing = hasGrid ? nDm / 10 : NaN;
-    const elevation = isFinite(zDm) ? zDm / 10 : NaN;
+    // Geographic-only record (lat/long present, grid E/N absent): the spec allows
+    // this. Project lat/lon → E/N with the header-derived projection so the real
+    // position is NOT lost. With no usable projection we cannot place the point on
+    // the projected grid — skip it (counted) rather than emit a silent (0,0).
+    if (hasGeo && !hasGrid) {
+      if (headerProjCoords && headerProjCoords.subtype) {
+        const en = latLonToProj(lat as number, lon as number, headerProjCoords, isFinite(elevation) ? elevation : 0);
+        if (isFinite(en.E) && isFinite(en.N)) {
+          easting = en.E;
+          northing = en.N;
+          hasGrid = true;
+        }
+      }
+      if (!hasGrid) {
+        out.skipped++;
+        out.errors.push(
+          `L${li + 1}: SEG-P1 geographic-only record (lat/long, no grid E/N) — no header projection to place it; record dropped.`,
+        );
+        continue;
+      }
+    }
 
     const rtype = classifyRtype(col(ln, 0, 1), headerDefault);
 
@@ -251,6 +336,9 @@ export function parseSegP1(text: string): SPSData {
       raw,
       lineNum: li + 1,
     };
+    // Always carry the geographic coordinates when the record supplied them.
+    if (lat != null) pt.lat = lat;
+    if (lon != null) pt.lon = lon;
     if (rtype === 'S') out.sources.push(pt);
     else out.receivers.push(pt);
   }
@@ -259,7 +347,6 @@ export function parseSegP1(text: string): SPSData {
   if (out.skipped > 0) out.errors.unshift(`${out.skipped} record(s) skipped (SEG-P1 parse failed)`);
 
   out.layout = 'SEG-P1';
-  const proj = projectionFromHeaderText(headerLines);
-  if (proj) out.projection = proj;
+  if (headerProj) out.projection = headerProj;
   return out;
 }

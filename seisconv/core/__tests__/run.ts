@@ -528,6 +528,49 @@ test('SEG-P1 honours the MAX header cap without throwing', () => {
   assert.equal(segp1.sources.length + segp1.receivers.length, 0, 'no points from a header-only file');
 });
 
+test('SEG-P1 geographic-only record (blank grid E/N) is PROJECTED to E/N, not lost at (0,0)', () => {
+  const put = (line: string, start: number, txt: string) => {
+    const padded = line.padEnd(Math.max(line.length, start + txt.length), ' ');
+    return padded.slice(0, start) + txt + padded.slice(start + txt.length);
+  };
+  // A record carrying ONLY lat/long (grid E/N columns left blank).
+  let rec = ' '.padEnd(80, ' ');
+  rec = put(rec, 1, '2001');           // line name
+  rec = put(rec, 17, '7');             // point
+  rec = put(rec, 26, '32050720N');     // lat 32°05'07.20"N
+  rec = put(rec, 35, '034465448E');    // lon 034°46'54.48"E
+  // cols 45-65 (E/N/Z) intentionally left blank.
+  const h1 = 'H GRID: UTM ZONE 36 NORTH  DATUM WGS-84';
+  const d = parseSegP1([h1, rec.slice(0, 80)].join('\n'));
+  assert.equal(d.skipped, 0, `skipped ${d.skipped}: ${d.errors.join('; ')}`);
+  assert.equal(d.sources.length, 1, `sources ${d.sources.length}`);
+  const s = d.sources[0];
+  // Geographic coords survive on the point.
+  assert.ok(s.lat != null && Math.abs(s.lat - (32 + 5 / 60 + 7.2 / 3600)) < 1e-6, `lat ${s.lat}`);
+  assert.ok(s.lon != null && Math.abs(s.lon - (34 + 46 / 60 + 54.48 / 3600)) < 1e-6, `lon ${s.lon}`);
+  // Projected to E/N in UTM 36N — NOT (0,0). Cross-check with the coords engine.
+  const en = latLonToUTM(s.lat!, s.lon!, 36, 'N');
+  assert.ok(Math.abs(s.easting - en.E) < 1e-3 && Math.abs(s.northing - en.N) < 1e-3, `E/N ${s.easting},${s.northing} vs ${en.E},${en.N}`);
+  assert.ok(s.easting !== 0 && s.northing !== 0, 'not dropped at (0,0)');
+});
+
+test('SEG-P1 grid E/N in F-format float metres are NOT divided by 10', () => {
+  const put = (line: string, start: number, txt: string) => {
+    const padded = line.padEnd(Math.max(line.length, start + txt.length), ' ');
+    return padded.slice(0, start) + txt + padded.slice(start + txt.length);
+  };
+  // Float-metres E/N (decimal point present): '660000.0' must stay 660000, not 66000.
+  let rec = ' '.padEnd(80, ' ');
+  rec = put(rec, 1, '3001');
+  rec = put(rec, 17, '5');
+  rec = put(rec, 45, '660000.0');
+  rec = put(rec, 53, '3550000.');
+  const d = parseSegP1(rec.slice(0, 80));
+  assert.equal(d.sources.length, 1, `sources ${d.sources.length}`);
+  assert.ok(Math.abs(d.sources[0].easting - 660000) < 1e-6, `float E ${d.sources[0].easting}`);
+  assert.ok(Math.abs(d.sources[0].northing - 3550000) < 1e-6, `float N ${d.sources[0].northing}`);
+});
+
 test('semblance returns a valid [0,1] matrix with a coherent peak', () => {
   const traces: any[] = [];
   for (let k = 0; k < 12; k++) {
@@ -1142,6 +1185,34 @@ test('coordcsv parse → build → parse round-trips points and CRS tag', () => 
   assert.equal(d2.projection?.subtype, 'TM', 'CRS round-trips');
 });
 
+test('coordcsv UTM projection survives parse → build → parse (no silent CRS loss)', () => {
+  // A survey carrying a UTM projection with NO EPSG code in desc (the normal
+  // SPS-derived case): the emitted CRS tag must be readable back.
+  const csv = ['# CRS: EPSG:32636', 'line,point,type,easting,northing,elevation', '101,200,S,500000,4000000,10'].join('\n');
+  const d1 = parseCoordCsv(csv);
+  assert.equal(d1.projection?.subtype, 'UTM', `subtype ${d1.projection?.subtype}`);
+  assert.equal(d1.projection?.zone, 36, `zone ${d1.projection?.zone}`);
+  // Drop the EPSG code from desc to simulate an SPS-derived UTM projection that
+  // only knows subtype+zone+hemi, then build and re-parse.
+  const proj = { ...d1.projection! }; delete (proj as { desc?: string }).desc;
+  const files = buildCoordCsv({ ...d1, projection: proj });
+  const tagLine = files[0].text.split('\n')[0];
+  assert.ok(/^# CRS:/.test(tagLine), `tag present: ${tagLine}`);
+  const d2 = parseCoordCsv(files[0].text);
+  assert.ok(d2.projection != null, `UTM projection LOST on round-trip (tag was "${tagLine}")`);
+  assert.equal(d2.projection?.subtype, 'UTM', `subtype after round-trip ${d2.projection?.subtype}`);
+  assert.equal(d2.projection?.zone, 36, `zone after round-trip ${d2.projection?.zone}`);
+});
+
+test('coordcsv round-trips the SPSPoint.idx flag character', () => {
+  const csv = ['line,point,type,idx,easting,northing,elevation', '101,200,S,A,660000,3550000,120'].join('\n');
+  const d1 = parseCoordCsv(csv);
+  assert.equal(d1.sources[0].idx, 'A', `idx parsed ${d1.sources[0].idx}`);
+  const files = buildCoordCsv(d1);
+  const d2 = parseCoordCsv(files[0].text);
+  assert.equal(d2.sources[0].idx, 'A', `idx LOST on round-trip: "${d2.sources[0].idx}"`);
+});
+
 // ── IOGP P6/11 bin-grid (read-only) ────────────────────────────────────────────
 // A bin-grid file DEFINES a seismic acquisition grid (origin, bin size, rotation,
 // inline/crossline numbering, corners) rather than per-point positions, so it maps
@@ -1190,18 +1261,22 @@ test('parseP611 reads origin, bin sizes, rotation, numbering and computes corner
   assert.equal(g.crs?.subtype, 'UTM', `crs subtype ${g.crs?.subtype}`);
   assert.equal(g.crs?.zone, 36, `crs zone ${g.crs?.zone}`);
 
-  // Four corners = origin + a·Î + b·Ĵ, a∈{0, 4·25=100}, b∈{0, 2·25=50}.
-  // Î bears 250° → (sin,cos)=(−0.93969, −0.34202); Ĵ bears 340° → (−0.34202, 0.93969).
+  // nInline/nCrossline are NODE counts, so the grid spans (n−1) bin INTERVALS:
+  // Wi=(4−1)·25=75, Wj=(2−1)·25=25. Four corners = origin + a·Î + b·Ĵ,
+  // a∈{0,75}, b∈{0,25}. Î bears 250°; Ĵ bears the file's J-bearing 340° directly
+  // (NOT assumed inline+90 — though here 340=250+90 anyway).
   assert.ok(g.corners && g.corners.length === 4, `corners ${g.corners?.length}`);
+  assert.ok(Math.abs(g.crosslineAzimuth - 340) < 1e-6, `crosslineAzimuth ${g.crosslineAzimuth}`);
   const c = g.corners!;
   const D2R = Math.PI / 180;
   const iE = Math.sin(250 * D2R), iN = Math.cos(250 * D2R);
   const jE = Math.sin(340 * D2R), jN = Math.cos(340 * D2R);
+  const Wi = 75, Wj = 25;
   const expect = [
     { e: 500000, n: 4000000 },
-    { e: 500000 + 100 * iE, n: 4000000 + 100 * iN },
-    { e: 500000 + 100 * iE + 50 * jE, n: 4000000 + 100 * iN + 50 * jN },
-    { e: 500000 + 50 * jE, n: 4000000 + 50 * jN },
+    { e: 500000 + Wi * iE, n: 4000000 + Wi * iN },
+    { e: 500000 + Wi * iE + Wj * jE, n: 4000000 + Wi * iN + Wj * jN },
+    { e: 500000 + Wj * jE, n: 4000000 + Wj * jN },
   ];
   for (let k = 0; k < 4; k++) {
     assert.ok(Math.abs(c[k].e - expect[k].e) < 1e-4, `corner ${k} E ${c[k].e} vs ${expect[k].e}`);

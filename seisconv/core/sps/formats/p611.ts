@@ -44,6 +44,10 @@ const MAX_LINES = 2_000_000;
 const MAX_LINE_LEN = 4096;
 /** Cap on the audit `raw` array so a hostile file can't pin O(file) lines in memory. */
 const MAX_RAW = 4096;
+/** Hard cap on the total source length we will scan, so the up-front newline split
+ *  cannot allocate O(file) strings from an attacker-controlled newline count. A
+ *  conformant P6/11 header is tiny; this still admits very large real files. */
+const MAX_TEXT_LEN = 64 * 1024 * 1024;
 
 const D2R = Math.PI / 180;
 
@@ -60,9 +64,15 @@ function num(s: string | undefined): number {
 }
 
 /**
- * Parse a bearing/azimuth token. Accepts a plain decimal degree value, or a
- * sexagesimal "DDD.MMSSsss" / "DDD MM SS.sss" form occasionally seen in IOGP
- * angle fields. Returns degrees in [0,360), or NaN.
+ * Parse a bearing/azimuth token. Accepts a plain DECIMAL-degree value or a
+ * SPACE/COLON-separated sexagesimal "DDD MM SS.sss" form. Returns degrees in
+ * [0,360), or NaN.
+ *
+ * NOTE: a packed dotted "DDD.MMSSsss" form is NOT decoded here — it is numerically
+ * indistinguishable from a plain decimal degree value (e.g. "340.0" vs "340.3015")
+ * with no reliable signal in the token alone, so guessing would silently corrupt
+ * valid decimal bearings. P6/11 angle values in this reader are therefore treated
+ * as decimal degrees (or the explicitly-separated DMS form above).
  */
 function parseBearing(s: string | undefined): number {
   if (s == null) return NaN;
@@ -93,9 +103,36 @@ function norm360(deg: number): number {
 /**
  * Split a P6/11 record into trimmed fields. P6/11 is canonically comma-delimited;
  * we also accept tab or run-of-spaces so a columnar vendor variant still tokenises.
+ * Double-quoted fields are honoured (a comma inside quotes does NOT split), so a
+ * quoted survey name like `"DEMO, 3D"` survives as one field; surrounding quotes
+ * are stripped and `""` is an escaped quote.
  */
 function fields(line: string): string[] {
-  if (line.includes(',')) return line.split(',').map((s) => s.trim());
+  if (line.includes(',')) {
+    if (line.indexOf('"') < 0) return line.split(',').map((s) => s.trim());
+    // Quote-aware comma split.
+    const out: string[] = [];
+    let cur = '';
+    let inQ = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (inQ) {
+        if (ch === '"') {
+          if (line[i + 1] === '"') { cur += '"'; i++; } // escaped quote
+          else inQ = false;
+        } else cur += ch;
+      } else if (ch === '"') {
+        inQ = true;
+      } else if (ch === ',') {
+        out.push(cur.trim());
+        cur = '';
+      } else {
+        cur += ch;
+      }
+    }
+    out.push(cur.trim());
+    return out;
+  }
   return line.trim().split(/[\t]+|\s{2,}/).map((s) => s.trim());
 }
 
@@ -188,21 +225,26 @@ function applyStructuredH6(g: Mutable, fs: string[]): void {
 
 /**
  * Compute the four grid corners (E/N, projected) from the origin, the I/J axis
- * bearings, the bin widths and the node counts. The grid spans `nInline` bins on
- * the I-axis and `nCrossline` bins on the J-axis from the origin node.
+ * bearings, the bin widths and the node counts.
+ *
+ * EXTENT CONVENTION: nInline / nCrossline are NODE counts, so the grid spans
+ * (n − 1) bin INTERVALS on each axis — NOT n. The physical extents are therefore
+ * Wi = (nInline − 1)·binI, Wj = (nCrossline − 1)·binJ. The renderer's overlay uses
+ * the SAME (n − 1) convention, so the drawn outline and the interior guides agree
+ * (using n·bin here over-extended the outline by exactly one bin on each axis).
  *
  * The I-axis unit vector points along bearing `iBearing` (clockwise from grid
- * north), the J-axis along `jBearing`. A bearing θ (deg, clockwise from N) maps to
- * the displacement (dE, dN) = (sin θ, cos θ). The corners are origin + a·I + b·J
- * for a∈{0,Wi}, b∈{0,Wj} where Wi = nInline·binI, Wj = nCrossline·binJ, walked in
- * a consistent ring order (origin → +I → +I+J → +J).
+ * north), the J-axis along the FILE's actual `jBearing` (which is NOT assumed to be
+ * iBearing+90 — EPSG "I=J-90" handedness and sheared grids violate orthogonality).
+ * A bearing θ (deg, clockwise from N) maps to (dE, dN) = (sin θ, cos θ). Corners are
+ * origin + a·I + b·J for a∈{0,Wi}, b∈{0,Wj}, walked origin → +I → +I+J → +J.
  */
 function computeCorners(g: Mutable): void {
   const { originE, originN } = g;
   if (!Number.isFinite(originE) || !Number.isFinite(originN)) return;
   if (g._iBearing == null && g._jBearing == null) return;
-  const wi = g.nInline > 0 && Number.isFinite(g.binI) ? g.nInline * g.binI : NaN;
-  const wj = g.nCrossline > 0 && Number.isFinite(g.binJ) ? g.nCrossline * g.binJ : NaN;
+  const wi = g.nInline > 0 && Number.isFinite(g.binI) ? Math.max(0, g.nInline - 1) * g.binI : NaN;
+  const wj = g.nCrossline > 0 && Number.isFinite(g.binJ) ? Math.max(0, g.nCrossline - 1) * g.binJ : NaN;
   if (!Number.isFinite(wi) || !Number.isFinite(wj)) return;
   const iB = g._iBearing != null ? g._iBearing : norm360((g._jBearing as number) - 90);
   const jB = g._jBearing != null ? g._jBearing : norm360((g._iBearing as number) + 90);
@@ -221,15 +263,24 @@ function computeCorners(g: Mutable): void {
 export function parseP611(text: string): BinGrid {
   const g = emptyBinGrid() as Mutable;
   try {
-    const src = typeof text === 'string' ? text : '';
-    const rawLines = src.replace(/\r/g, '').split('\n');
-    if (rawLines.length && rawLines[0].charCodeAt(0) === 0xfeff) rawLines[0] = rawLines[0].slice(1);
+    let src = typeof text === 'string' ? text : '';
+    // Bound the input BEFORE splitting so the newline split can't materialise an
+    // O(file) array from an attacker-controlled newline count (the per-line and
+    // line-count caps below only bound the scan loop, not the split allocation).
+    if (src.length > MAX_TEXT_LEN) src = src.slice(0, MAX_TEXT_LEN);
+    if (src.charCodeAt(0) === 0xfeff) src = src.slice(1);
 
     const projHeaders: SPSHeader[] = [];
-    const lineCap = Math.min(rawLines.length, MAX_LINES);
 
-    for (let li = 0; li < lineCap; li++) {
-      let line = rawLines[li];
+    // Scan newline-delimited lines with an index loop (no full split) up to the
+    // line cap, so neither the line array nor the per-line work is unbounded.
+    let pos = 0;
+    for (let li = 0; li < MAX_LINES && pos <= src.length; li++) {
+      let nl = src.indexOf('\n', pos);
+      if (nl < 0) nl = src.length;
+      let line: string | null = src.slice(pos, nl);
+      pos = nl + 1;
+      if (line.length && line.charCodeAt(line.length - 1) === 0x0d) line = line.slice(0, -1); // strip CR
       if (line == null) continue;
       if (line.length > MAX_LINE_LEN) line = line.slice(0, MAX_LINE_LEN);
       const trimmed = line.trim();
@@ -259,14 +310,39 @@ export function parseP611(text: string): BinGrid {
       // so a map CRS embedded in the P6/11 banner is recovered identically.
       if (c0 === 'H' && /^H\d/.test(tag)) {
         // Build a synthetic SPSHeader. P6/11 rows are "Hnn, descriptive label,
-        // VALUE" — the DATA value is the trailing field, the middle fields are the
-        // human label (which `spsExtractProjection` does not expect). Use the last
-        // field as the value so e.g. H19 "…, 36 North" → "36 North" parses its zone;
-        // fall back to the whole tail when there's only one field after the code.
+        // VALUE[, VALUE…]" — the DATA value is the TRAILING field(s), the middle
+        // fields are the human label (which `spsExtractProjection` does not expect).
+        // A spheroid row 'H12, Spheroid, WGS84, 6378137.0, 298.257' and a 7-param
+        // Helmert row 'H14, …, dx, dy, dz, rx, ry, rz, ds' carry MULTIPLE trailing
+        // numeric data fields, so taking only the LAST field would collapse "a invF"
+        // (and the Helmert tuple) to a single number and the extractor's multi-number
+        // patterns would never match. Join the contiguous trailing run of numeric
+        // fields with a space; otherwise (single-token value like H18 "UTM" or H19
+        // "36 North") use the last field.
         const code = tag.replace(/[^A-Z0-9]/g, '').slice(0, 4);
         if (code && safeKey(code)) {
-          const tail = fs.length > 1 ? fs[fs.length - 1] : '';
-          const val = tail.replace(/;.*$/, '').trim().slice(0, MAX_LINE_LEN);
+          let val = '';
+          if (fs.length > 1) {
+            // Find the start of the contiguous trailing numeric run.
+            let start = fs.length;
+            while (start > 1 && Number.isFinite(num(fs[start - 1].replace(/;.*$/, '')))) start--;
+            if (fs.length - start >= 2) {
+              // Include the single non-numeric token immediately preceding the
+              // numeric run (e.g. the spheroid name "WGS84" in a H12 row) so the
+              // extractor can recover a datum/ellipsoid name alongside a + invF.
+              const nameTok =
+                start > 1 && fs[start - 1] && !Number.isFinite(num(fs[start - 1])) ? fs[start - 1].trim() : '';
+              val = (nameTok ? nameTok + ' ' : '')
+                + fs
+                    .slice(start)
+                    .map((t) => t.replace(/;.*$/, '').trim())
+                    .filter((t) => t)
+                    .join(' ');
+            } else {
+              val = fs[fs.length - 1].replace(/;.*$/, '').trim();
+            }
+          }
+          val = val.slice(0, MAX_LINE_LEN);
           if (val) projHeaders.push({ code, val, raw: trimmed });
         }
       }
@@ -301,6 +377,13 @@ export function parseP611(text: string): BinGrid {
     // convention the I-axis bearing = J-axis bearing − 90.
     if (g._iBearing != null) g.inlineAzimuth = norm360(g._iBearing);
     else if (g._jBearing != null) g.inlineAzimuth = norm360(g._jBearing - 90);
+
+    // Carry the crossline (J) axis bearing EXPLICITLY: it is the file's actual
+    // J-bearing when present (which is NOT always inline+90 — EPSG "I=J-90"
+    // handedness / sheared grids), else inline+90 as a fallback. The renderer MUST
+    // use this rather than assuming orthogonality.
+    if (g._jBearing != null) g.crosslineAzimuth = norm360(g._jBearing);
+    else if (g._iBearing != null) g.crosslineAzimuth = norm360(g._iBearing + 90);
 
     // ── Derive the four grid corners for overlay (origin + rotation + extents). ──
     computeCorners(g);

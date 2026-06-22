@@ -312,8 +312,13 @@ export function parseP111(text: string): SPSData {
   out.layout = 'p111';
   if (out.skipped > 0) out.errors.unshift(`${out.skipped} record(s) skipped (P1/11)`);
   if (sawCrs || a != null || subtype != null || lon0 != null || helmert != null) {
+    // H,CRS,<code/desc>,<name/datum>,…  — field f[2] (crsCode) carries the human
+    // CRS DESCRIPTION (buildP111 writes proj.desc there); f[3] (crsName) is the
+    // datum. Prefer crsCode as the description source so the human CRS label
+    // survives a parse→build→parse round-trip (it would otherwise drift to the
+    // datum string). Fall back to crsName when no code/desc is present.
     out.projection = projectionFromHeaders(
-      crsName || crsCode,
+      crsCode || crsName,
       subtype,
       zone,
       hemi,
@@ -333,6 +338,15 @@ export function parseP111(text: string): SPSData {
   // no CRS block was present. (Already pushed as a raw H above; nothing else to do.)
   void projectName;
   return out;
+}
+
+/** Normalize a unit name to an IOGP-conventional token. The internal model uses
+ *  the lowercase 'meters' produced by spsExtractProjection; map the metre family to
+ *  the spec-conventional 'METRE', and uppercase anything else, defaulting to METRE. */
+function normUnitName(u: string | null | undefined): string {
+  const s = (u || '').trim().toLowerCase();
+  if (!s || s === 'meter' || s === 'meters' || s === 'metre' || s === 'metres' || s === 'm') return 'METRE';
+  return (u as string).trim().toUpperCase();
 }
 
 /** Round a finite number to a stable, comma-safe string (drop trailing zeros). */
@@ -391,7 +405,7 @@ export function buildP111(data: SPSData): { name: string; text: string }[] {
         )}`,
       );
     }
-    lines.push(`H,UNITS,${proj.units || 'METRE'},${fmt(proj.unitFactor ?? 1, 9) || '1'}`);
+    lines.push(`H,UNITS,${normUnitName(proj.units)},${fmt(proj.unitFactor ?? 1, 9) || '1'}`);
   }
 
   const cProj = proj ? toProj(proj) : undefined;

@@ -15,7 +15,11 @@ import type { SPSProjection } from './parse';
  *  - origin{E,N}     : the grid origin (the first-inline/first-crossline node).
  *  - binI / binJ     : physical bin size along the inline / crossline axis.
  *  - nInline / nCrossline : node counts on each axis.
- *  - inlineAzimuth   : grid-north→inline-axis bearing (degrees).
+ *  - inlineAzimuth   : grid-north→inline-axis (I) bearing (degrees).
+ *  - crosslineAzimuth: grid-north→crossline-axis (J) bearing (degrees). Carried
+ *                      explicitly because a P6/11 grid's J-axis is NOT always
+ *                      inline+90° (EPSG "I=J-90" handedness / sheared grids): the
+ *                      renderer MUST use this, not assume orthogonality.
  *  - firstInline / firstCrossline / incInline / incCrossline : node-number
  *                      labelling (the grid may not start numbering at 1).
  *  - corners         : optional explicit grid-corner E/N (when the file gives them).
@@ -31,6 +35,7 @@ export interface BinGrid {
   nInline: number;
   nCrossline: number;
   inlineAzimuth: number;
+  crosslineAzimuth: number;
   firstInline: number;
   firstCrossline: number;
   incInline: number;
@@ -51,6 +56,7 @@ export function emptyBinGrid(): BinGrid {
     nInline: 0,
     nCrossline: 0,
     inlineAzimuth: NaN,
+    crosslineAzimuth: NaN,
     firstInline: 0,
     firstCrossline: 0,
     incInline: 1,

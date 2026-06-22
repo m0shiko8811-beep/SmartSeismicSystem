@@ -21,6 +21,11 @@ export interface SPSPoint {
   elevation: number;
   raw: string;
   lineNum: number;
+  /** Geographic latitude / longitude (signed decimal degrees) when the source
+   *  format carried them directly (e.g. a lat/long-only SEG-P1 record). Optional —
+   *  most formats only carry projected E/N. */
+  lat?: number;
+  lon?: number;
   upholeMs?: number;
   srcType?: string;
   date?: string;

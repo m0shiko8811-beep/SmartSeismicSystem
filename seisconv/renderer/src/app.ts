@@ -5,6 +5,7 @@
 import { normFactorPercentile } from '../../core/render/model';
 import { getColor, colorViridis } from '../../core/render/colormaps';
 import { EPSG_DB } from '../../core/sps/reproject';
+import { projToLatLon, type Projection } from '../../core/coords';
 import { amplitudeSpectrum } from '../../core/dsp/fft';
 import { crossCorrelate, difference } from '../../core/dsp/correlate';
 import { resampleLinear } from '../../core/dsp/interpolate';
@@ -37,7 +38,29 @@ type TraceData = { index: number; nSamples: number; sampleInt: number; hdr: Reco
 type ExtractedTrace = { name: string; index: number; traceCount: number; nSamples: number; sampleInt: number; hdr: Record<string, number | string>; samples: Float32Array };
 type SectionOpts = { maxTraces?: number; maxSamples?: number; traceStart?: number; traceEnd?: number; sampStart?: number; sampEnd?: number; agc?: boolean; agcType?: 'rms' | 'median' | 'mean'; agcWindowMs?: number };
 type SectionData = { numTraces: number; colLen: number; norm: number; sampleInt: number; traceStep: number; data: Float32Array; traceStart: number; traceEnd: number; sampStart: number; sampEnd: number; fullTraces: number; fullSamples: number };
-type SpsSummary = { sources: number; receivers: number; xrefs: number; layout: string | null; projection: { type: string | null; subtype: string | null; desc?: string } | null; errors: string[] };
+type SpsSummary = { sources: number; receivers: number; xrefs: number; layout: string | null; projection: { type: string | null; subtype: string | null; desc?: string } | null; errors: string[];
+  // Distinct positioning format label(s) detected this Load (e.g. ['SPS','P1/11']) — shown in the stats bar.
+  formats?: string[];
+  // Brief P6/11 bin-grid summary when a grid was loaded this Load (else null/absent).
+  binGrid?: { nInline: number; nCrossline: number; originE: number; originN: number; binI: number; binJ: number; inlineAzimuth: number } | null;
+};
+
+// A P6/11 acquisition bin grid in projected (E/N) space, as returned by api.binGrid().
+// Mirrors core/sps/bingrid.ts BinGrid + electron/preload.ts BinGridInfo (the QC overlay
+// reads origin / azimuth / bin size / node counts / optional corners).
+type BinGridInfo = {
+  name?: string;
+  crs?: { type: string | null; subtype: string | null; desc?: string } | null;
+  originE: number; originN: number;
+  binI: number; binJ: number;
+  nInline: number; nCrossline: number;
+  inlineAzimuth: number;
+  crosslineAzimuth: number;
+  firstInline: number; firstCrossline: number;
+  incInline: number; incCrossline: number;
+  corners?: { e: number; n: number }[];
+  raw: string[];
+};
 type SpsLines = { x: Float32Array; y: Float32Array; line: Int32Array; pt: Float32Array; names: string[] };
 type SpsGeometry = { geo: boolean; src: SpsLines; rcv: SpsLines; bbox: { minX: number; maxX: number; minY: number; maxY: number } };
 type SpsXrefLines = { geo: boolean; sx: Float32Array; sy: Float32Array; rx: Float32Array; ry: Float32Array; shot: Int32Array; shotKeys: string[]; decimated: boolean; log: string };
@@ -137,6 +160,8 @@ declare global {
       openSPS(): Promise<SpsSummary | null>;
       // Clear ONLY the loaded SPS survey in the worker (keeps any open seismic file).
       spsClear(): Promise<void>;
+      // The loaded P6/11 acquisition bin grid (or null when no bin-grid file is loaded).
+      binGrid(): Promise<BinGridInfo | null>;
       spsGeometry(geo: boolean): Promise<SpsGeometry>;
       spsXrefLines(geo: boolean): Promise<SpsXrefLines>;
       spsFold(opts: { binX: number; binY: number }): Promise<SpsFold>;
@@ -175,7 +200,7 @@ declare global {
       }): Promise<{ ok: boolean; headers: { code: string; val: string; raw: string; desc: string }[]; error?: string }>;
       // Save the current (edited) SPS files to disk as a .zip (reuses the reproject ZIP save flow).
       spsSaveCorrected(): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
-      spsExport(args: { kind: 'kml' | 'geojson' | 'csv' | 'qcreport'; qcParams?: QCParamsUI }): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
+      spsExport(args: { kind: 'kml' | 'geojson' | 'csv' | 'qcreport' | 'p111' | 'coordcsv'; qcParams?: QCParamsUI }): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
       semblance(opts: { velMin: number; velMax: number; velStep: number }): Promise<SemblanceData>;
       // ── Spectrum-analysis tab ──
       // Mean amplitude spectrum of the open file (or a [traceStart,traceEnd) window).
@@ -349,6 +374,16 @@ let spsView: 'grid' | 'map' = 'grid';
 const gridView = { sc: 1, ox: 0, oy: 0, init: false }; // canvas pan/zoom: x_px = ox + e*sc, y_px = oy - n*sc
 let leafletMap: L.Map | null = null;
 let leafletLayers: { src: L.LayerGroup; rcv: L.LayerGroup } | null = null;
+// P6/11 acquisition bin grid (projected E/N), fetched lazily the first time the
+// "Bin grid" toggle is turned on. null = no grid loaded / not yet fetched. It is a
+// QC overlay drawn on TOP of the S/R points on both the offline grid and Leaflet.
+let spsBinGrid: BinGridInfo | null = null;
+// Whether we've already attempted the (single) bin-grid fetch for the current load,
+// so a survey with no P6/11 grid doesn't re-query the worker on every redraw.
+let spsBinGridFetched = false;
+// The bin-grid frame as a live Leaflet layer (rotated outline + origin marker +
+// optional inline/crossline guide lines). Torn down like leafletLayers.
+let binGridLayer: L.LayerGroup | null = null;
 // Highlight ring for a clicked / jumped-to point. Grid coords are in the CURRENT
 // geometry space (projected E/N when geo=false, lon/lat when geo=true) so the
 // ring tracks pan/zoom; null clears it. The Leaflet ring is a live map layer.
@@ -2647,8 +2682,11 @@ function updateSpsStats() {
   if (!spsSummary) { el.textContent = ''; return; }
   const srcLines = spsGeom ? spsGeom.src.names.length : 0;
   const rcvLines = spsGeom ? spsGeom.rcv.names.length : 0;
+  // Positioning-format badge: which format(s) the last Load ingested (e.g.
+  // "SPS", "P1/11", "SPS · P6/11"). Absent on older summaries ⇒ no badge.
+  const fmts = spsSummary.formats && spsSummary.formats.length ? ` · fmt: ${spsSummary.formats.join(' · ')}` : '';
   el.textContent =
-    `${spsSummary.sources} sources · ${spsSummary.receivers} receivers · ${spsSummary.xrefs} X-refs · ${srcLines} src lines · ${rcvLines} rcv lines`;
+    `${spsSummary.sources} sources · ${spsSummary.receivers} receivers · ${spsSummary.xrefs} X-refs · ${srcLines} src lines · ${rcvLines} rcv lines${fmts}`;
 }
 
 // ── Station inspector (full point detail, fetched from the worker on click) ──
@@ -2774,6 +2812,10 @@ async function loadSPS() {
     spsSpider = null;
     spsFold = null;
     spsFoldBin = 0;
+    // New survey → re-fetch any P6/11 bin grid lazily (drop the prior overlay).
+    if (leafletMap && binGridLayer) { leafletMap.removeLayer(binGridLayer); binGridLayer = null; }
+    spsBinGrid = null;
+    spsBinGridFetched = false;
     highlightedShot = null;
     gridView.init = false;
     gridHighlight = null;
@@ -2820,6 +2862,11 @@ async function clearSPS() {
     leafletLayers = null;
   }
   if (leafletMap && mapHighlight) { leafletMap.removeLayer(mapHighlight); mapHighlight = null; }
+  // Tear down the bin-grid overlay (both spaces): drop the Leaflet layer + reset
+  // the cached grid so the next load re-fetches cleanly.
+  if (leafletMap && binGridLayer) { leafletMap.removeLayer(binGridLayer); binGridLayer = null; }
+  spsBinGrid = null;
+  spsBinGridFetched = false;
   // Repaint the (now empty) grid view.
   if (spsView === 'grid') drawEmptyGrid();
 }
@@ -2880,6 +2927,11 @@ async function refreshSps() {
   if (spsView === 'grid' && !spsGeom.geo && spsShowFold()) {
     await ensureFold();
   }
+  // P6/11 bin-grid overlay: fetch the grid lazily the first time it's toggled on
+  // (a survey with no bin grid leaves spsBinGrid null and the overlay just absent).
+  if (spsShowBinGrid()) {
+    await ensureBinGrid();
+  }
   if (spsView === 'grid') drawSurveyGrid();
   else updateMap();
 }
@@ -2912,6 +2964,173 @@ function spsShowFold(): boolean {
 function spsBinSize(): number {
   const v = parseFloat(($opt('spsBinSize') as HTMLInputElement | null)?.value ?? '');
   return isFinite(v) && v >= 1 ? v : 25;
+}
+
+// ── P6/11 bin-grid QC overlay ──
+
+/** Whether the "Bin grid" toggle is on (absent checkbox ⇒ off). */
+function spsShowBinGrid(): boolean {
+  return !!($opt('spsShowBinGrid') as HTMLInputElement | null)?.checked;
+}
+
+/** Fetch the loaded P6/11 bin grid ONCE per survey load (no-op after the first
+ *  attempt, success or not). A survey with no grid simply leaves spsBinGrid null.
+ *  Best-effort: a failure leaves it null and the overlay just doesn't draw. */
+async function ensureBinGrid(): Promise<void> {
+  if (spsBinGridFetched) return;
+  spsBinGridFetched = true;
+  try {
+    const g = await api.binGrid();
+    spsBinGrid = g && isFinite(g.originE) && isFinite(g.originN) && g.nInline > 0 && g.nCrossline > 0 ? g : null;
+  } catch {
+    spsBinGrid = null; // overlay silently absent
+  }
+}
+
+/** Whether the loaded bin grid is renderable (finite origin/size/azimuth + ≥1 node each axis). */
+function binGridUsable(g: BinGridInfo | null): g is BinGridInfo {
+  return !!g && isFinite(g.originE) && isFinite(g.originN) && isFinite(g.binI) && isFinite(g.binJ)
+    && isFinite(g.inlineAzimuth) && g.nInline > 0 && g.nCrossline > 0;
+}
+
+/** The map-grid bearing (radians) of the crossline (J) axis. Uses the parser's
+ *  explicit crosslineAzimuth when present (the file's true J-bearing, which is NOT
+ *  always inline+90° — EPSG "I=J-90" handedness / sheared grids); falls back to
+ *  inline+90° only when no crossline azimuth was supplied. */
+function crosslineRad(g: BinGridInfo): number {
+  if (isFinite(g.crosslineAzimuth)) return g.crosslineAzimuth * Math.PI / 180;
+  return g.inlineAzimuth * Math.PI / 180 + Math.PI / 2;
+}
+
+/** The grid's four outer corners in projected E/N, walking the bin frame from the
+ *  origin along the inline (I) axis then the crossline (J) axis. Returns
+ *  [origin, +inline, +inline+crossline, +crossline]. The J-axis direction comes from
+ *  the parser-resolved crosslineAzimuth (orthogonality is NOT assumed). Extents use
+ *  (n − 1) bin intervals to match the parser's computeCorners convention. */
+function binGridCorners(g: BinGridInfo): { e: number; n: number }[] {
+  // Explicit corners win when the file supplied them.
+  if (g.corners && g.corners.length >= 4 && g.corners.every((c) => isFinite(c.e) && isFinite(c.n))) {
+    return g.corners.slice(0, 4);
+  }
+  const az = g.inlineAzimuth * Math.PI / 180; // map-grid bearing of the inline (I) axis, clockwise from grid north
+  // Unit vector along inline (azimuth measured clockwise from +N): dE=sin, dN=cos.
+  const iE = Math.sin(az), iN = Math.cos(az);
+  // Crossline = the file's J-axis bearing (not assumed inline+90°).
+  const jaz = crosslineRad(g);
+  const jE = Math.sin(jaz), jN = Math.cos(jaz);
+  const lenI = g.binI * Math.max(0, g.nInline - 1);
+  const lenJ = g.binJ * Math.max(0, g.nCrossline - 1);
+  const o = { e: g.originE, n: g.originN };
+  const a = { e: o.e + iE * lenI, n: o.n + iN * lenI };
+  const c = { e: a.e + jE * lenJ, n: a.n + jN * lenJ };
+  const d = { e: o.e + jE * lenJ, n: o.n + jN * lenJ };
+  return [o, a, c, d];
+}
+
+/** Inline / crossline guide-line endpoint pairs in projected E/N (faint QC guides).
+ *  A handful of evenly spaced lines spanning the grid in each direction. */
+function binGridGuides(g: BinGridInfo): { e: number; n: number }[][] {
+  const az = g.inlineAzimuth * Math.PI / 180;
+  const iE = Math.sin(az), iN = Math.cos(az);
+  const jaz = crosslineRad(g);
+  const jE = Math.sin(jaz), jN = Math.cos(jaz);
+  const lenI = g.binI * Math.max(0, g.nInline - 1);
+  const lenJ = g.binJ * Math.max(0, g.nCrossline - 1);
+  const out: { e: number; n: number }[][] = [];
+  const N = 6; // interior guide lines per axis (excluding the outline edges)
+  // Lines parallel to the inline axis, stepped along crossline.
+  for (let k = 1; k < N; k++) {
+    const t = (k / N) * lenJ;
+    const s = { e: g.originE + jE * t, n: g.originN + jN * t };
+    out.push([s, { e: s.e + iE * lenI, n: s.n + iN * lenI }]);
+  }
+  // Lines parallel to the crossline axis, stepped along inline.
+  for (let k = 1; k < N; k++) {
+    const t = (k / N) * lenI;
+    const s = { e: g.originE + iE * t, n: g.originN + iN * t };
+    out.push([s, { e: s.e + jE * lenJ, n: s.n + jN * lenJ }]);
+  }
+  return out;
+}
+
+/** Draw the bin-grid frame onto the offline survey-grid canvas using the SAME
+ *  X()/Yf() transforms as the points, so it tracks pan/zoom. Projected-E/N grid
+ *  view only (the canvas is in projected space when geo=false). */
+function drawBinGridOverlay(ctx: CanvasRenderingContext2D, X: (e: number) => number, Yf: (n: number) => number) {
+  const g = spsBinGrid;
+  if (!binGridUsable(g)) return;
+  const corners = binGridCorners(g);
+  ctx.save();
+  // Faint interior inline/crossline guides under the outline.
+  ctx.strokeStyle = 'rgba(168,85,247,0.18)'; ctx.lineWidth = 1;
+  for (const [a, b] of binGridGuides(g)) {
+    ctx.beginPath(); ctx.moveTo(X(a.e), Yf(a.n)); ctx.lineTo(X(b.e), Yf(b.n)); ctx.stroke();
+  }
+  // Outline (closed rotated rectangle).
+  ctx.strokeStyle = '#a855f7'; ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(X(corners[0].e), Yf(corners[0].n));
+  for (let i = 1; i < corners.length; i++) ctx.lineTo(X(corners[i].e), Yf(corners[i].n));
+  ctx.closePath(); ctx.stroke();
+  // Origin marker + inline-axis tick (shows the rotation direction).
+  const ox = X(g.originE), oy = Yf(g.originN);
+  ctx.fillStyle = '#a855f7'; ctx.shadowColor = '#a855f7'; ctx.shadowBlur = 7;
+  ctx.beginPath(); ctx.arc(ox, oy, 4, 0, Math.PI * 2); ctx.fill();
+  ctx.shadowBlur = 0;
+  // Inline-axis arrow from the origin toward corner[1].
+  ctx.strokeStyle = '#c084fc'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(X(corners[1].e), Yf(corners[1].n)); ctx.stroke();
+  // Label.
+  ctx.fillStyle = '#c084fc'; ctx.font = '10px Consolas, monospace';
+  const az = ((g.inlineAzimuth % 360) + 360) % 360;
+  ctx.fillText(`bin grid ${g.nInline}×${g.nCrossline} · ${az.toFixed(1)}°`, ox + 6, oy - 6);
+  ctx.restore();
+}
+
+/** Project a bin-grid E/N corner list to WGS84 lat/lon for Leaflet, using the
+ *  loaded survey's CRS (same projection the worker used for the geographic view).
+ *  Returns null if no usable projection is available. */
+function binGridLatLon(pts: { e: number; n: number }[]): [number, number][] | null {
+  const proj = (spsSummary?.projection as unknown as Projection) || (spsBinGrid?.crs as unknown as Projection);
+  if (!proj) return null;
+  const out: [number, number][] = [];
+  for (const p of pts) {
+    const ll = projToLatLon(p.e, p.n, proj);
+    if (!ll || !isFinite(ll.lat) || !isFinite(ll.lon)) return null;
+    out.push([ll.lat, ll.lon]);
+  }
+  return out;
+}
+
+/** Build (or rebuild) the Leaflet bin-grid layer: a rotated outline polygon, the
+ *  origin marker, the inline-axis line, and faint interior guides. Adds it to the
+ *  map. Removes any prior layer first. No-op if there's no usable grid/projection. */
+function updateBinGridMap() {
+  if (!leafletMap) return;
+  if (binGridLayer) { leafletMap.removeLayer(binGridLayer); binGridLayer = null; }
+  if (!spsShowBinGrid() || !binGridUsable(spsBinGrid)) return;
+  const g = spsBinGrid;
+  const outline = binGridLatLon(binGridCorners(g));
+  if (!outline) return; // need a projection to place the grid geographically
+  const grp = L.layerGroup();
+  // Faint guides.
+  for (const seg of binGridGuides(g)) {
+    const ll = binGridLatLon(seg);
+    if (ll) L.polyline(ll, { color: '#a855f7', weight: 1, opacity: 0.25 }).addTo(grp);
+  }
+  // Outline polygon.
+  L.polygon(outline, { color: '#a855f7', weight: 2, fill: false, opacity: 0.95 })
+    .bindPopup(`P6/11 bin grid<br>${g.nInline} × ${g.nCrossline} nodes<br>azimuth ${(((g.inlineAzimuth % 360) + 360) % 360).toFixed(2)}°<br>bin ${g.binI} × ${g.binJ}`)
+    .addTo(grp);
+  // Inline-axis line from origin.
+  const axis = binGridLatLon([binGridCorners(g)[0], binGridCorners(g)[1]]);
+  if (axis) L.polyline(axis, { color: '#c084fc', weight: 1.5, opacity: 0.9 }).addTo(grp);
+  // Origin marker.
+  const o = binGridLatLon([{ e: g.originE, n: g.originN }]);
+  if (o) L.circleMarker(o[0], { radius: 5, color: '#a855f7', weight: 2, fillColor: '#a855f7', fillOpacity: 0.9 })
+    .bindPopup(`Bin-grid origin<br>E ${g.originE.toFixed(2)} · N ${g.originN.toFixed(2)}`).addTo(grp);
+  grp.addTo(leafletMap);
+  binGridLayer = grp;
 }
 
 /** Fetch + cache the fold map for the current bin size (no-op if already current).
@@ -3088,6 +3307,11 @@ function drawSurveyGrid() {
   };
   if (showR) drawSet(spsGeom.rcv, 'rgba(58,160,224,0.45)', '#3aa0e0');
   if (showS) drawSet(spsGeom.src, 'rgba(255,140,0,0.5)', '#ff8c00');
+
+  // P6/11 bin-grid QC overlay (origin · rotation · outline · guides), drawn OVER
+  // the S/R points using the same X()/Yf() so it tracks pan/zoom. Projected-E/N
+  // grid space only — the grid corners are in projected coordinates.
+  if (spsShowBinGrid() && !geo) drawBinGridOverlay(ctx, X, Yf);
 
   // Highlight ring for a clicked / jumped-to point (drawn in the current geometry
   // space, so it tracks pan/zoom). A double ring stands out over either layer.
@@ -3332,6 +3556,8 @@ function updateMap() {
   if (showR) rcv.addTo(map);
   if (showS) src.addTo(map);
   leafletLayers = { src, rcv };
+  // P6/11 bin-grid QC overlay (rotated outline + origin + axis + guides) on top.
+  updateBinGridMap();
   const { minX, maxX, minY, maxY } = spsGeom.bbox;
   if (isFinite(minX) && isFinite(minY) && isFinite(maxX) && isFinite(maxY)) {
     map.fitBounds([[minY, minX], [maxY, maxX]], { padding: [24, 24], maxZoom: 16 });
@@ -3421,15 +3647,16 @@ function currentQCParams(): QCParamsUI {
 
 // Enable/disable the SPS export buttons (disabled until a survey is loaded).
 function setSpsExportEnabled(on: boolean) {
-  for (const id of ['spsExpKmlBtn', 'spsExpGeojsonBtn', 'spsExpCsvBtn', 'spsExpQcBtn']) {
-    ($(id) as HTMLButtonElement).disabled = !on;
+  for (const id of ['spsExpKmlBtn', 'spsExpGeojsonBtn', 'spsExpCsvBtn', 'spsExpP111Btn', 'spsExpCoordCsvBtn', 'spsExpQcBtn']) {
+    const btn = $opt(id) as HTMLButtonElement | null;
+    if (btn) btn.disabled = !on;
   }
 }
 
 // Geographic / tabular SPS export (KML, GeoJSON, CSV trio, QC-report CSV). Saves
 // EXACTLY like exportReprojected: the main side runs the same ZIP / single-file
 // Save flow and returns {ok, path | canceled | error}; we just surface it.
-async function exportSPS(kind: 'kml' | 'geojson' | 'csv' | 'qcreport') {
+async function exportSPS(kind: 'kml' | 'geojson' | 'csv' | 'qcreport' | 'p111' | 'coordcsv') {
   if (!spsSummary) {
     $('spsExpStatus').textContent = 'Load SPS files first.';
     return;
@@ -6215,6 +6442,13 @@ function init() {
   });
   // Fold/coverage: toggling on triggers a lazy first fetch via refreshSps.
   $opt('spsShowFold')?.addEventListener('change', () => void refreshSps());
+  // Bin grid (P6/11 QC overlay): toggling on triggers the lazy bin-grid fetch and
+  // redraw; toggling off must tear the Leaflet layer down immediately (refreshSps's
+  // updateMap only rebuilds it when the toggle is on) and repaint the canvas.
+  $opt('spsShowBinGrid')?.addEventListener('change', () => {
+    if (!spsShowBinGrid() && leafletMap && binGridLayer) { leafletMap.removeLayer(binGridLayer); binGridLayer = null; }
+    void refreshSps();
+  });
   // Bin-size change invalidates the cached fold grid; refetch only if it's on.
   $opt('spsBinSize')?.addEventListener('change', () => {
     spsFold = null; spsFoldBin = 0;
@@ -6237,6 +6471,8 @@ function init() {
   $('spsExpKmlBtn').addEventListener('click', () => void exportSPS('kml'));
   $('spsExpGeojsonBtn').addEventListener('click', () => void exportSPS('geojson'));
   $('spsExpCsvBtn').addEventListener('click', () => void exportSPS('csv'));
+  $opt('spsExpP111Btn')?.addEventListener('click', () => void exportSPS('p111'));
+  $opt('spsExpCoordCsvBtn')?.addEventListener('click', () => void exportSPS('coordcsv'));
   $('spsExpQcBtn').addEventListener('click', () => void exportSPS('qcreport'));
   initSpsHeaders();         // SPS Header Viewer / Editor modal wiring
   $('velComputeBtn').addEventListener('click', () => void computeVelocity());

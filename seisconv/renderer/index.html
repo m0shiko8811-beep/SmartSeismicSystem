@@ -1322,6 +1322,7 @@ table.olog-grid tr.olog-rowsel td{background:var(--teal-tint-2);}
           <label class="ctl-lbl"><input type="checkbox" id="spsShowR" checked> Receivers</label>
           <label class="ctl-lbl"><input type="checkbox" id="spsShowXrefs"> X-ref spider</label>
           <label class="ctl-lbl"><input type="checkbox" id="spsShowFold"> Fold/coverage</label>
+          <label class="ctl-lbl" id="spsShowBinGridLbl" title="Overlay the loaded P6/11 acquisition bin grid (origin, rotation, outline)"><input type="checkbox" id="spsShowBinGrid"> Bin grid</label>
           <label class="ctl-lbl">Bin <input type="number" id="spsBinSize" class="numin" value="25" min="1" step="1"> m</label>
           <span class="seg"><button class="segbtn on" id="viewGrid">Survey grid</button><button class="segbtn" id="viewMap">Real map</button></span>
           <button class="btn sm" id="spsHeadersBtn" title="View / edit the SPS H-record header block (CRS, datum, admin, raw records)">Headers…</button>
@@ -1359,6 +1360,8 @@ table.olog-grid tr.olog-rowsel td{background:var(--teal-tint-2);}
           <button class="btn sm" id="spsExpKmlBtn" disabled>KML</button>
           <button class="btn sm" id="spsExpGeojsonBtn" disabled>GeoJSON</button>
           <button class="btn sm" id="spsExpCsvBtn" disabled>CSV</button>
+          <button class="btn sm" id="spsExpP111Btn" disabled title="IOGP P1/11 positioning exchange (.p111)">P1/11</button>
+          <button class="btn sm" id="spsExpCoordCsvBtn" disabled title="Generic column-mapped coordinate CSV">Coords CSV</button>
           <button class="btn sm" id="spsExpQcBtn" disabled>QC report</button>
           <span class="trace-label" id="spsExpStatus"></span>
         </div>

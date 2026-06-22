@@ -150,6 +150,21 @@ function resolveCrsTag(tag: string): SPSProjection | undefined {
     const ql = q.toLowerCase();
     if (/\bitm\b|israel/.test(ql)) hit = EPSG_DB.find((c) => c.code === 'EPSG:2039');
   }
+  // Bare "UTM <zone><N|S>" / "UTM zone 36 North": searchEPSG misses it because the
+  // DB names read "WGS 84 / UTM zone 36N" (the word "zone" breaks the substring
+  // match). Parse zone+hemisphere directly and select the WGS84 UTM EPSG entry.
+  if (!hit) {
+    const um = /\butm\b[^0-9]*?(\d{1,2})\s*([ns]|north|south)?/i.exec(q);
+    if (um) {
+      const zone = parseInt(um[1], 10);
+      const h = (um[2] || 'n').toLowerCase();
+      const south = h === 's' || h === 'south';
+      if (zone >= 1 && zone <= 60) {
+        const code = 'EPSG:' + ((south ? 32700 : 32600) + zone);
+        hit = EPSG_DB.find((c) => c.code === code);
+      }
+    }
+  }
   return hit ? crsToProjection(hit) : undefined;
 }
 
@@ -325,22 +340,35 @@ function csvCell(v: string): string {
   return s;
 }
 
-/** Number → clean CSV string: integers stay integer, else 3 dp, no trailing zeros. */
+/** Number → clean CSV string. Integers stay integer; non-integers are written at
+ *  full double precision (trailing zeros trimmed by String()), so high-precision
+ *  survey coordinates and geographic degrees survive the write losslessly rather
+ *  than being truncated to 3 dp. */
 function fmtNum(v: number): string {
   if (!isFinite(v)) return '';
   if (Number.isInteger(v)) return String(v);
-  return v.toFixed(3).replace(/\.?0+$/, '');
+  return String(v);
 }
 
-/** Build the `# CRS:` tag line for a projection, or '' when none is known. */
+/** Build the `# CRS:` tag line for a projection, or '' when none is known. The tag
+ *  MUST be readable back by {@link resolveCrsTag} so a parse→build→parse round-trip
+ *  preserves the projection (an un-resolvable label silently loses the CRS). */
 function crsTagLine(p?: SPSProjection): string {
   if (!p) return '';
   // Prefer an EPSG code from the projection's desc (we stamp it there on import).
   const epsg = p.desc && /EPSG:\d+/i.exec(p.desc);
   if (epsg) return `# CRS: ${epsg[0]}`;
-  const label = p.subtype === 'UTM' && p.zone != null
-    ? `UTM ${p.zone}${p.hemi || 'N'}`
-    : p.type || p.subtype || p.datum;
+  // UTM with no EPSG code (the common SPS-derived case): reverse-lookup the WGS84
+  // UTM EPSG code so the tag carries a round-trippable code rather than a bare
+  // "UTM 36N" label that searchEPSG can't read back.
+  if (p.subtype === 'UTM' && p.zone != null) {
+    const south = p.hemi === 'S';
+    const code = 'EPSG:' + ((south ? 32700 : 32600) + p.zone);
+    if (EPSG_DB.some((c) => c.code === code)) return `# CRS: ${code}`;
+    // Fall back to a zone label resolveCrsTag's UTM heuristic still understands.
+    return `# CRS: UTM zone ${p.zone}${p.hemi || 'N'}`;
+  }
+  const label = p.type || p.subtype || p.datum;
   return label ? `# CRS: ${label}` : '';
 }
 
@@ -349,13 +377,15 @@ function crsTagLine(p?: SPSProjection): string {
  *
  * CONTRACT (do not change this signature): `(data: SPSData) => {name,text}[]`.
  * Emits a `# CRS:` tag (when the survey carries a projection), a header row, and
- * one row per source/receiver: line,point,type,easting,northing,elevation.
+ * one row per source/receiver: line,point,type,idx,easting,northing,elevation.
+ * The `idx` column round-trips the SPS index/flag character (a recognised input
+ * synonym) so an SPS→CSV→SPS pipeline does not silently discard it.
  */
 export function buildCoordCsv(data: SPSData): { name: string; text: string }[] {
   const lines: string[] = [];
   const tag = crsTagLine(data.projection);
   if (tag) lines.push(tag);
-  lines.push('line,point,type,easting,northing,elevation');
+  lines.push('line,point,type,idx,easting,northing,elevation');
 
   const emit = (p: SPSPoint): void => {
     lines.push(
@@ -363,6 +393,7 @@ export function buildCoordCsv(data: SPSData): { name: string; text: string }[] {
         csvCell(p.lineName || ''),
         csvCell(fmtNum(p.point)),
         p.rtype,
+        csvCell(p.idx || ''),
         csvCell(fmtNum(p.easting)),
         csvCell(fmtNum(p.northing)),
         csvCell(fmtNum(p.elevation)),
