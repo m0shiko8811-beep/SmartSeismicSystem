@@ -72,6 +72,113 @@ function fmtHelmert(hP?: CRS['helmert']): string {
   return f8(hP.dx) + f8(hP.dy) + f8(hP.dz) + f6(hP.rx) + f6(hP.ry) + f6(hP.rz) + f6(hP.ds);
 }
 
+/**
+ * Build the projection / datum H-record LINES for a target CRS — the single
+ * source of truth for the H12/H14/H18/H19/H20/H201/H220/H231/H232/H241 block.
+ *
+ * Each entry is a fixed-column SPS H-record: cols 1-32 carry the record code +
+ * description label, cols 33-80 carry the DATA field, terminated with `;`. The
+ * returned map is keyed by record code so callers can either splice the whole
+ * block in (header-only CRS edit) or replace matching records in place
+ * (reprojectSPS). Header-only: NO S/R coordinate lines are touched here.
+ */
+export function generateProjHeaders(tgt: CRS): Record<string, string> {
+  const datumDesc = tgt.subtype === 'TM' || tgt.subtype === 'UTM' ? 'WGS 84 GRS 1980' : 'WGS 84';
+  const a = tgt.a || 6378137;
+  const invF = tgt.f ? 1 / tgt.f : 298.257223563;
+  const hp = tgt.helmert;
+
+  let projName: string;
+  if (tgt.code === 'EPSG:2039') projName = 'ISRAEL GRID (NEW)';
+  else if (tgt.subtype === 'UTM') projName = 'UTM';
+  else if (tgt.subtype === 'TM') projName = 'TRANSVERSE MERCATOR';
+  else projName = tgt.name || tgt.code;
+
+  const zoneInfo = tgt.subtype === 'UTM' ? `Zone ${tgt.zone}, ${tgt.hemi === 'N' ? 'North' : 'South'}` : 'N/A';
+  const cm = tgt.lon0 != null ? tgt.lon0 : tgt.zone ? tgt.zone * 6 - 183 : 0;
+  const lat0 = tgt.lat0 != null ? tgt.lat0 : 0;
+
+  return {
+    H12: 'H12 Geodetic datum,-spheroid    '.padEnd(32) + (datumDesc + ' ' + a.toFixed(3) + ' ' + invF.toFixed(7)).padEnd(48) + ';',
+    H14: 'H14 Geodetic datum parameters   '.padEnd(32) + (hp && Math.abs(hp.dx) + Math.abs(hp.dy) + Math.abs(hp.dz) > 0.01 ? fmtHelmert(hp) : 'N/A') + ';',
+    H18: 'H18 Projection type             '.padEnd(32) + projName + ';',
+    H19: 'H19 Projection zone             '.padEnd(32) + zoneInfo + ';',
+    H20: 'H20 Description of grid units   '.padEnd(32) + 'meters;',
+    H201: 'H201Factor to meters            '.padEnd(32) + '1.0000000000;',
+    H220: 'H220Long. of central meridian   '.padEnd(32) + decToDMS(cm, 'E', 'W') + ';',
+    H231: 'H231Grid origin                 '.padEnd(32) + (lat0 !== 0 ? decToDMS(lat0, 'N', 'S') : 'N/A') + ';',
+    H232: 'H232Grid coord. at origin       '.padEnd(32) + fmtFalseEN(tgt) + ';',
+    H241: 'H241Scale factor                '.padEnd(32) + (tgt.k0 || 1.0).toFixed(10) + ';',
+  };
+}
+
+/** The projection H-record codes generateProjHeaders emits, in canonical order. */
+export const PROJ_HEADER_CODES = ['H12', 'H14', 'H18', 'H19', 'H20', 'H201', 'H220', 'H231', 'H232', 'H241'];
+
+/** Loose CRS edit spec the Header Editor sends (a subset of CRS, with friendly
+ *  names) — converted to a full {@link CRS} via {@link crsFromSpec}. */
+export interface CRSSpec {
+  datum?: string;
+  projType?: string;
+  zone?: number;
+  hemi?: 'N' | 'S';
+  units?: string;
+  centralMeridian?: number;
+  latOrigin?: number;
+  falseEasting?: number;
+  falseNorthing?: number;
+  scaleFactor?: number;
+}
+
+/**
+ * Build a {@link CRS} for {@link generateProjHeaders} from the Header Editor's
+ * loose spec. If `datum` names a known EPSG entry (code or name match) we start
+ * from that DB row so its ellipsoid + Helmert + standard parameters are carried,
+ * then overlay any explicitly-set fields. UTM specs derive lon0 from the zone
+ * when no central meridian is given.
+ */
+export function crsFromSpec(spec: CRSSpec): CRS {
+  const subtype = (() => {
+    const t = (spec.projType || '').toUpperCase();
+    if (/UTM/.test(t)) return 'UTM';
+    if (/TRANSVERSE MERCATOR|^TM$|\bTM\b|ISRAEL/.test(t)) return 'TM';
+    if (/GEO|LAT\s*\/?\s*LON|WGS\s*84\b/.test(t) && !/UTM|TM/.test(t)) return 'GEO';
+    return t ? 'TM' : 'TM';
+  })();
+
+  // Seed from a matching EPSG entry when the datum/projType names one (so the
+  // ellipsoid + Helmert + canonical false-E/N come along for known grids).
+  let base: CRS | undefined;
+  const want = `${spec.datum || ''} ${spec.projType || ''}`.trim().toUpperCase();
+  if (want) {
+    base = EPSG_DB.find((c) => {
+      const hay = (c.code + ' ' + c.name).toUpperCase();
+      return c.code.toUpperCase() === want || (spec.datum && hay.includes(spec.datum.toUpperCase()));
+    });
+    // For UTM, prefer the entry matching the requested zone+hemi.
+    if (subtype === 'UTM' && spec.zone != null) {
+      const z = EPSG_DB.find((c) => c.subtype === 'UTM' && c.zone === spec.zone && (spec.hemi == null || c.hemi === spec.hemi));
+      if (z) base = z;
+    }
+  }
+
+  const crs: CRS = base
+    ? { ...base }
+    : { code: '', name: spec.datum || spec.projType || 'Custom', subtype };
+  crs.subtype = subtype;
+  if (spec.zone != null) crs.zone = spec.zone;
+  if (spec.hemi != null) crs.hemi = spec.hemi;
+  if (spec.centralMeridian != null) crs.lon0 = spec.centralMeridian;
+  if (spec.latOrigin != null) crs.lat0 = spec.latOrigin;
+  if (spec.falseEasting != null) crs.FE = spec.falseEasting;
+  if (spec.falseNorthing != null) crs.FN = spec.falseNorthing;
+  if (spec.scaleFactor != null) crs.k0 = spec.scaleFactor;
+  if (!crs.name) crs.name = spec.datum || spec.projType || crs.code || 'Custom';
+  // UTM with no explicit central meridian → derive from the zone.
+  if (crs.subtype === 'UTM' && crs.lon0 == null && crs.zone != null) crs.lon0 = crs.zone * 6 - 183;
+  return crs;
+}
+
 function toProj(p: SPSProjection): Projection {
   return {
     subtype: p.subtype ?? undefined,
@@ -93,6 +200,10 @@ export function reprojectSPS(srcLines: string[], tgt: CRS, spsType: 'S' | 'R' | 
   const out: string[] = [];
   const srcP = toProj(sourceProj);
   const tgtProj: Projection = { subtype: tgt.subtype, zone: tgt.zone, hemi: tgt.hemi, a: tgt.a, f: tgt.f, lon0: tgt.lon0, lat0: tgt.lat0, k0: tgt.k0, FE: tgt.FE, FN: tgt.FN, helmert: tgt.helmert };
+  // Single source of truth for the projection H-records (shared with the
+  // header-only CRS edit in spsApplyHeaders): replace any matching existing
+  // H-record in place, leaving all other records (and S/R lines) untouched.
+  const projHeaders = generateProjHeaders(tgt);
 
   for (const raw of srcLines) {
     const line = raw.trimEnd();
@@ -101,38 +212,8 @@ export function reprojectSPS(srcLines: string[], tgt: CRS, spsType: 'S' | 'R' | 
 
     if (t === 'H') {
       const code = line.substring(0, 3).trimEnd() + (line[3] && /\d/.test(line[3]) ? line[3] : '');
-      if (code === 'H12') {
-        const desc = tgt.subtype === 'TM' || tgt.subtype === 'UTM' ? 'WGS 84 GRS 1980' : 'WGS 84';
-        const a = tgt.a || 6378137;
-        const invF = tgt.f ? 1 / tgt.f : 298.257223563;
-        out.push('H12 Geodetic datum,-spheroid    '.padEnd(32) + (desc + ' ' + a.toFixed(3) + ' ' + invF.toFixed(7)).padEnd(48) + ';');
-        continue;
-      }
-      if (code === 'H14') {
-        const hp = tgt.helmert;
-        out.push('H14 Geodetic datum parameters   '.padEnd(32) + (hp && Math.abs(hp.dx) + Math.abs(hp.dy) + Math.abs(hp.dz) > 0.01 ? fmtHelmert(hp) : 'N/A') + ';');
-        continue;
-      }
-      if (code === 'H18') {
-        let name: string;
-        if (tgt.code === 'EPSG:2039') name = 'ISRAEL GRID (NEW)';
-        else if (tgt.subtype === 'UTM') name = 'UTM';
-        else if (tgt.subtype === 'TM') name = 'TRANSVERSE MERCATOR';
-        else name = tgt.name || tgt.code;
-        out.push('H18 Projection type             '.padEnd(32) + name + ';');
-        continue;
-      }
-      if (code === 'H19') {
-        const info = tgt.subtype === 'UTM' ? `Zone ${tgt.zone}, ${tgt.hemi === 'N' ? 'North' : 'South'}` : 'N/A';
-        out.push('H19 Projection zone             '.padEnd(32) + info + ';');
-        continue;
-      }
-      if (code === 'H20') { out.push('H20 Description of grid units   '.padEnd(32) + 'meters;'); continue; }
-      if (code === 'H201') { out.push('H201Factor to meters            '.padEnd(32) + '1.0000000000;'); continue; }
-      if (code === 'H220') { const cm = tgt.lon0 != null ? tgt.lon0 : tgt.zone ? tgt.zone * 6 - 183 : 0; out.push('H220Long. of central meridian   '.padEnd(32) + decToDMS(cm, 'E', 'W') + ';'); continue; }
-      if (code === 'H231') { const lat0 = tgt.lat0 != null ? tgt.lat0 : 0; out.push('H231Grid origin                 '.padEnd(32) + (lat0 !== 0 ? decToDMS(lat0, 'N', 'S') : 'N/A') + ';'); continue; }
-      if (code === 'H232') { out.push('H232Grid coord. at origin       '.padEnd(32) + fmtFalseEN(tgt) + ';'); continue; }
-      if (code === 'H241') { out.push('H241Scale factor                '.padEnd(32) + (tgt.k0 || 1.0).toFixed(10) + ';'); continue; }
+      const gen = projHeaders[code];
+      if (gen != null) { out.push(gen); continue; }
       out.push(raw.trimEnd());
       continue;
     }

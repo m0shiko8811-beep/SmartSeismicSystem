@@ -135,6 +135,38 @@ declare global {
       spsQC(qc?: QCParamsUI): Promise<QCRow[]>;
       spsPointDetail(args: { rtype: 'S' | 'R'; lineName: string; point: number; idx?: string }): Promise<SPSPointDetail | null>;
       spsReproject(code: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
+      // SPS Header Viewer/Editor — list the shared H block (each row code · value ·
+      // raw · human description) + the parsed projection + the loaded files.
+      // filesDiffer flags that the loaded files' H blocks are not identical.
+      spsHeaderList(): Promise<{
+        ok: boolean;
+        headers: { code: string; val: string; raw: string; desc: string }[];
+        projection: {
+          type: string | null; subtype: string | null; zone: number | null; hemi: string | null;
+          datum: string | null; ellipsoid: string | null; units: string;
+          centralMeridian: number | null; latOrigin: number | null;
+          falseEasting: number | null; falseNorthing: number | null; scaleFactor: number | null;
+          desc?: string;
+        } | null;
+        files: { name: string; type: string }[];
+        filesDiffer: boolean;
+      }>;
+      // Apply header edits/adds/removes (+ an optional CRS regeneration) to a scope
+      // ('shared' = every loaded SPS file, else the named file). Header-only — never
+      // touches S/R coordinate lines. Returns the refreshed header list.
+      spsApplyHeaders(req: {
+        scope: 'shared' | string;
+        edits: { code: string; val: string }[];
+        adds: { code: string; desc?: string; val: string }[];
+        removes: string[];
+        crs?: {
+          datum?: string; projType?: string; zone?: number; hemi?: 'N' | 'S'; units?: string;
+          centralMeridian?: number; latOrigin?: number; falseEasting?: number;
+          falseNorthing?: number; scaleFactor?: number;
+        };
+      }): Promise<{ ok: boolean; headers: { code: string; val: string; raw: string; desc: string }[]; error?: string }>;
+      // Save the current (edited) SPS files to disk as a .zip (reuses the reproject ZIP save flow).
+      spsSaveCorrected(): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
       spsExport(args: { kind: 'kml' | 'geojson' | 'csv' | 'qcreport'; qcParams?: QCParamsUI }): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
       semblance(opts: { velMin: number; velMax: number; velStep: number }): Promise<SemblanceData>;
       exportText(name: string, text: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
@@ -3300,6 +3332,393 @@ async function exportSPS(kind: 'kml' | 'geojson' | 'csv' | 'qcreport') {
   }
 }
 
+// ══════════════════════ SPS Header Viewer / Editor ══════════════════════
+// A modal over the SPS panel: VIEW the H-record block grouped by purpose, edit
+// the CRS / projection (label-only OR hand off to Reproject), edit Admin fields,
+// edit every raw H-record, and Apply / Export. All header-only — coordinate
+// lines are never touched here (reprojection lives in the Reproject control).
+type SpsHeaderRow = { code: string; val: string; raw: string; desc: string };
+type SpsHeaderProj = {
+  type: string | null; subtype: string | null; zone: number | null; hemi: string | null;
+  datum: string | null; ellipsoid: string | null; units: string;
+  centralMeridian: number | null; latOrigin: number | null;
+  falseEasting: number | null; falseNorthing: number | null; scaleFactor: number | null;
+  desc?: string;
+};
+type SpsHeaderState = {
+  headers: SpsHeaderRow[];
+  projection: SpsHeaderProj | null;
+  files: { name: string; type: string }[];
+  filesDiffer: boolean;
+};
+
+// Live snapshot of the last header list pulled from the worker (drives every
+// sub-view); null while the modal is closed / nothing loaded.
+let spsHdrState: SpsHeaderState | null = null;
+// Working copy of the raw H-records the user edits in the Raw tab.
+let spsHdrRawDraft: { code: string; val: string; desc: string; orig: boolean }[] = [];
+
+// Grouping of H-record codes into human sections for the VIEW table. Order here
+// is the display order; an "Other" bucket catches anything unmatched.
+const SPS_HDR_GROUPS: { title: string; match: (code: string) => boolean }[] = [
+  { title: 'Project / Admin', match: (c) => /^H0[0-9]$/.test(c) || c === 'H30' || c === 'H31' },
+  { title: 'CRS / Datum / Projection', match: (c) => /^H12$|^H14$|^H17$|^H18$|^H19$|^H20[01]?$|^H22\d$|^H231$|^H232$|^H241$/.test(c) },
+  { title: 'Instrument', match: (c) => /^H4\d{1,2}$/.test(c) },
+  { title: 'Receiver', match: (c) => /^H6\d{1,2}$/.test(c) },
+  { title: 'Source', match: (c) => /^H[78]\d{1,2}$/.test(c) },
+  { title: 'QC', match: (c) => /^H99\d?$/.test(c) },
+];
+
+function openSpsHeaders() {
+  if (!spsSummary) { $('spsLabel').textContent = 'Load SPS files first.'; return; }
+  $opt('spsHeadersBack')?.classList.add('open');
+  $('spsHdrStatus').textContent = 'Loading…';
+  void loadSpsHeaders();
+}
+function closeSpsHeaders() { $opt('spsHeadersBack')?.classList.remove('open'); }
+function spsHeadersOpen(): boolean { return !!$opt('spsHeadersBack')?.classList.contains('open'); }
+
+/** Pull the header list from the worker and (re)paint every sub-view. */
+async function loadSpsHeaders() {
+  try {
+    const r = await api.spsHeaderList();
+    if (!r || !r.ok) { $('spsHdrStatus').textContent = 'Failed to read headers.'; return; }
+    spsHdrState = { headers: r.headers, projection: r.projection, files: r.files, filesDiffer: r.filesDiffer };
+    $('spsHdrStatus').textContent = '';
+    renderSpsHeaders();
+  } catch (e) {
+    $('spsHdrStatus').textContent = 'Failed: ' + errMsg(e);
+  }
+}
+
+/** Paint scope selector, files-differ warning, and all four tabs from spsHdrState. */
+function renderSpsHeaders() {
+  const st = spsHdrState;
+  if (!st) return;
+  // files-differ warning
+  $('spsHdrDiffWarn').classList.toggle('hidden', !st.filesDiffer);
+  // scope selector — 'shared' + one option per loaded file (offer per-file always,
+  // but it matters most when filesDiffer).
+  const scope = $('spsHdrScope') as HTMLSelectElement;
+  const prev = scope.value;
+  scope.innerHTML = '';
+  const shared = document.createElement('option');
+  shared.value = 'shared';
+  shared.textContent = `All S / R / X files (shared)${st.files.length ? ` — ${st.files.length} file${st.files.length === 1 ? '' : 's'}` : ''}`;
+  scope.appendChild(shared);
+  for (const f of st.files) {
+    const o = document.createElement('option');
+    o.value = f.name;
+    o.textContent = `${f.name} (${f.type})`;
+    scope.appendChild(o);
+  }
+  scope.value = st.files.some((f) => f.name === prev) || prev === 'shared' ? prev : 'shared';
+  $('spsHdrScopeNote').textContent = st.filesDiffer
+    ? 'Headers differ between files — per-file editing recommended.'
+    : '';
+
+  renderSpsHdrView();
+  renderSpsHdrCrs();
+  renderSpsHdrAdmin();
+  renderSpsHdrRaw();
+}
+
+/** VIEW tab: grouped read-only table of every H-record. */
+function renderSpsHdrView() {
+  const host = $('spsHdrGroups');
+  host.innerHTML = '';
+  const rows = spsHdrState?.headers || [];
+  if (!rows.length) { host.innerHTML = '<div class="sps-hdr-empty">No H-records in this survey.</div>'; return; }
+  const used = new Set<number>();
+  const groups: { title: string; rows: SpsHeaderRow[] }[] = SPS_HDR_GROUPS.map((g) => ({ title: g.title, rows: [] }));
+  rows.forEach((r, i) => {
+    const gi = SPS_HDR_GROUPS.findIndex((g) => g.match(r.code));
+    if (gi >= 0) { groups[gi].rows.push(r); used.add(i); }
+  });
+  const other = rows.filter((_, i) => !used.has(i));
+  if (other.length) groups.push({ title: 'Other', rows: other });
+  for (const g of groups) {
+    if (!g.rows.length) continue;
+    const box = document.createElement('div');
+    box.className = 'sps-hdr-grp';
+    const h = document.createElement('h4');
+    h.textContent = g.title;
+    box.appendChild(h);
+    for (const r of g.rows) {
+      const row = document.createElement('div');
+      row.className = 'row';
+      const c = document.createElement('span'); c.className = 'c'; c.textContent = r.code;
+      const d = document.createElement('span'); d.className = 'd'; d.textContent = r.desc || '';
+      const v = document.createElement('span'); v.className = 'v'; v.textContent = r.val || '—';
+      row.appendChild(c); row.appendChild(d); row.appendChild(v);
+      box.appendChild(row);
+    }
+    host.appendChild(box);
+  }
+}
+
+/** CRS tab: prefill the form from the parsed projection (or show the stamp-CRS prompt). */
+function renderSpsHdrCrs() {
+  const p = spsHdrState?.projection || null;
+  const hasProj = !!(p && (p.type || p.subtype));
+  $('spsHdrNoProj').classList.toggle('hidden', hasProj);
+  // The form stays visible either way (the stamp button reveals it for editing),
+  // but when there's truly no projection we still let the user fill it in.
+  const sub = (p?.subtype || (p?.type ? 'TM' : 'UTM')).toUpperCase();
+  (($('crsProjType') as HTMLSelectElement)).value = sub === 'GEO' ? 'GEO' : sub === 'UTM' ? 'UTM' : 'TM';
+  setVal('crsDatum', p?.datum || '');
+  setVal('crsZone', p?.zone != null ? String(p.zone) : '');
+  (($('crsHemi') as HTMLSelectElement)).value = p?.hemi === 'S' ? 'S' : 'N';
+  (($('crsUnits') as HTMLSelectElement)).value = (p?.units || 'meters').toLowerCase().includes('f') ? 'feet' : 'meters';
+  setVal('crsCM', p?.centralMeridian != null ? String(p.centralMeridian) : '');
+  setVal('crsLat0', p?.latOrigin != null ? String(p.latOrigin) : '');
+  setVal('crsFE', p?.falseEasting != null ? String(p.falseEasting) : '');
+  setVal('crsFN', p?.falseNorthing != null ? String(p.falseNorthing) : '');
+  setVal('crsK0', p?.scaleFactor != null ? String(p.scaleFactor) : '');
+}
+
+/** ADMIN tab: prefill from the existing H01/H02/H03/H04 values. */
+function renderSpsHdrAdmin() {
+  const get = (code: string) => (spsHdrState?.headers.find((h) => h.code === code)?.val) || '';
+  setVal('admArea', get('H01'));
+  setVal('admDate', get('H02'));
+  setVal('admClient', get('H03'));
+  setVal('admContractor', get('H04'));
+}
+
+/** RAW tab: build the editable record list from a fresh draft of every H-record. */
+function renderSpsHdrRaw() {
+  spsHdrRawDraft = (spsHdrState?.headers || []).map((h) => ({ code: h.code, val: h.val, desc: h.desc, orig: true }));
+  paintSpsHdrRaw();
+}
+function paintSpsHdrRaw() {
+  const host = $('spsHdrRawList');
+  host.innerHTML = '';
+  spsHdrRawDraft.forEach((rec, i) => {
+    const row = document.createElement('div');
+    row.className = 'sps-hdr-raw-row';
+    const code = document.createElement('input');
+    code.type = 'text'; code.className = 'ctl rawcode'; code.value = rec.code; code.maxLength = 4;
+    code.title = rec.desc || '';
+    code.addEventListener('input', () => { spsHdrRawDraft[i].code = code.value.trim().toUpperCase(); });
+    const val = document.createElement('input');
+    val.type = 'text'; val.className = 'ctl rawval'; val.value = rec.val;
+    val.addEventListener('input', () => { spsHdrRawDraft[i].val = val.value; });
+    const del = document.createElement('button');
+    del.type = 'button'; del.className = 'sps-hdr-raw-del'; del.title = 'Remove record'; del.setAttribute('aria-label', 'Remove record');
+    del.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>';
+    del.addEventListener('click', () => { spsHdrRawDraft.splice(i, 1); paintSpsHdrRaw(); });
+    row.appendChild(code); row.appendChild(val); row.appendChild(del);
+    host.appendChild(row);
+  });
+}
+function spsHdrAddRaw() {
+  const code = (($('spsHdrAddCode') as HTMLInputElement).value || '').trim().toUpperCase();
+  const val = ($('spsHdrAddVal') as HTMLInputElement).value || '';
+  if (!/^H\d{1,3}$/.test(code)) { $('spsHdrStatus').textContent = 'Enter a valid H-record code (e.g. H05).'; return; }
+  spsHdrRawDraft.push({ code, val, desc: '', orig: false });
+  ($('spsHdrAddCode') as HTMLInputElement).value = '';
+  ($('spsHdrAddVal') as HTMLInputElement).value = '';
+  $('spsHdrStatus').textContent = '';
+  paintSpsHdrRaw();
+}
+
+/** Switch between the View / CRS / Admin / Raw sub-tabs. */
+function spsHdrTab(which: 'view' | 'crs' | 'admin' | 'raw') {
+  const map: Record<string, string> = { view: 'View', crs: 'Crs', admin: 'Admin', raw: 'Raw' };
+  for (const key of Object.keys(map)) {
+    $opt('spsHdrTab' + map[key])?.classList.toggle('on', key === which);
+    $opt('spsHtab' + map[key])?.classList.toggle('hidden', key !== which);
+  }
+}
+
+/** Stamp-a-CRS: just reveal/focus the CRS form so the user can fill it in. */
+function spsHdrStampCrs() {
+  $('spsHdrNoProj').classList.add('hidden');
+  spsHdrTab('crs');
+  ($('crsDatum') as HTMLInputElement).focus();
+}
+
+/** Build the spsApplyHeaders request from the Raw draft + Admin fields + (active CRS form). */
+function buildApplyRequest(): {
+  scope: string;
+  edits: { code: string; val: string }[];
+  adds: { code: string; desc?: string; val: string }[];
+  removes: string[];
+  crs?: Record<string, unknown>;
+} | null {
+  const st = spsHdrState;
+  if (!st) return null;
+  const scope = ($('spsHdrScope') as HTMLSelectElement).value || 'shared';
+  const orig = new Map(st.headers.map((h) => [h.code, h.val] as const));
+
+  const edits: { code: string; val: string }[] = [];
+  const adds: { code: string; desc?: string; val: string }[] = [];
+  const seen = new Set<string>();
+
+  // Raw draft drives edits/adds for existing-ish codes; the order/values there
+  // already reflect the user's per-record changes.
+  for (const rec of spsHdrRawDraft) {
+    if (!rec.code) continue;
+    seen.add(rec.code);
+    if (orig.has(rec.code)) {
+      if (orig.get(rec.code) !== rec.val) edits.push({ code: rec.code, val: rec.val });
+    } else {
+      adds.push({ code: rec.code, val: rec.val, desc: rec.desc || undefined });
+    }
+  }
+  // Anything in the original block the user deleted from the Raw draft → remove.
+  const removes: string[] = [];
+  for (const h of st.headers) if (!seen.has(h.code)) removes.push(h.code);
+
+  // Admin fields → map to H01/H02/H03/H04. A field overrides whatever the Raw
+  // draft produced for that code (Admin is the friendlier surface for them).
+  const admin: [string, string][] = [
+    ['H01', ($('admArea') as HTMLInputElement).value.trim()],
+    ['H02', ($('admDate') as HTMLInputElement).value.trim()],
+    ['H03', ($('admClient') as HTMLInputElement).value.trim()],
+    ['H04', ($('admContractor') as HTMLInputElement).value.trim()],
+  ];
+  for (const [code, val] of admin) {
+    if (val === '') continue; // blank = leave untouched
+    if (orig.has(code)) {
+      if (orig.get(code) !== val) upsertEdit(edits, code, val);
+    } else if (!adds.some((a) => a.code === code)) {
+      adds.push({ code, val });
+    }
+    const ri = removes.indexOf(code); if (ri >= 0) removes.splice(ri, 1);
+  }
+
+  const req: ReturnType<typeof buildApplyRequest> = { scope, edits, adds, removes };
+
+  // CRS: only attach req.crs when the CRS tab is the active editing surface AND
+  // the user chose label-only mode. Reproject mode hands off elsewhere.
+  return req;
+}
+/** Replace-or-add an edit entry for `code` (Admin can override a Raw edit). */
+function upsertEdit(edits: { code: string; val: string }[], code: string, val: string) {
+  const e = edits.find((x) => x.code === code);
+  if (e) e.val = val; else edits.push({ code, val });
+}
+
+/** Read the CRS form into the spsApplyHeaders.crs shape. */
+function readCrsForm(): Record<string, unknown> {
+  const projType = ($('crsProjType') as HTMLSelectElement).value;
+  const numOrU = (id: string) => { const v = parseFloat(($(id) as HTMLInputElement).value); return isFinite(v) ? v : undefined; };
+  const strOrU = (id: string) => { const v = ($(id) as HTMLInputElement).value.trim(); return v || undefined; };
+  return {
+    datum: strOrU('crsDatum'),
+    projType,
+    zone: numOrU('crsZone'),
+    hemi: (($('crsHemi') as HTMLSelectElement).value === 'S' ? 'S' : 'N'),
+    units: ($('crsUnits') as HTMLSelectElement).value,
+    centralMeridian: numOrU('crsCM'),
+    latOrigin: numOrU('crsLat0'),
+    falseEasting: numOrU('crsFE'),
+    falseNorthing: numOrU('crsFN'),
+    scaleFactor: numOrU('crsK0'),
+  };
+}
+
+/** Is the CRS tab the currently-active sub-view? */
+function spsHdrCrsTabActive(): boolean {
+  return !$opt('spsHtabCrs')?.classList.contains('hidden');
+}
+/** Did the user pick "reproject the coordinates too"? */
+function spsHdrReprojectChosen(): boolean {
+  return !!($opt('crsModeReproject') as HTMLInputElement | null)?.checked;
+}
+
+/** APPLY: send edits/adds/removes (+ optional CRS) to the worker, then refresh. */
+async function applySpsHeaders() {
+  if (!spsHdrState) return;
+  // CRS reproject hand-off: close the dialog and focus the Reproject control —
+  // we do NOT duplicate reprojection here.
+  if (spsHdrCrsTabActive() && spsHdrReprojectChosen()) {
+    closeSpsHeaders();
+    const sel = $opt('epsgSelect') as HTMLSelectElement | null;
+    sel?.focus();
+    sel?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    $('spsExportStatus').textContent = 'Pick a target CRS and Export reprojected to transform the coordinates.';
+    return;
+  }
+  const req = buildApplyRequest();
+  if (!req) return;
+  // Attach the CRS form (label-only) when the CRS tab is active.
+  if (spsHdrCrsTabActive()) req.crs = readCrsForm();
+  $('spsHdrStatus').textContent = 'Applying…';
+  try {
+    const r = await api.spsApplyHeaders(req as Parameters<typeof api.spsApplyHeaders>[0]);
+    if (!r || !r.ok) { $('spsHdrStatus').textContent = 'Failed: ' + (r?.error || 'unknown'); return; }
+    $('spsHdrStatus').textContent = '✓ Applied';
+    // Refresh the header view from the returned list…
+    if (spsHdrState) spsHdrState.headers = r.headers;
+    // …and re-pull the full state (projection / files may have changed).
+    await loadSpsHeaders();
+    // Re-sync the SPS panel itself: re-read the survey so a freshly-stamped CRS
+    // lights up the map + status strip (loadSPS-style refresh, no re-pick dialog).
+    await refreshSpsAfterHeaderEdit();
+  } catch (e) {
+    $('spsHdrStatus').textContent = 'Failed: ' + errMsg(e);
+  }
+}
+
+/** Re-pull the survey summary + geometry after a header edit so the panel,
+ *  status strip, and (if a CRS was added) the map all reflect the new header. */
+async function refreshSpsAfterHeaderEdit() {
+  // The worker re-parsed currentSPS during spsApplyHeaders, so we just invalidate
+  // the renderer caches and re-render from the worker's current state (no re-pick
+  // dialog — refreshSps refetches geometry from the already-loaded survey).
+  spsGeom = null;
+  spsSpider = null;
+  spsFold = null;
+  spsFoldBin = 0;
+  gridView.init = false;
+  invalidateSpsSourceCache();
+  // Refresh the projection on the cached summary so the map toggle + summary panel
+  // pick up a newly-stamped CRS without a full re-open.
+  if (spsSummary && spsHdrState?.projection) {
+    spsSummary.projection = { type: spsHdrState.projection.type, subtype: spsHdrState.projection.subtype, desc: spsHdrState.projection.desc };
+  } else if (spsSummary && !spsHdrState?.projection) {
+    spsSummary.projection = null;
+  }
+  renderSummaryPanel();
+  updateStatusStrip();
+  if (spsSummary) await refreshSps();
+}
+
+/** EXPORT: save the edited files as a .zip via the worker's save flow. */
+async function exportSpsCorrected() {
+  $('spsHdrStatus').textContent = 'Saving…';
+  try {
+    const r = await api.spsSaveCorrected();
+    if (r.ok) $('spsHdrStatus').textContent = '✓ Saved ' + r.path;
+    else if (r.canceled) $('spsHdrStatus').textContent = '';
+    else $('spsHdrStatus').textContent = 'Failed: ' + (r.error || 'unknown');
+  } catch (e) {
+    $('spsHdrStatus').textContent = 'Failed: ' + errMsg(e);
+  }
+}
+
+/** Small DOM helper — set an input's value by id. */
+function setVal(id: string, v: string) { const el = $opt(id) as HTMLInputElement | null; if (el) el.value = v; }
+
+/** Wire up the Header modal's buttons/tabs (called once from init). */
+function initSpsHeaders() {
+  $opt('spsHeadersBtn')?.addEventListener('click', openSpsHeaders);
+  $opt('spsHeadersClose')?.addEventListener('click', closeSpsHeaders);
+  $opt('spsHeadersBack')?.addEventListener('click', (e) => { if (e.target === $opt('spsHeadersBack')) closeSpsHeaders(); });
+  $opt('spsHdrTabView')?.addEventListener('click', () => spsHdrTab('view'));
+  $opt('spsHdrTabCrs')?.addEventListener('click', () => spsHdrTab('crs'));
+  $opt('spsHdrTabAdmin')?.addEventListener('click', () => spsHdrTab('admin'));
+  $opt('spsHdrTabRaw')?.addEventListener('click', () => spsHdrTab('raw'));
+  $opt('spsHdrStampCrs')?.addEventListener('click', spsHdrStampCrs);
+  $opt('spsHdrAddBtn')?.addEventListener('click', spsHdrAddRaw);
+  $opt('spsHdrApplyBtn')?.addEventListener('click', () => void applySpsHeaders());
+  $opt('spsHdrExportBtn')?.addEventListener('click', () => void exportSpsCorrected());
+  $opt('spsHdrScope')?.addEventListener('change', () => { /* scope changes only affect the next Apply; no repaint needed */ });
+}
+
 // ── Velocity / semblance ──
 function velGeom(cv: HTMLCanvasElement) {
   return { W: cv.clientWidth || 900, H: cv.clientHeight || 460, ML: 56, MR: 12, MT: 12, MB: 28 };
@@ -5311,6 +5730,7 @@ function init() {
   $('spsExpGeojsonBtn').addEventListener('click', () => void exportSPS('geojson'));
   $('spsExpCsvBtn').addEventListener('click', () => void exportSPS('csv'));
   $('spsExpQcBtn').addEventListener('click', () => void exportSPS('qcreport'));
+  initSpsHeaders();         // SPS Header Viewer / Editor modal wiring
   $('velComputeBtn').addEventListener('click', () => void computeVelocity());
   $('velExportBtn').addEventListener('click', () => void exportPicks());
   ($('velCanvas') as HTMLCanvasElement).addEventListener('click', onVelClick);
@@ -5345,7 +5765,8 @@ function init() {
 
 /** App-wide keyboard shortcuts. */
 function onKeyDown(e: KeyboardEvent) {
-  // Esc always closes the manual.
+  // Esc closes whichever overlay is open (Header editor first, then the manual).
+  if (e.key === 'Escape' && spsHeadersOpen()) { closeSpsHeaders(); return; }
   if (e.key === 'Escape' && manualOpen()) { closeManual(); return; }
   // App-wide UI zoom (browser-style): Ctrl/Cmd + '='/'+' in, Ctrl/Cmd + '-' out,
   // Ctrl/Cmd + '0' reset. Handled before the typing-in-a-field guard so it works

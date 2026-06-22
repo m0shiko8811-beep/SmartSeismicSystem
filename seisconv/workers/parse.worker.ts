@@ -10,7 +10,7 @@
 import { parentPort } from 'node:worker_threads';
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
-import { applyAGC, computeSemblance, detectSPSType, EPSG_DB, getWriter, groupByLine, mergeSPSData, normFactorPercentile, parseAny, parseSPSText, projToLatLon, reprojectSPS, resampleLinear, runSPSQC, type AGCType, type ParsedFile, type QCParams, type SPSData, type SPSPoint } from '../core';
+import { applyAGC, computeSemblance, crsFromSpec, detectSPSType, EPSG_DB, generateProjHeaders, getWriter, groupByLine, mergeSPSData, normFactorPercentile, parseAny, parseSPSText, projToLatLon, PROJ_HEADER_CODES, reprojectSPS, resampleLinear, runSPSQC, spsHeaderDesc, type AGCType, type CRSSpec, type ParsedFile, type QCParams, type SPSData, type SPSHeader, type SPSPoint } from '../core';
 
 if (!parentPort) throw new Error('parse.worker must run as a worker thread');
 const port = parentPort;
@@ -21,8 +21,15 @@ let currentSPSFiles: { name: string; text: string; type: 'S' | 'R' | 'X' | 'mixe
 
 interface Req {
   id: number;
-  type: 'open' | 'trace' | 'extractTrace' | 'section' | 'convert' | 'convertPath' | 'convertTraces' | 'reset' | 'openSPS' | 'spsClear' | 'spsGeometry' | 'spsXrefLines' | 'spsFold' | 'spsQC' | 'spsPointDetail' | 'spsSourceList' | 'spsReproject' | 'spsExport' | 'semblance';
+  type: 'open' | 'trace' | 'extractTrace' | 'section' | 'convert' | 'convertPath' | 'convertTraces' | 'reset' | 'openSPS' | 'spsClear' | 'spsGeometry' | 'spsXrefLines' | 'spsFold' | 'spsQC' | 'spsPointDetail' | 'spsSourceList' | 'spsReproject' | 'spsExport' | 'spsHeaderList' | 'spsApplyHeaders' | 'spsSaveCorrected' | 'semblance';
   path?: string;
+  // spsApplyHeaders: scope ('shared' = all loaded files, else a file name) + the
+  // edit/add/remove batch and an optional CRS rewrite. Mirrors the IPC contract.
+  scope?: 'shared' | string;
+  edits?: { code: string; val: string }[];
+  adds?: { code: string; desc?: string; val: string }[];
+  removes?: string[];
+  crs?: CRSSpec;
   paths?: string[];
   qc?: QCParams;
   code?: string;
@@ -254,6 +261,144 @@ function buildSPSQCReport(d: SPSData, params: QCParams): { name: string; text: s
     lines.push(csvRow([r.sev, r.cat, r.msg, pt ? nz(pt.easting, 3) : '', pt ? nz(pt.northing, 3) : '']));
   }
   return [{ name: 'sps_qc_report.csv', text: lines.join('\n') + '\n' }];
+}
+
+// ── SPS H-record (header) editing ──
+//
+// All edits preserve the fixed-column SPS H-record format: cols 1-4 hold the
+// 4-char code, cols 5-32 the description, cols 33-80 (0-based 32..79) the DATA
+// field, terminated with `;`. The parser (parseSPSText) reads code = cols 1-4
+// and val = everything from col 33 with a trailing `;…` stripped, so we write
+// the value into cols 33-80, left/space-pad the whole line to 80, and re-add `;`.
+
+/** The 4-char H-record code of a raw line (cols 1-4, trimmed). '' if not an H. */
+function hRecCode(raw: string): string {
+  const ln = (raw || '').padEnd(4, ' ');
+  if (ln[0]?.toUpperCase() !== 'H') return '';
+  return ln.substring(0, 4).trim();
+}
+
+/** Rewrite the DATA field (cols 33-80) of an H-record line, keeping cols 1-32
+ *  (code + description) intact and re-terminating with `;`. Pads to 80. */
+function rewriteHData(raw: string, val: string): string {
+  const ln = (raw || '').padEnd(32, ' ');
+  const prefix = ln.substring(0, 32); // code + description columns, untouched
+  const data = (val ?? '').trim();
+  return (prefix + data + ';').padEnd(80, ' ').substring(0, 80);
+}
+
+/** Build a fresh H-record line for an ADD: code in cols 1-4, description in
+ *  cols 5-32, value in cols 33-80, `;`-terminated, padded to 80. */
+function buildHRecord(code: string, desc: string | undefined, val: string): string {
+  const c = (code || '').substring(0, 4);
+  const label = (desc && desc.trim()) || spsHeaderDesc(code);
+  // cols 1-32 = code (1-4) + description (5-32). Code may be 3 or 4 chars; pad
+  // the code field so the description starts no earlier than col 5.
+  const head = (c.padEnd(c.length >= 4 ? 4 : 4, ' ') + ' ' + label).substring(0, 32).padEnd(32, ' ');
+  return (head + (val ?? '').trim() + ';').padEnd(80, ' ').substring(0, 80);
+}
+
+/**
+ * Apply one file's H-record edit batch to its raw text, preserving fixed columns.
+ *  - `edits`: rewrite the DATA field of every H-record whose code matches.
+ *  - `crs`:   replace the projection H-records (PROJ_HEADER_CODES) in place from
+ *             generateProjHeaders; any missing ones are appended (header-only —
+ *             S/R coordinate lines are never touched).
+ *  - `removes`: drop H-records whose code matches.
+ *  - `adds`:  insert new H-records after the last existing H-record.
+ * Returns the new file text.
+ */
+function applyHeaderEditsToText(
+  text: string,
+  edits: { code: string; val: string }[],
+  adds: { code: string; desc?: string; val: string }[],
+  removes: string[],
+  crsLines: Record<string, string> | null,
+): string {
+  const hadCRLF = /\r\n/.test(text);
+  const eol = hadCRLF ? '\r\n' : '\n';
+  // Split on either newline style; keep blank lines so structure is preserved.
+  const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+  // Strip a leading BOM from line 0 (parseSPSText does the same).
+  if (lines.length && lines[0].charCodeAt(0) === 0xfeff) lines[0] = lines[0].slice(1);
+
+  const editMap = new Map<string, string>();
+  for (const e of edits || []) editMap.set(e.code, e.val);
+  const removeSet = new Set(removes || []);
+  // CRS rewrite codes still pending insertion (those not matched in place).
+  const crsPending = new Set(crsLines ? Object.keys(crsLines) : []);
+
+  const out: string[] = [];
+  let lastHIdx = -1;
+  for (const raw of lines) {
+    const code = hRecCode(raw);
+    if (code) {
+      // CRS projection-record rewrite takes precedence over a plain edit.
+      if (crsLines && crsLines[code] != null) {
+        if (removeSet.has(code)) { continue; } // user removed it → skip even under CRS
+        out.push(crsLines[code]);
+        crsPending.delete(code);
+        lastHIdx = out.length - 1;
+        continue;
+      }
+      if (removeSet.has(code)) continue; // drop this H-record
+      if (editMap.has(code)) {
+        out.push(rewriteHData(raw, editMap.get(code)!));
+        lastHIdx = out.length - 1;
+        continue;
+      }
+      out.push(raw);
+      lastHIdx = out.length - 1;
+      continue;
+    }
+    out.push(raw);
+  }
+
+  // Records to insert after the last existing H-record: any CRS codes not found
+  // in the file (header-only addition) followed by the explicit `adds`.
+  const inserts: string[] = [];
+  if (crsLines) {
+    for (const code of PROJ_HEADER_CODES) {
+      if (crsPending.has(code) && !removeSet.has(code)) inserts.push(crsLines[code]);
+    }
+  }
+  for (const a of adds || []) inserts.push(buildHRecord(a.code, a.desc, a.val));
+
+  if (inserts.length) {
+    if (lastHIdx >= 0) out.splice(lastHIdx + 1, 0, ...inserts);
+    else out.unshift(...inserts); // no H block at all → prepend
+  }
+
+  return out.join(eol);
+}
+
+/** Re-parse + re-merge all currentSPSFiles into a fresh merged SPSData. */
+function reparseMergeAll(files: { name: string; text: string }[]): SPSData | null {
+  let merged: SPSData | null = null;
+  for (const f of files) {
+    const sps = parseSPSText(f.text);
+    merged = merged ? mergeSPSData(merged, sps) : sps;
+  }
+  return merged;
+}
+
+/** Build the {code,val,raw,desc} header list from a parsed SPSData's H block. */
+function headerListFromSPS(sps: SPSData | null): { code: string; val: string; raw: string; desc: string }[] {
+  if (!sps) return [];
+  return sps.headers.map((h: SPSHeader) => ({ code: h.code, val: h.val, raw: h.raw, desc: spsHeaderDesc(h.code, h.raw) }));
+}
+
+/** Whether the loaded SPS files' H blocks actually differ (by code+val). A
+ *  single file (or none) never "differs". */
+function spsFilesDiffer(files: { name: string; text: string }[]): boolean {
+  if (files.length < 2) return false;
+  const sig = (text: string): string => {
+    const hs = parseSPSText(text).headers;
+    return hs.map((h) => `${h.code}=${h.val}`).join('\n');
+  };
+  const first = sig(files[0].text);
+  for (let i = 1; i < files.length; i++) if (sig(files[i].text) !== first) return true;
+  return false;
 }
 
 function buildSPSExport(d: SPSData, kind: 'kml' | 'geojson' | 'csv' | 'qcreport', qcParams: QCParams): { ok: boolean; files: { name: string; text: string }[]; error?: string } {
@@ -690,6 +835,74 @@ port.on('message', (req: Req) => {
         name: f.name.replace(/(\.[^.]+)?$/, `_${tag}$1`),
         text: reprojectSPS(f.text.split('\n'), tgt, f.type === 'X' ? 'X' : f.type === 'R' ? 'R' : 'S', currentSPS!.projection!),
       }));
+      port.postMessage({ id, ok: true, files });
+      return;
+    }
+
+    // SPS HEADER VIEWER: return the shared H block as {code,val,raw,desc}, the
+    // parsed projection, the loaded file list, and whether the files' H blocks
+    // actually differ. Built from currentSPS (the merged survey) + currentSPSFiles.
+    if (type === 'spsHeaderList') {
+      const headers = headerListFromSPS(currentSPS);
+      const proj = currentSPS?.projection ?? null;
+      const projection = proj
+        ? {
+            type: proj.type, subtype: proj.subtype, zone: proj.zone, hemi: proj.hemi,
+            datum: proj.datum, ellipsoid: proj.ellipsoid, units: proj.units,
+            centralMeridian: proj.centralMeridian, latOrigin: proj.latOrigin,
+            falseEasting: proj.falseEasting, falseNorthing: proj.falseNorthing,
+            scaleFactor: proj.scaleFactor, desc: proj.desc,
+          }
+        : null;
+      const files = currentSPSFiles.map((f) => ({ name: f.name, type: f.type }));
+      const filesDiffer = spsFilesDiffer(currentSPSFiles);
+      port.postMessage({ id, ok: true, headers, projection, files, filesDiffer });
+      return;
+    }
+
+    // SPS HEADER EDITOR: apply an edit/add/remove batch (+ optional CRS rewrite)
+    // to the H block of every targeted file (scope 'shared' = all loaded SPS
+    // files, else the named file), rewrite currentSPSFiles raw text in place,
+    // re-parse + re-merge, and return the refreshed header list. NEVER touches
+    // S/R coordinate lines — the CRS rewrite is HEADER-ONLY.
+    if (type === 'spsApplyHeaders') {
+      if (!currentSPSFiles.length) {
+        port.postMessage({ id, ok: false, error: 'no SPS loaded' });
+        return;
+      }
+      const scope = req.scope ?? 'shared';
+      const edits = req.edits ?? [];
+      const adds = req.adds ?? [];
+      const removes = req.removes ?? [];
+      let crsLines: Record<string, string> | null = null;
+      if (req.crs) {
+        try { crsLines = generateProjHeaders(crsFromSpec(req.crs)); }
+        catch (e) { port.postMessage({ id, ok: false, error: `CRS rewrite failed: ${(e as Error).message}` }); return; }
+      }
+
+      const targets = scope === 'shared' ? currentSPSFiles : currentSPSFiles.filter((f) => f.name === scope);
+      if (scope !== 'shared' && !targets.length) {
+        port.postMessage({ id, ok: false, error: `no loaded SPS file named '${scope}'` });
+        return;
+      }
+      for (const f of targets) {
+        f.text = applyHeaderEditsToText(f.text, edits, adds, removes, crsLines);
+      }
+
+      currentSPS = reparseMergeAll(currentSPSFiles);
+      port.postMessage({ id, ok: true, headers: headerListFromSPS(currentSPS) });
+      return;
+    }
+
+    // SPS HEADER EDITOR — save: hand the edited currentSPSFiles raw text back so
+    // main.ts can ZIP + Save them (same flow as spsReproject). One {name,text}
+    // per loaded file, names kept as-is.
+    if (type === 'spsSaveCorrected') {
+      if (!currentSPSFiles.length) {
+        port.postMessage({ id, ok: false, error: 'no SPS loaded' });
+        return;
+      }
+      const files = currentSPSFiles.map((f) => ({ name: f.name, text: f.text }));
       port.postMessage({ id, ok: true, files });
       return;
     }

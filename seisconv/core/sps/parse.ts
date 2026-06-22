@@ -73,6 +73,70 @@ export interface SPSData {
   projection?: SPSProjection;
 }
 
+// ── H-record human-readable labels ──
+//
+// SPS 2.1 carries a short description in cols 5-32 of every H-record; when a file
+// omits it (or carries a terse/non-standard one) this map supplies a canonical
+// human label per code so the Header Viewer/Editor always has something to show.
+export const SPS_HEADER_LABELS: Record<string, string> = {
+  H00: 'SPS format / revision',
+  H01: 'Survey / area',
+  H011: 'Survey block',
+  H02: 'Date of survey',
+  H03: 'Client',
+  H04: 'Geophysical contractor',
+  H05: 'Positioning contractor',
+  H06: 'Processing contractor',
+  H07: 'Field computer system',
+  H08: 'Coordinate location',
+  H09: 'Offset from coordinate / clock time',
+  H10: 'Date format',
+  H100: 'Note',
+  H11: 'Geodetic datum / spheroid info',
+  H12: 'Geodetic datum, -spheroid',
+  H13: 'Geodetic datum (local)',
+  H14: 'Geodetic datum parameters (Helmert)',
+  H15: 'Vertical datum',
+  H16: 'Vertical datum description',
+  H17: 'Offset between geodetic & vertical datum',
+  H18: 'Projection type',
+  H19: 'Projection zone',
+  H20: 'Description of grid units',
+  H201: 'Factor to meters',
+  H21: 'Description of height units',
+  H211: 'Factor to meters (height)',
+  H22: 'Projection parameters',
+  H220: 'Long. of central meridian',
+  H221: 'Lat. of central parallel',
+  H222: 'Standard parallel 1',
+  H223: 'Standard parallel 2',
+  H23: 'Grid origin',
+  H231: 'Grid origin',
+  H232: 'Grid coord. at origin',
+  H24: 'Scale factor',
+  H241: 'Scale factor',
+  H25: 'Spheroid / datum shift parameters',
+  H26: 'Bearing / azimuth reference',
+  H30: 'Line number / range',
+  H31: 'Receiver line interval',
+  H32: 'Source line interval',
+  H33: 'Receiver station interval',
+  H34: 'Source station interval',
+  H35: 'Source / receiver type',
+};
+
+/** Human-readable description for an H-record. Prefers the description column
+ *  embedded in the raw line (cols 5-32) when present; else the canonical label
+ *  map; else the bare code. */
+export function spsHeaderDesc(code: string, raw?: string): string {
+  if (raw) {
+    // Description column = cols 5-32 (0-based 4..31), i.e. after the 4-char code.
+    const embedded = raw.substring(4, 32).trim();
+    if (embedded) return embedded;
+  }
+  return SPS_HEADER_LABELS[code] || code;
+}
+
 // ── fixed-column helpers ──
 function sfloat(s: string, a: number, b: number): number {
   const v = (s || '').substring(a, b).trim();

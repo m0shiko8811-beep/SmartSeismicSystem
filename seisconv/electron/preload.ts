@@ -225,6 +225,74 @@ export interface SemblanceData {
   offNote: string;
 }
 
+/** One SPS H-record row for the Header Viewer/Editor: the 4-char code, the
+ *  editable DATA value, the original raw line, and a human-readable description. */
+export interface SPSHeaderRow {
+  code: string;
+  val: string;
+  raw: string;
+  desc: string;
+}
+
+/** Parsed projection / datum block surfaced alongside the H-record list. */
+export interface SPSHeaderProjection {
+  type: string | null;
+  subtype: string | null;
+  zone: number | null;
+  hemi: string | null;
+  datum: string | null;
+  ellipsoid: string | null;
+  units: string;
+  centralMeridian: number | null;
+  latOrigin: number | null;
+  falseEasting: number | null;
+  falseNorthing: number | null;
+  scaleFactor: number | null;
+  desc?: string;
+}
+
+/** Result of {@link SeisconvAPI.spsHeaderList}: the shared H block, the parsed
+ *  projection, the loaded file list, and whether the files' H blocks differ. */
+export interface SPSHeaderListResult {
+  ok: boolean;
+  headers: SPSHeaderRow[];
+  projection: SPSHeaderProjection | null;
+  files: { name: string; type: string }[];
+  filesDiffer: boolean;
+}
+
+/** Loose CRS rewrite spec sent by the Header Editor (header-only regeneration of
+ *  the projection H-records). All fields optional. */
+export interface SPSCrsEdit {
+  datum?: string;
+  projType?: string;
+  zone?: number;
+  hemi?: 'N' | 'S';
+  units?: string;
+  centralMeridian?: number;
+  latOrigin?: number;
+  falseEasting?: number;
+  falseNorthing?: number;
+  scaleFactor?: number;
+}
+
+/** The edit/add/remove (+ optional CRS) batch the Header Editor applies. `scope`
+ *  is 'shared' (all loaded SPS files) or a single loaded file's name. */
+export interface SPSApplyHeadersReq {
+  scope: 'shared' | string;
+  edits: { code: string; val: string }[];
+  adds: { code: string; desc?: string; val: string }[];
+  removes: string[];
+  crs?: SPSCrsEdit;
+}
+
+/** Result of {@link SeisconvAPI.spsApplyHeaders}: ok + the refreshed header list. */
+export interface SPSApplyHeadersResult {
+  ok: boolean;
+  headers: SPSHeaderRow[];
+  error?: string;
+}
+
 /** Observer Log payload restored from a saved .json (shape matches what the
  *  renderer writes via exportText). Fields are loosely typed — the renderer
  *  reconciles them against its own LogColumn / LogRow types on load. */
@@ -320,6 +388,15 @@ const api = {
     ipcRenderer.invoke('seisconv:spsPointDetail', args),
   /** Reproject the loaded SPS survey to an EPSG target and save a ZIP. */
   spsReproject: (code: string): Promise<ConvertResult> => ipcRenderer.invoke('seisconv:spsReproject', code),
+  /** SPS Header Viewer: get the shared H block (code/val/raw/desc), the parsed
+   *  projection, the loaded-file list, and whether the files' H blocks differ. */
+  spsHeaderList: (): Promise<SPSHeaderListResult> => ipcRenderer.invoke('seisconv:spsHeaderList'),
+  /** SPS Header Editor: apply an edit/add/remove batch (+ optional CRS rewrite)
+   *  to the loaded survey's H block(s); re-parses in the worker and returns the
+   *  refreshed header list. Does not save to disk (see spsSaveCorrected). */
+  spsApplyHeaders: (req: SPSApplyHeadersReq): Promise<SPSApplyHeadersResult> => ipcRenderer.invoke('seisconv:spsApplyHeaders', req),
+  /** SPS Header Editor: save the current (edited) SPS files to disk as a .zip. */
+  spsSaveCorrected: (): Promise<ConvertResult> => ipcRenderer.invoke('seisconv:spsSaveCorrected'),
   /** Export the loaded SPS survey as KML / GeoJSON / a CSV trio / a QC-report CSV.
    *  Multi-file output (csv) is saved as a ZIP; single-file output via a Save dialog. */
   spsExport: (args: { kind: 'kml' | 'geojson' | 'csv' | 'qcreport'; qcParams?: { srcInt?: number; rcvInt?: number; tol?: number; maxOff?: number; maxSrc?: number; maxRcv?: number } }): Promise<ConvertResult> =>

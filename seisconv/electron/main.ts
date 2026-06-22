@@ -525,6 +525,57 @@ ipcMain.handle('seisconv:spsReproject', async (_e, code: string) => {
   return { ok: true, path: save.filePath };
 });
 
+// SPS HEADER VIEWER: return the shared H block (code/val/raw/desc), the parsed
+// projection, the loaded-file list, and whether the files' H blocks differ.
+ipcMain.handle('seisconv:spsHeaderList', async () => {
+  const r = await callWorker<{ ok: boolean; error?: string } & Record<string, any>>({ type: 'spsHeaderList' });
+  if (!r.ok) throw new Error(r.error || 'sps header list failed');
+  return { ok: true, headers: r.headers ?? [], projection: r.projection ?? null, files: r.files ?? [], filesDiffer: !!r.filesDiffer };
+});
+
+// SPS HEADER EDITOR: apply an edit/add/remove batch (+ optional CRS rewrite) to
+// the loaded survey's H block(s), re-parse in the worker, and return the
+// refreshed header list. Does NOT save to disk — that's spsSaveCorrected.
+ipcMain.handle(
+  'seisconv:spsApplyHeaders',
+  async (
+    _e,
+    req: {
+      scope: 'shared' | string;
+      edits: { code: string; val: string }[];
+      adds: { code: string; desc?: string; val: string }[];
+      removes: string[];
+      crs?: Record<string, unknown>;
+    },
+  ) => {
+    const r = await callWorker<{ ok: boolean; headers?: unknown[]; error?: string }>({
+      type: 'spsApplyHeaders',
+      scope: req?.scope ?? 'shared',
+      edits: req?.edits ?? [],
+      adds: req?.adds ?? [],
+      removes: req?.removes ?? [],
+      crs: req?.crs,
+    });
+    if (!r.ok) return { ok: false, headers: [], error: r.error ?? 'apply headers failed' };
+    return { ok: true, headers: r.headers ?? [] };
+  },
+);
+
+// SPS HEADER EDITOR — save: ZIP the edited currentSPSFiles and write via a native
+// dialog. Reuses the spsReproject ZIP save flow (JSZip + showSaveDialog + writeFile).
+ipcMain.handle('seisconv:spsSaveCorrected', async () => {
+  const r = await callWorker<{ ok: boolean; files?: { name: string; text: string }[]; error?: string }>({ type: 'spsSaveCorrected' });
+  if (!r.ok || !r.files) return { ok: false, error: r.error ?? 'save failed' };
+  if (!win) return { ok: false, error: 'no window' };
+  const zip = new JSZip();
+  for (const f of r.files) zip.file(f.name, f.text);
+  const buf = await zip.generateAsync({ type: 'nodebuffer' });
+  const save = await dialog.showSaveDialog(win, { defaultPath: 'sps_corrected.zip', filters: [{ name: 'ZIP archive', extensions: ['zip'] }] });
+  if (save.canceled || !save.filePath) return { ok: false, canceled: true };
+  await writeFile(save.filePath, buf);
+  return { ok: true, path: save.filePath };
+});
+
 // SPS geographic / tabular exports (KML, GeoJSON, CSV trio, QC-report CSV). The
 // worker returns one-or-more {name,text} files; we save them with the SAME flow
 // as spsReproject: multi-file output is zipped (JSZip), single-file output uses a
