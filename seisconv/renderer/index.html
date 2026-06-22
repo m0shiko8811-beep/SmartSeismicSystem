@@ -493,6 +493,77 @@ table.olog-grid tr.olog-rowsel td{background:var(--teal-tint-2);}
 .olog-actions button:hover{border-color:var(--teal);color:var(--teal-deep);}
 .olog-empty{padding:26px 14px;text-align:center;color:var(--ink-3);font-size:12.5px;}
 
+/* ---- Observer Log v2: in-cell input + inline button (Now / Today / SPS) ---- */
+.olog-cell-wrap{display:flex;align-items:stretch;width:100%;}
+.olog-cell-wrap .olog-cell{flex:1;min-width:64px;}
+.olog-cell-btn{
+  border:none;border-left:1px solid var(--hair-soft);background:var(--surface);color:var(--ink-3);
+  cursor:pointer;font-size:10px;font-weight:700;letter-spacing:.2px;padding:0 7px;
+}
+.olog-cell-btn:hover:not(:disabled){background:var(--teal-tint);color:var(--teal-deep);}
+.olog-cell-btn:disabled{opacity:.4;cursor:default;}
+
+/* ---- Observer Log v2: time-source toolbar control ---- */
+.olog-timesrc{display:flex;align-items:center;gap:8px;}
+.olog-timesrc .ots-seg{display:inline-flex;border:1px solid var(--hair);border-radius:8px;overflow:hidden;}
+.olog-timesrc .ots-btn{
+  border:none;background:var(--card);color:var(--ink-2);cursor:pointer;font-size:11.5px;font-weight:600;
+  padding:5px 11px;
+}
+.olog-timesrc .ots-btn + .ots-btn{border-left:1px solid var(--hair);}
+.olog-timesrc .ots-btn.on{background:var(--teal-tint);color:var(--teal-deep);}
+.olog-timesrc .ots-ntp{display:flex;align-items:center;gap:6px;}
+.olog-timesrc .ots-server{
+  border:1px solid var(--hair);border-radius:7px;background:var(--card);color:var(--ink);
+  font-family:var(--mono);font-size:11.5px;padding:4px 8px;width:130px;
+}
+.olog-timesrc .ots-server:focus{outline:2px solid var(--teal);outline-offset:-1px;}
+.olog-timesrc .ots-offset{font-family:var(--mono);font-size:11.5px;color:var(--ink-3);min-width:54px;}
+.olog-timesrc .ots-offset.ok{color:var(--green);}
+.olog-timesrc .ots-offset.err{color:var(--red);}
+
+/* ---- Observer Log v2: templates controls (toolbar) ---- */
+.olog-tpl{display:inline-flex;align-items:center;gap:6px;padding-left:9px;border-left:1px solid var(--hair);}
+.olog-tpl-select{
+  height:28px;border:1px solid var(--hair);border-radius:8px;background:var(--surface);color:var(--ink);
+  font-size:11.5px;padding:0 7px;max-width:150px;cursor:pointer;
+}
+.olog-tpl-select:focus{outline:2px solid var(--teal);outline-offset:-1px;}
+
+/* ---- Observer Log v2: columns manager (modal) ---- */
+.olog-cm-modal{width:min(900px,100%);}
+.olog-cm-count{font-family:var(--mono);font-size:11px;color:var(--ink-3);margin-left:4px;}
+.olog-cm-hint{font-size:12px;color:var(--ink-3);margin:0 0 12px;}
+.olog-cm-list{display:flex;flex-direction:column;gap:8px;}
+.olog-cm-row{
+  display:flex;align-items:flex-end;flex-wrap:wrap;gap:9px;
+  border:1px solid var(--hair);border-radius:11px;padding:9px 11px;background:var(--surface);
+}
+.olog-cm-ord{display:flex;flex-direction:column;gap:2px;}
+.olog-cm-field{display:flex;flex-direction:column;gap:3px;min-width:0;}
+.olog-cm-flabel{font-size:9.5px;font-weight:700;color:var(--ink-3);letter-spacing:.4px;text-transform:uppercase;}
+.olog-cm-input{
+  height:28px;border:1px solid var(--hair);border-radius:7px;background:var(--card);color:var(--ink);
+  font-size:12px;padding:0 7px;min-width:0;width:118px;
+}
+.olog-cm-input:focus{outline:2px solid var(--teal);outline-offset:-1px;}
+.olog-cm-label .olog-cm-input,.olog-cm-row .olog-cm-label{width:148px;}
+.olog-cm-label{width:148px;}
+.olog-cm-unit{width:64px;}
+.olog-cm-step{width:64px;}
+.olog-cm-opts{width:210px;}
+.olog-cm-settings{display:flex;align-items:flex-end;gap:9px;flex-wrap:wrap;}
+.olog-cm-check{display:flex;align-items:center;gap:4px;font-size:11px;color:var(--ink-2);padding-bottom:6px;white-space:nowrap;cursor:pointer;}
+.olog-cm-check input{accent-color:var(--teal);width:13px;height:13px;cursor:pointer;}
+.olog-cm-btn{
+  width:24px;height:20px;border:1px solid var(--hair);border-radius:6px;background:var(--card);
+  color:var(--ink-2);cursor:pointer;font-size:11px;line-height:1;display:grid;place-items:center;
+}
+.olog-cm-btn:hover{border-color:var(--teal);color:var(--teal-deep);}
+.olog-cm-rm{width:28px;height:28px;align-self:flex-end;margin-bottom:0;}
+.olog-cm-rm:hover{border-color:var(--red);color:var(--red);}
+.olog-cm-foot{border-top:1px solid var(--hair-soft);border-bottom:none;display:flex;align-items:center;gap:9px;}
+
 /* ---- Found-files banner ---- */
 .found{
   margin-bottom:14px;padding:11px 15px;border:1px solid var(--hair);border-radius:12px;
@@ -1460,9 +1531,35 @@ table.olog-grid tr.olog-rowsel td{background:var(--teal-tint-2);}
         <div id="obslogGrid" style="display:none;">
           <div class="olog-toolbar">
             <button class="btn btn-primary sm" id="ologAddRowBtn" type="button">+ Add row</button>
+            <button class="btn sm" id="ologColsBtn" type="button" title="Edit columns — rename, reorder, retype, set role + settings, add or remove">Columns…</button>
+            <button class="btn sm" id="ologSpsImportBtn" type="button" title="Create one row per source point in the loaded SPS survey">Import sources from SPS</button>
             <button class="btn sm" id="ologReconfigBtn" type="button">Reconfigure…</button>
             <button class="btn sm" id="ologSaveBtn" type="button" title="Save the log (header + columns + rows) to a JSON file">Save log</button>
             <button class="btn sm" id="ologReloadBtn" type="button" title="Reload a previously saved log JSON file">Reload…</button>
+
+            <!-- ── Templates: save / load / delete + export / import named configs ── -->
+            <span class="olog-tpl" id="ologTemplates" title="Save & reuse named log configurations (columns + roles + meta-defaults)">
+              <select class="olog-tpl-select" id="ologTplSelect" title="Saved templates"></select>
+              <button class="btn sm" id="ologTplLoad" type="button" title="Load the selected template onto the log" disabled>Load</button>
+              <button class="btn sm" id="ologTplSave" type="button" title="Save the current configuration as a named template">Save as…</button>
+              <button class="btn sm" id="ologTplDelete" type="button" title="Delete the selected template" disabled>Delete</button>
+              <button class="btn sm" id="ologTplExport" type="button" title="Export the selected template to a .json file" disabled>Export</button>
+              <button class="btn sm" id="ologTplImport" type="button" title="Import a template from a .json file">Import</button>
+            </span>
+
+            <!-- ── Time source: PC clock | NTP (drives the 'Now' stamps) ── -->
+            <span class="olog-timesrc" id="ologTimeSrc" title="Source of the 'Now' time stamps in the grid">
+              <span class="ots-seg">
+                <button class="ots-btn on" id="ologTsPc" type="button" title="Stamp the PC clock">PC clock</button>
+                <button class="ots-btn" id="ologTsNtp" type="button" title="Stamp the PC clock corrected by an NTP server offset">NTP</button>
+              </span>
+              <span class="ots-ntp" id="ologNtpControls" style="display:none;">
+                <input class="ots-server" id="ologNtpServer" type="text" spellcheck="false" placeholder="pool.ntp.org" value="pool.ntp.org" title="SNTP server (UDP/123)">
+                <button class="btn sm" id="ologNtpSync" type="button" title="Query the NTP server and compute the clock offset">Sync</button>
+                <span class="ots-offset" id="ologNtpOffset"></span>
+              </span>
+            </span>
+
             <span style="flex:1"></span>
             <!-- export buttons (Excel / CSV / LibreOffice / Report) are built here by the renderer -->
             <span id="obslogExportBar"></span>
@@ -1562,6 +1659,31 @@ table.olog-grid tr.olog-rowsel td{background:var(--teal-tint-2);}
         <li><span class="kbd" data-key="tabs">1–7</span> — switch tabs</li>
         <li><span class="kbd" data-key="help">?</span> — this manual · <span class="kbd">Esc</span> closes it</li>
       </ul>
+    </div>
+  </div>
+</div>
+
+<!-- ============================ COLUMNS MANAGER ============================ -->
+<div class="modal-back" id="ologColMgrBack" role="dialog" aria-modal="true" aria-labelledby="ologColMgrTitle">
+  <div class="modal olog-cm-modal">
+    <div class="mh">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--teal-deep)" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+      <h2 id="ologColMgrTitle">Columns</h2>
+      <span class="olog-cm-count" id="ologColMgrCount"></span>
+      <button class="mclose" id="ologColMgrClose" title="Close" aria-label="Close">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="mbody">
+      <p class="olog-cm-hint">Rename, reorder, retype, set a role (with its settings), choose a unit, add or remove columns. Applying keeps your existing record values for any columns that survive.</p>
+      <div class="olog-cm-list" id="ologColMgrList"></div>
+      <button class="btn sm" id="ologColMgrAdd" type="button" style="margin-top:12px;">+ Add column</button>
+    </div>
+    <div class="mh olog-cm-foot">
+      <span class="trace-label" id="ologColMgrStatus"></span>
+      <span style="flex:1"></span>
+      <button class="btn sm" id="ologColMgrCancel" type="button">Cancel</button>
+      <button class="btn btn-primary sm" id="ologColMgrApply" type="button">Apply</button>
     </div>
   </div>
 </div>

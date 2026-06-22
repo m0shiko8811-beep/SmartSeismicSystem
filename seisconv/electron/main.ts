@@ -8,6 +8,7 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu } from 'electron';
 import { writeFile, readFile, readdir } from 'node:fs/promises';
 import { Worker } from 'node:worker_threads';
+import * as dgram from 'node:dgram';
 import * as path from 'node:path';
 import JSZip from 'jszip';
 
@@ -131,6 +132,50 @@ function callWorker<T = any>(req: Record<string, unknown>, transfer: Transferabl
   return new Promise<T>((resolve, reject) => {
     pending.set(id, { resolve, reject });
     w.postMessage({ ...req, id }, transfer as any);
+  });
+}
+
+// ── SNTP (NTP-over-UDP) client for the Observer Log "Sync clock" control ──
+//
+// Minimal RFC-4330 SNTP query: send a 48-byte request (LI=0, VN=4, Mode=3 client)
+// to <server>:123 over UDP, read the server's TRANSMIT timestamp from the reply,
+// and return offsetMs = serverTimeMs - Date.now(). No round-trip delay correction
+// — the log only needs the wall-clock offset, not sub-ms precision. Resolves a
+// clean error (never throws/rejects) on timeout, DNS failure, or offline so the
+// renderer can surface "sync failed" without crashing. 2-second hard timeout.
+const NTP_UNIX_EPOCH_DIFF = 2208988800; // seconds between 1900-01-01 and 1970-01-01
+
+function sntpQuery(server: string): Promise<{ ok: boolean; offsetMs?: number; serverTimeMs?: number; error?: string }> {
+  return new Promise((resolve) => {
+    const socket = dgram.createSocket('udp4');
+    let done = false;
+    const finish = (result: { ok: boolean; offsetMs?: number; serverTimeMs?: number; error?: string }) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      try { socket.close(); } catch { /* already closed */ }
+      resolve(result);
+    };
+    const timer = setTimeout(() => finish({ ok: false, error: 'NTP request timed out' }), 2000);
+
+    socket.on('error', (err) => finish({ ok: false, error: (err as Error).message }));
+    socket.on('message', (msg) => {
+      // Server transmit timestamp: 4-byte integer seconds + 4-byte fraction at
+      // byte offset 40 (seconds since 1900). Need at least 48 bytes for a valid reply.
+      if (msg.length < 48) { finish({ ok: false, error: 'short NTP reply' }); return; }
+      const seconds = msg.readUInt32BE(40);
+      const fraction = msg.readUInt32BE(44);
+      const serverTimeMs = (seconds - NTP_UNIX_EPOCH_DIFF) * 1000 + Math.round((fraction / 0x100000000) * 1000);
+      const offsetMs = serverTimeMs - Date.now();
+      finish({ ok: true, offsetMs, serverTimeMs });
+    });
+
+    // Client request packet: first byte 0x1B = LI 0, VN 4, Mode 3 (client); rest zero.
+    const packet = Buffer.alloc(48);
+    packet[0] = 0x1b;
+    socket.send(packet, 0, packet.length, 123, server, (err) => {
+      if (err) finish({ ok: false, error: (err as Error).message });
+    });
   });
 }
 
@@ -554,6 +599,41 @@ ipcMain.handle('seisconv:openLogJson', async () => {
     columns: Array.isArray(o?.columns) ? o.columns : [],
     rows: Array.isArray(o?.rows) ? o.rows : [],
   };
+});
+
+// Observer Log TEMPLATE import: open a .json picker, read + parse it, and return
+// the RAW parsed object (or null if cancelled / unreadable). Unlike openLogJson
+// (which narrows to {meta,columns,rows}), templates carry {meta,columns,srcType,
+// timeSource}, so we hand the renderer the whole object to validate itself.
+ipcMain.handle('seisconv:openTemplateJson', async () => {
+  if (!win) return null;
+  const res = await dialog.showOpenDialog(win, {
+    properties: ['openFile'],
+    filters: [
+      { name: 'Observer Log template (JSON)', extensions: ['json'] },
+      { name: 'All files', extensions: ['*'] },
+    ],
+  });
+  if (res.canceled || !res.filePaths.length) return null;
+  const text = await readFile(res.filePaths[0], 'utf8');
+  return JSON.parse(text) as unknown;
+});
+
+// Observer Log "Sync clock": query an SNTP server over UDP and return the offset
+// (serverTimeMs - local Date.now()). Never throws — a failed/offline query
+// resolves { ok: false, error }. Default server 'pool.ntp.org'.
+ipcMain.handle('seisconv:ntpSync', async (_e, server?: string) => {
+  const host = (typeof server === 'string' && server.trim()) ? server.trim() : 'pool.ntp.org';
+  return sntpQuery(host);
+});
+
+// Observer Log SPS-linking: flat list of the loaded survey's source records, for
+// columns the user links to an SPS source field. Forwards to the worker (which
+// owns the parsed SPSData); returns { sources: [] } when no survey is loaded.
+ipcMain.handle('seisconv:spsSourceList', async () => {
+  const r = await callWorker<{ ok: boolean; sources?: unknown[]; error?: string }>({ type: 'spsSourceList' });
+  if (!r.ok) throw new Error(r.error || 'sps source list failed');
+  return { sources: r.sources ?? [] };
 });
 
 app.whenReady().then(() => {

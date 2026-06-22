@@ -234,6 +234,31 @@ export interface LogJson {
   rows: Record<string, string | number>[];
 }
 
+/** Result of an SNTP "Sync clock" query. `offsetMs` (= serverTimeMs - local
+ *  Date.now()) and `serverTimeMs` are present only when ok; otherwise `error`
+ *  carries the reason (timeout / DNS failure / offline). */
+export interface NtpSyncResult {
+  ok: boolean;
+  offsetMs?: number;
+  serverTimeMs?: number;
+  error?: string;
+}
+
+/** One SPS source record exposed to the Observer Log for column-linking. The
+ *  three optional SPSPoint fields (upholeMs/staticMs/srcType) are null when the
+ *  survey didn't carry them. */
+export interface SpsSourceRecord {
+  lineName: string;
+  point: number;
+  idx: string;
+  easting: number;
+  northing: number;
+  elevation: number;
+  upholeMs: number | null;
+  staticMs: number | null;
+  srcType: string | null;
+}
+
 const api = {
   /** Host OS, for OS-aware key hints (set to process.platform at preload load). */
   platform: process.platform as string,
@@ -307,6 +332,15 @@ const api = {
   exportBinary: (name: string, bytes: Uint8Array): Promise<ConvertResult> => ipcRenderer.invoke('seisconv:exportBinary', { name, bytes }),
   /** Observer Log RELOAD: open a .json picker, parse it, return {meta,columns,rows} (or null). */
   openLogJson: (): Promise<LogJson | null> => ipcRenderer.invoke('seisconv:openLogJson'),
+  /** Observer Log TEMPLATE import: open a .json picker, parse it, return the RAW
+   *  parsed object (the renderer validates the template shape) or null if cancelled. */
+  openTemplateJson: (): Promise<unknown> => ipcRenderer.invoke('seisconv:openTemplateJson'),
+  /** Observer Log "Sync clock": query an SNTP server over UDP; resolves the offset
+   *  (serverTimeMs - local Date.now()) or { ok:false, error }. Defaults to 'pool.ntp.org'. */
+  ntpSync: (server: string): Promise<NtpSyncResult> => ipcRenderer.invoke('seisconv:ntpSync', server),
+  /** Observer Log SPS-linking: flat list of the loaded survey's source records
+   *  ([] when no SPS is loaded) for columns linked to an SPS source field. */
+  spsSourceList: (): Promise<{ sources: SpsSourceRecord[] }> => ipcRenderer.invoke('seisconv:spsSourceList'),
   /** Current application-wide UI zoom factor (1 = 100 %); reads webFrame state. */
   getZoom: (): number => webFrame.getZoomFactor(),
   /** Set the application-wide UI zoom factor (clamped to 0.5–2.5) via webFrame. */

@@ -21,7 +21,7 @@ let currentSPSFiles: { name: string; text: string; type: 'S' | 'R' | 'X' | 'mixe
 
 interface Req {
   id: number;
-  type: 'open' | 'trace' | 'extractTrace' | 'section' | 'convert' | 'convertPath' | 'convertTraces' | 'reset' | 'openSPS' | 'spsClear' | 'spsGeometry' | 'spsXrefLines' | 'spsFold' | 'spsQC' | 'spsPointDetail' | 'spsReproject' | 'spsExport' | 'semblance';
+  type: 'open' | 'trace' | 'extractTrace' | 'section' | 'convert' | 'convertPath' | 'convertTraces' | 'reset' | 'openSPS' | 'spsClear' | 'spsGeometry' | 'spsXrefLines' | 'spsFold' | 'spsQC' | 'spsPointDetail' | 'spsSourceList' | 'spsReproject' | 'spsExport' | 'semblance';
   path?: string;
   paths?: string[];
   qc?: QCParams;
@@ -651,6 +651,27 @@ port.on('message', (req: Req) => {
       if (match.ffid !== undefined) d.ffid = match.ffid;
       if (match.staticMs !== undefined) d.staticMs = match.staticMs;
       port.postMessage({ id, ok: true, detail: d });
+      return;
+    }
+
+    // Observer Log v2 SPS-linking: flatten currentSPS.sources to the lean record
+    // the renderer binds log columns to (sps-role columns pull one srcField each).
+    // Returns [] when no survey is loaded so the renderer can clear/disable the
+    // link without special-casing the no-SPS state. upholeMs/staticMs/srcType are
+    // optional on SPSPoint → coerced to null when absent (the contract type).
+    if (type === 'spsSourceList') {
+      const sources = (currentSPS?.sources ?? []).map((s) => ({
+        lineName: s.lineName,
+        point: s.point,
+        idx: s.idx,
+        easting: s.easting,
+        northing: s.northing,
+        elevation: s.elevation,
+        upholeMs: s.upholeMs ?? null,
+        staticMs: s.staticMs ?? null,
+        srcType: s.srcType ?? null,
+      }));
+      port.postMessage({ id, ok: true, sources });
       return;
     }
 

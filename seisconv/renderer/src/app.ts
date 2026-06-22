@@ -61,6 +61,17 @@ type PickFolderResult = { dir: string; files: FolderFile[] } | null;
 // renderer writes). LogColumn / LogMeta / LogRow are defined with the rest of
 // the Observer-Log state further down; type aliases are hoisted so this is fine.
 type LogJson = { meta: LogMeta; columns: LogColumn[]; rows: LogRow[] };
+// One source point from the loaded SPS survey, flattened for Observer-Log lookup.
+// `idx` is the SPS point index field (string), other fields mirror the survey.
+type SpsSourceRecord = {
+  lineName: string; point: number; idx: string;
+  easting: number; northing: number; elevation: number;
+  upholeMs: number | null; staticMs: number | null; srcType: string | null;
+};
+// Which SPS source field an sps-role column pulls (see SpsSourceRecord).
+type LogSrcField = 'lineName' | 'point' | 'easting' | 'northing' | 'elevation' | 'upholeMs' | 'staticMs' | 'srcType';
+// A column's behavioural ROLE in the grid (drives the per-cell input it renders).
+type LogColRole = 'plain' | 'counter' | 'time' | 'date' | 'pick' | 'sps';
 type BatchSummary = {
   ok: boolean;
   total: number;
@@ -131,6 +142,15 @@ declare global {
       exportBinary(name: string, bytes: Uint8Array): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
       // Observer Log RELOAD: open a .json picker → {meta,columns,rows}, or null if cancelled.
       openLogJson(): Promise<LogJson | null>;
+      // Observer Log TEMPLATE import: open a .json picker → the RAW parsed object
+      // (renderer validates the template shape), or null if cancelled.
+      openTemplateJson(): Promise<unknown>;
+      // Observer Log TIME SOURCE: query an SNTP server (UDP/123) → clock offset.
+      // offsetMs = serverTimeMs - Date.now(); applied to the 'Now' time stamps.
+      ntpSync(server: string): Promise<{ ok: boolean; offsetMs?: number; serverTimeMs?: number; error?: string }>;
+      // Observer Log SPS LINK: flat list of the loaded SPS survey's source points,
+      // for sps-role columns to look up by line/point. [] when no SPS is loaded.
+      spsSourceList(): Promise<{ sources: SpsSourceRecord[] }>;
       // App-wide UI zoom (whole interface), backed by Electron's webFrame.
       getZoom(): number;
       setZoom(factor: number): void;
@@ -318,7 +338,14 @@ const WB_COLORS = ['#34dbd0', '#ffb454', '#7aa2ff', '#ff6e9c', '#9be564', '#c792
 // All three persist to localStorage so they survive tab switches / reloads.
 type LogColType = 'text' | 'number' | 'date' | 'time' | 'select';
 type LogSrcType = 'explosive' | 'vibroseis' | 'nodal';
-type LogColumn = { key: string; label: string; group: string; type: LogColType; unit?: string; options?: string[] };
+type LogColumn = {
+  key: string; label: string; group: string; type: LogColType; unit?: string; options?: string[];
+  // ── Observer Log v2: interactive grid by column ROLE ──
+  role?: LogColRole;       // how the cell behaves (counter/time/date/pick/sps/plain)
+  step?: number;           // counter increment used when auto-fill is on (default 1)
+  autoInc?: boolean;       // counter OPT-IN auto-increment on add-row (default OFF)
+  srcField?: LogSrcField;  // for role 'sps' — which SpsSourceRecord field to pull
+};
 type LogMeta = Record<string, string>;
 type LogRow = Record<string, string | number>;
 
@@ -330,6 +357,16 @@ let logSrcType: LogSrcType = 'explosive';
 let logCustomCols: LogColumn[] = [];           // user-defined extra columns
 let logEnabledGroups: Set<string> | null = null; // which default groups are checked (null = wizard not yet primed)
 const LOG_KEY = 'seisconv.obslog';
+
+// ── Observer Log v2: time-source config ──
+// The 'Now' time-stamp buttons read the PC clock, optionally corrected by an NTP
+// offset (offsetMs = serverTimeMs - Date.now()) when the user is in NTP mode and
+// has synced. The choice + server persist alongside the log state.
+type LogTimeSource = 'pc' | 'ntp';
+let logTimeSource: LogTimeSource = 'pc';
+let logNtpServer = 'pool.ntp.org';
+let logNtpOffsetMs = 0;            // serverTimeMs - Date.now() from the last sync
+let logNtpSynced = false;          // whether a successful sync has happened this session
 
 // ── Converter (single / folder-batch) state ──
 type ConvMode = 'single' | 'batch';
@@ -2597,6 +2634,7 @@ async function loadSPS() {
     highlightedShot = null;
     gridView.init = false;
     gridHighlight = null;
+    invalidateSpsSourceCache();   // Observer Log: re-fetch the source list on next use
     clearInspector();
     $('spsLabel').textContent = spsLabel(s);
     updateSpsStats();
@@ -2622,6 +2660,7 @@ async function clearSPS() {
   highlightedShot = null;
   gridView.init = false;
   gridHighlight = null;
+  invalidateSpsSourceCache();   // Observer Log: drop the cached source list
   setSpsExportEnabled(false);
   clearInspector();
   $('qcResults').textContent = '';
@@ -3519,6 +3558,46 @@ const LOG_META_FIELDS: { key: string; label: string; wide?: boolean }[] = [
   { key: 'numbering', label: 'Numbering schemes (line / SP / station / FFID)', wide: true },
 ];
 
+// ── Observer Log v2: column ROLE defaults ──
+// Maps a column (by key + type) to a sensible behavioural role + (for sps-linked
+// source columns) the SpsSourceRecord field it pulls. Counters get auto-fill OPT-IN
+// (default OFF). Applied at build time and backfilled onto older persisted columns.
+//
+//   FFID / Shot point / Line / Station   → 'counter'
+//   Time                                 → 'time'
+//   Date                                 → 'date'
+//   Status (and any 'select')            → 'pick'
+//   SPS-derived source columns           → 'sps' (+ matching srcField)
+//   everything else                      → 'plain'
+const LOG_COUNTER_KEYS = new Set([
+  'ffid', 'shotPoint', 'srcLine', 'srcIndex', 'doy',
+  'firstStation', 'lastStation', 'firstChannel', 'lastChannel',
+]);
+// Source columns that can be looked up from a loaded SPS survey's source points.
+const LOG_SPS_SRCFIELD: Record<string, LogSrcField> = {
+  srcLine: 'lineName', shotPoint: 'point',
+  srcEasting: 'easting', srcNorthing: 'northing', srcElev: 'elevation',
+  uphole: 'upholeMs', staticMs: 'staticMs', srcType: 'srcType',
+};
+function defaultColRole(c: { key: string; type: LogColType }): LogColRole {
+  if (c.type === 'select') return 'pick';
+  if (c.type === 'time') return 'time';
+  if (c.type === 'date') return 'date';
+  if (c.key in LOG_SPS_SRCFIELD) return 'sps';
+  if (LOG_COUNTER_KEYS.has(c.key)) return 'counter';
+  return 'plain';
+}
+/** Assign role/step/srcField defaults to a column IN PLACE (only when unset, so a
+ *  user-chosen role survives). Returns the same column for chaining. */
+function withColRoleDefaults(c: LogColumn): LogColumn {
+  if (c.role == null) c.role = defaultColRole(c);
+  if (c.role === 'sps' && c.srcField == null && c.key in LOG_SPS_SRCFIELD) c.srcField = LOG_SPS_SRCFIELD[c.key];
+  if (c.role === 'counter' && c.step == null) c.step = 1;
+  return c;
+}
+/** Backfill role defaults across the live column set (idempotent). */
+function ensureColRoles() { for (const c of logColumns) withColRoleDefaults(c); }
+
 /** Build the live `logColumns` from the wizard's chosen groups + source type +
  *  custom columns. SOURCE injects the per-type extras right after its base set. */
 function buildLogColumns(): LogColumn[] {
@@ -3527,18 +3606,18 @@ function buildLogColumns(): LogColumn[] {
   for (const g of LOG_SCHEMA) {
     if (!groups.has(g.group)) continue;
     for (const f of g.fields) {
-      cols.push({ key: f.key, label: f.label, group: g.group, type: f.type, unit: f.unit, options: f.options });
+      cols.push(withColRoleDefaults({ key: f.key, label: f.label, group: g.group, type: f.type, unit: f.unit, options: f.options }));
     }
     // Append the per-source-type extras at the END of the SOURCE group so the
     // base SOURCE columns always come first.
     if (g.group === 'Source') {
       for (const f of LOG_SRC_EXTRAS[logSrcType]) {
-        cols.push({ key: f.key, label: f.label, group: 'Source', type: f.type, unit: f.unit, options: f.options });
+        cols.push(withColRoleDefaults({ key: f.key, label: f.label, group: 'Source', type: f.type, unit: f.unit, options: f.options }));
       }
     }
   }
   // Custom columns last, in their own group label.
-  for (const c of logCustomCols) cols.push({ ...c });
+  for (const c of logCustomCols) cols.push(withColRoleDefaults({ ...c }));
   return cols;
 }
 
@@ -3628,6 +3707,8 @@ function saveLog() {
       meta: logMeta, columns: logColumns, rows: logRows,
       srcType: logSrcType, customCols: logCustomCols,
       groups: logEnabledGroups ? Array.from(logEnabledGroups) : null,
+      // v2: persist the time-source choice + server (offset is session-only).
+      timeSource: logTimeSource, ntpServer: logNtpServer,
     }));
   } catch { /* ignore quota / serialization errors */ }
 }
@@ -3638,6 +3719,7 @@ function loadLogState() {
     const o = JSON.parse(s) as Partial<{
       meta: LogMeta; columns: LogColumn[]; rows: LogRow[];
       srcType: LogSrcType; customCols: LogColumn[]; groups: string[] | null;
+      timeSource: LogTimeSource; ntpServer: string;
     }>;
     if (o.meta && typeof o.meta === 'object') logMeta = o.meta;
     if (Array.isArray(o.columns)) logColumns = o.columns;
@@ -3645,6 +3727,12 @@ function loadLogState() {
     if (o.srcType === 'explosive' || o.srcType === 'vibroseis' || o.srcType === 'nodal') logSrcType = o.srcType;
     if (Array.isArray(o.customCols)) logCustomCols = o.customCols;
     if (Array.isArray(o.groups)) logEnabledGroups = new Set(o.groups);
+    // v2: time-source choice + server (default to PC clock / pool.ntp.org).
+    if (o.timeSource === 'pc' || o.timeSource === 'ntp') logTimeSource = o.timeSource;
+    if (typeof o.ntpServer === 'string' && o.ntpServer.trim() !== '') logNtpServer = o.ntpServer.trim();
+    // Backfill v2 roles onto columns saved by an older (pre-role) build.
+    ensureColRoles();
+    for (const c of logCustomCols) withColRoleDefaults(c);
   } catch { /* ignore corrupt state */ }
 }
 
@@ -3691,6 +3779,7 @@ async function reloadLogJson() {
   logMeta = (data.meta && typeof data.meta === 'object') ? data.meta : {};
   logColumns = data.columns;
   logRows = Array.isArray(data.rows) ? data.rows : [];
+  ensureColRoles(); // backfill v2 roles onto columns from older saved files
   saveLog();        // mirror into localStorage so it survives a tab switch
   renderLog();      // logConfigured() is now true → grid is shown, wizard skipped
   updateHeaderClear();
@@ -4085,6 +4174,7 @@ function renderLog() {
   renderLogMetaStrip();
   renderLogGrid();
   renderLogExportBar();
+  syncSpsLinkUI();
   setText('ologGridLabel', `${logRows.length} record${logRows.length === 1 ? '' : 's'} · ${logColumns.length} columns`);
 }
 
@@ -4134,7 +4224,604 @@ function renderLogGrid() {
   }
 }
 
-/** Build one <tr> for record index `i`, with editable cells + per-row actions. */
+// ── Observer Log v2: time-stamp helpers (PC clock + optional NTP offset) ──
+/** Effective "now" — the PC clock, corrected by the NTP offset when NTP mode is
+ *  active and a sync has succeeded. */
+function effectiveNow(): Date {
+  const off = (logTimeSource === 'ntp' && logNtpSynced) ? logNtpOffsetMs : 0;
+  return new Date(Date.now() + off);
+}
+/** Current local time as HH:MM:SS (for 'time' role cells). */
+function nowTimeStr(): string {
+  const d = effectiveNow();
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+}
+/** Today's local date as YYYY-MM-DD (for 'date' role cells). */
+function todayDateStr(): string {
+  const d = effectiveNow();
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+
+// ── Observer Log v2: SPS source lookup HOOK ──
+// The live lookup that resolves an sps-role cell's value from the loaded SPS
+// survey. The hook is null until wired (installSpsLookupHook, called at init);
+// when null the grid renders sps cells as plain editable inputs with a disabled
+// 'SPS' button. Signature: given a row + column, return the looked-up value (or
+// null if it can't resolve), already coerced to the cell's type.
+type SpsLookupHook = (row: LogRow, col: LogColumn) => Promise<string | number | null>;
+let spsLookupHook: SpsLookupHook | null = null;
+/** Register (or clear) the SPS source-lookup implementation. */
+function setSpsLookupHook(fn: SpsLookupHook | null): void { spsLookupHook = fn; }
+// Expose on window so external code can attach/inspect without importing this module.
+(window as unknown as { seisconvObsLog?: Record<string, unknown> }).seisconvObsLog = {
+  setSpsLookupHook,
+  // Read helpers the hook may need.
+  getRows: () => logRows,
+  getColumns: () => logColumns,
+  refreshGrid: () => renderLog(),
+};
+
+// ── Observer Log v2: SPS source CACHE + matching ──
+// The flat source list is fetched once via api.spsSourceList() and cached; it is
+// invalidated whenever the loaded survey changes (loadSPS / clearSPS null it).
+let spsSourceCache: SpsSourceRecord[] | null = null;
+let spsSourceFetch: Promise<SpsSourceRecord[]> | null = null;
+
+/** Drop the cached SPS source list (call when the loaded survey changes). */
+function invalidateSpsSourceCache(): void { spsSourceCache = null; spsSourceFetch = null; }
+
+/** Fetch (and cache) the loaded survey's source list. Resolves to [] — never
+ *  rejects — when no SPS is loaded or the IPC is unavailable. */
+async function getSpsSources(): Promise<SpsSourceRecord[]> {
+  if (spsSourceCache) return spsSourceCache;
+  if (!api?.spsSourceList) { spsSourceCache = []; return spsSourceCache; }
+  if (!spsSourceFetch) {
+    spsSourceFetch = api.spsSourceList()
+      .then((r) => { spsSourceCache = Array.isArray(r?.sources) ? r.sources : []; return spsSourceCache; })
+      .catch(() => { spsSourceCache = []; return spsSourceCache; });
+  }
+  return spsSourceFetch;
+}
+
+/** Read a row's shot-point as a number (from whichever 'point'-linked column or
+ *  the default shotPoint key exists), or null. */
+function rowShotPoint(row: LogRow): number | null {
+  const ptCol = logColumns.find((c) => c.role === 'sps' && c.srcField === 'point');
+  if (ptCol) { const v = num(row[ptCol.key]); if (v != null) return v; }
+  return num(row['shotPoint']);
+}
+/** Read a row's source line label (from a 'lineName'-linked column or srcLine),
+ *  or null. Compared case-/whitespace-insensitively. */
+function rowSrcLine(row: LogRow): string | null {
+  const lnCol = logColumns.find((c) => c.role === 'sps' && c.srcField === 'lineName');
+  const raw = lnCol ? row[lnCol.key] : row['srcLine'];
+  if (raw == null) return null;
+  const s = String(raw).trim();
+  return s === '' ? null : s;
+}
+/** Whether the live log carries a source-line column (drives line-aware matching). */
+function logHasLineColumn(): boolean {
+  return logColumns.some((c) => (c.role === 'sps' && c.srcField === 'lineName') || c.key === 'srcLine');
+}
+
+/** Find the SPS source matching a row: by point, and additionally by line when a
+ *  line column exists + the row carries a line value. Returns null on no match. */
+function matchSpsSource(sources: SpsSourceRecord[], point: number, line: string | null): SpsSourceRecord | null {
+  const norm = (s: string) => s.trim().toLowerCase();
+  const wantLine = line != null && logHasLineColumn() ? norm(line) : null;
+  let ptOnly: SpsSourceRecord | null = null;
+  for (const s of sources) {
+    if (s.point !== point) continue;
+    if (wantLine == null) return s;                       // point-only match
+    if (norm(s.lineName) === wantLine) return s;          // exact line+point match
+    if (ptOnly == null) ptOnly = s;                       // remember a point-only fallback
+  }
+  return ptOnly; // no exact line+point hit → fall back to a point-only match (or null)
+}
+
+/** Coerce an SpsSourceRecord field to a cell value (null when the field is null). */
+function spsFieldValue(src: SpsSourceRecord, field: LogSrcField): string | number | null {
+  const v = src[field];
+  if (v == null) return null;
+  return typeof v === 'number' ? round3(v) : v;
+}
+
+/** The actual SPS-cell lookup: resolve one sps-role column's value for a row from
+ *  the cached source list (matched by the row's shot-point [+ line]). */
+async function spsLookupForCell(row: LogRow, col: LogColumn): Promise<string | number | null> {
+  if (col.role !== 'sps' || col.srcField == null) return null;
+  const point = rowShotPoint(row);
+  if (point == null) return null;
+  const sources = await getSpsSources();
+  if (sources.length === 0) return null;
+  const match = matchSpsSource(sources, point, rowSrcLine(row));
+  return match ? spsFieldValue(match, col.srcField) : null;
+}
+
+/** Auto-fill EVERY sps-role column in row `i` from the matched SPS source. Used by
+ *  the live lookup (triggered when a Shot point / Line cell is edited). Returns
+ *  true when at least one cell was filled (so the caller can re-render the row). */
+async function autoFillSpsRow(i: number): Promise<boolean> {
+  const row = logRows[i];
+  if (!row) return false;
+  const spsCols = logColumns.filter((c) => c.role === 'sps' && c.srcField != null);
+  if (spsCols.length === 0) return false;
+  const point = rowShotPoint(row);
+  if (point == null) return false;
+  const sources = await getSpsSources();
+  if (sources.length === 0) return false;
+  const match = matchSpsSource(sources, point, rowSrcLine(row));
+  if (!match) return false;
+  let changed = false;
+  for (const c of spsCols) {
+    // Never overwrite the very column the user just typed into (point/line drivers
+    // already hold the user's value); fill the rest.
+    if (c.srcField === 'point' || c.srcField === 'lineName') continue;
+    const v = spsFieldValue(match, c.srcField!);
+    if (v == null) continue;
+    if (row[c.key] !== v) { row[c.key] = v; changed = true; }
+  }
+  return changed;
+}
+
+/** Whether an SPS survey is loaded (gates the bulk-import button + live lookup). */
+function spsLinkAvailable(): boolean { return !!spsSummary; }
+
+/** Install the live SPS lookup hook (called at init). The hook itself no-ops
+ *  gracefully when no survey is loaded (getSpsSources resolves []). */
+function installSpsLookupHook(): void { setSpsLookupHook(spsLookupForCell); }
+
+/** BULK 'Import sources from SPS' → one row per SPS source, pre-filling sps-role
+ *  columns by srcField plus the Shot point / Source line counters. No-ops (with a
+ *  status note) when no survey is loaded or it has no sources. */
+async function importRowsFromSps(): Promise<void> {
+  if (!spsLinkAvailable()) { setText('ologGridLabel', 'Load an SPS survey first.'); return; }
+  setText('ologGridLabel', 'Importing sources from SPS…');
+  const sources = await getSpsSources();
+  if (sources.length === 0) { setText('ologGridLabel', 'The loaded survey has no source points.'); return; }
+  // Columns that should receive a value, keyed by the SpsSourceRecord field they map to.
+  const lineCol = logColumns.find((c) => (c.role === 'sps' && c.srcField === 'lineName') || c.key === 'srcLine');
+  const ptCol = logColumns.find((c) => (c.role === 'sps' && c.srcField === 'point') || c.key === 'shotPoint');
+  const spsCols = logColumns.filter((c) => c.role === 'sps' && c.srcField != null);
+  const rows: LogRow[] = [];
+  for (const s of sources) {
+    const r = blankLogRow();
+    if (lineCol && 'lineName' in s) r[lineCol.key] = s.lineName;
+    if (ptCol) r[ptCol.key] = s.point;
+    for (const c of spsCols) {
+      const v = spsFieldValue(s, c.srcField!);
+      if (v != null) r[c.key] = v;
+    }
+    rows.push(r);
+  }
+  if (logRows.length > 0 && !confirm(`Replace the ${logRows.length} current record${logRows.length === 1 ? '' : 's'} with ${rows.length} rows imported from SPS?`)) {
+    setText('ologGridLabel', `${logRows.length} record${logRows.length === 1 ? '' : 's'} · ${logColumns.length} columns`);
+    return;
+  }
+  logRows = rows;
+  saveLog();
+  renderLog();
+  updateHeaderClear();
+  setLogExportStatus(`Imported ${rows.length} source${rows.length === 1 ? '' : 's'} from SPS.`);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  OBSERVER LOG v2 — COLUMNS MANAGER
+//  Edit the live column set anytime (not just in the wizard): rename, reorder,
+//  retype, re-role (+ role settings), set units, remove, add. Applying RECONCILES
+//  logRows to the new column set without losing data for surviving keys.
+// ════════════════════════════════════════════════════════════════════════════
+
+// A deep-ish working copy of logColumns the manager edits; committed on Apply.
+let colMgrDraft: LogColumn[] = [];
+
+/** Reconcile rows to a NEW column set: keep values for surviving keys, drop
+ *  removed keys, default added keys (Status → 'Good', else ''). */
+function reconcileLogRows(newCols: LogColumn[]): void {
+  logRows = logRows.map((old) => {
+    const r: LogRow = {};
+    for (const c of newCols) {
+      r[c.key] = (c.key in old) ? old[c.key] : (c.key === 'status' ? 'Good' : '');
+    }
+    return r;
+  });
+}
+
+/** Derive a safe, unique column key from a label, avoiding collisions with the
+ *  given set of in-use keys. */
+function deriveColKey(label: string, used: Set<string>): string {
+  let base = 'col_' + label.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  if (base === 'col_') base = 'col_new';
+  let key = base; let n = 2;
+  while (used.has(key)) key = `${base}_${n++}`;
+  return key;
+}
+
+const COL_ROLES: { value: LogColRole; label: string }[] = [
+  { value: 'plain', label: 'Plain' },
+  { value: 'counter', label: 'Counter' },
+  { value: 'time', label: 'Time' },
+  { value: 'date', label: 'Date' },
+  { value: 'pick', label: 'Pick (dropdown)' },
+  { value: 'sps', label: 'SPS-linked' },
+];
+const COL_TYPES: LogColType[] = ['text', 'number', 'date', 'time', 'select'];
+const SPS_SRCFIELDS: LogSrcField[] = ['lineName', 'point', 'easting', 'northing', 'elevation', 'upholeMs', 'staticMs', 'srcType'];
+const SPS_SRCFIELD_LABEL: Record<LogSrcField, string> = {
+  lineName: 'Line name', point: 'Point', easting: 'Easting', northing: 'Northing',
+  elevation: 'Elevation', upholeMs: 'Uphole (ms)', staticMs: 'Static (ms)', srcType: 'Source type',
+};
+
+/** Open the Columns Manager modal (snapshots the live columns into a draft). */
+function openColumnsManager(): void {
+  colMgrDraft = logColumns.map((c) => ({ ...c, options: c.options ? [...c.options] : undefined }));
+  renderColMgrList();
+  const back = $opt('ologColMgrBack'); if (back) back.classList.add('open');
+}
+function closeColumnsManager(): void {
+  const back = $opt('ologColMgrBack'); if (back) back.classList.remove('open');
+}
+
+/** Move a draft column up/down. */
+function colMgrMove(i: number, delta: number): void {
+  const j = i + delta;
+  if (j < 0 || j >= colMgrDraft.length) return;
+  const [c] = colMgrDraft.splice(i, 1);
+  colMgrDraft.splice(j, 0, c);
+  renderColMgrList();
+}
+/** Remove a draft column. */
+function colMgrRemove(i: number): void {
+  colMgrDraft.splice(i, 1);
+  renderColMgrList();
+}
+/** Add a new blank draft column. */
+function colMgrAdd(): void {
+  const used = new Set(colMgrDraft.map((c) => c.key));
+  const key = deriveColKey('column', used);
+  colMgrDraft.push(withColRoleDefaults({ key, label: 'New column', group: 'Custom', type: 'text', role: 'plain' }));
+  renderColMgrList();
+  // Scroll the freshly added row into view.
+  const list = $opt('ologColMgrList');
+  if (list) list.scrollTop = list.scrollHeight;
+}
+
+/** Build the per-column editor list inside the manager modal. */
+function renderColMgrList(): void {
+  const host = $opt('ologColMgrList');
+  if (!host) return;
+  host.innerHTML = '';
+  colMgrDraft.forEach((c, i) => host.appendChild(buildColMgrRow(c, i)));
+  setText('ologColMgrCount', `${colMgrDraft.length} column${colMgrDraft.length === 1 ? '' : 's'}`);
+}
+
+/** One editor row in the Columns Manager. */
+function buildColMgrRow(c: LogColumn, i: number): HTMLElement {
+  const row = document.createElement('div');
+  row.className = 'olog-cm-row';
+
+  // Reorder + index
+  const ord = document.createElement('div');
+  ord.className = 'olog-cm-ord';
+  ord.appendChild(cmIconBtn('↑', 'Move up', () => colMgrMove(i, -1)));
+  ord.appendChild(cmIconBtn('↓', 'Move down', () => colMgrMove(i, 1)));
+  row.appendChild(ord);
+
+  // Label
+  const label = cmInput('text', c.label, 'Label', (v) => { c.label = v; });
+  label.classList.add('olog-cm-label');
+  row.appendChild(cmField('Label', label));
+
+  // Type
+  const typeSel = cmSelect(COL_TYPES.map((t) => ({ value: t, label: t })), c.type, (v) => {
+    c.type = v as LogColType;
+    // Keep role/options coherent with the new type.
+    if (c.type === 'select' && !c.options) c.options = ['Option 1'];
+    renderColMgrList();
+  });
+  row.appendChild(cmField('Type', typeSel));
+
+  // Role
+  const roleSel = cmSelect(COL_ROLES, c.role ?? defaultColRole(c), (v) => {
+    c.role = v as LogColRole;
+    if (c.role === 'counter' && c.step == null) c.step = 1;
+    if (c.role === 'sps' && c.srcField == null) c.srcField = LOG_SPS_SRCFIELD[c.key] ?? 'point';
+    renderColMgrList();
+  });
+  row.appendChild(cmField('Role', roleSel));
+
+  // Unit
+  const unit = cmInput('text', c.unit ?? '', 'unit', (v) => { c.unit = v.trim() || undefined; });
+  unit.classList.add('olog-cm-unit');
+  row.appendChild(cmField('Unit', unit));
+
+  // Role-specific settings
+  const settings = document.createElement('div');
+  settings.className = 'olog-cm-settings';
+  const role = c.role ?? defaultColRole(c);
+  if (role === 'counter') {
+    const step = cmInput('number', String(c.step ?? 1), 'step', (v) => { const n = Number(v); c.step = isFinite(n) && n !== 0 ? n : 1; });
+    step.classList.add('olog-cm-step');
+    settings.appendChild(cmField('Step', step));
+    const auto = document.createElement('label');
+    auto.className = 'olog-cm-check';
+    const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = !!c.autoInc;
+    cb.addEventListener('change', () => { c.autoInc = cb.checked; });
+    auto.append(cb, document.createTextNode(' auto +'));
+    settings.appendChild(auto);
+  } else if (role === 'sps') {
+    const fld = cmSelect(SPS_SRCFIELDS.map((f) => ({ value: f, label: SPS_SRCFIELD_LABEL[f] })), c.srcField ?? 'point', (v) => { c.srcField = v as LogSrcField; });
+    settings.appendChild(cmField('SPS field', fld));
+  } else if (c.type === 'select' || role === 'pick') {
+    const opts = cmInput('text', (c.options ?? []).join(', '), 'comma,separated', (v) => {
+      const arr = v.split(',').map((s) => s.trim()).filter((s) => s !== '');
+      c.options = arr.length ? arr : ['Option 1'];
+    });
+    opts.classList.add('olog-cm-opts');
+    settings.appendChild(cmField('Options', opts));
+  }
+  row.appendChild(settings);
+
+  // Remove
+  const rm = cmIconBtn('✕', 'Remove column', () => colMgrRemove(i));
+  rm.classList.add('olog-cm-rm');
+  row.appendChild(rm);
+  return row;
+}
+
+// — small DOM builders for the manager —
+function cmField(labelText: string, control: HTMLElement): HTMLElement {
+  const f = document.createElement('div');
+  f.className = 'olog-cm-field';
+  const l = document.createElement('span'); l.className = 'olog-cm-flabel'; l.textContent = labelText;
+  f.append(l, control);
+  return f;
+}
+function cmInput(type: 'text' | 'number', value: string, ph: string, onChange: (v: string) => void): HTMLInputElement {
+  const inp = document.createElement('input');
+  inp.type = type; inp.value = value; inp.placeholder = ph; inp.className = 'olog-cm-input';
+  inp.addEventListener('input', () => onChange(inp.value));
+  return inp;
+}
+function cmSelect(opts: { value: string; label: string }[], value: string, onChange: (v: string) => void): HTMLSelectElement {
+  const sel = document.createElement('select');
+  sel.className = 'olog-cm-input';
+  for (const o of opts) {
+    const opt = document.createElement('option'); opt.value = o.value; opt.textContent = o.label;
+    if (o.value === value) opt.selected = true;
+    sel.appendChild(opt);
+  }
+  sel.addEventListener('change', () => onChange(sel.value));
+  return sel;
+}
+function cmIconBtn(label: string, title: string, fn: () => void): HTMLButtonElement {
+  const b = document.createElement('button');
+  b.type = 'button'; b.className = 'olog-cm-btn'; b.textContent = label; b.title = title;
+  b.addEventListener('click', fn);
+  return b;
+}
+
+/** Apply the manager draft: validate, normalise keys/roles, reconcile rows. */
+function applyColumnsManager(): void {
+  if (colMgrDraft.length === 0) { setText('ologColMgrStatus', 'Keep at least one column.'); return; }
+  // Normalise: ensure non-empty labels, unique keys, role-coherent settings.
+  const used = new Set<string>();
+  const next: LogColumn[] = [];
+  for (const c of colMgrDraft) {
+    const label = (c.label ?? '').trim() || 'Column';
+    let key = c.key;
+    if (!key || used.has(key)) key = deriveColKey(label, used);
+    used.add(key);
+    const col: LogColumn = { ...c, key, label };
+    // Drop stale role settings that don't apply to the chosen role.
+    if (col.role !== 'counter') { delete col.step; delete col.autoInc; }
+    if (col.role !== 'sps') delete col.srcField;
+    if (col.type !== 'select' && col.role !== 'pick') delete col.options;
+    withColRoleDefaults(col);
+    next.push(col);
+  }
+  logColumns = next;
+  reconcileLogRows(next);
+  if (logRows.length === 0) logRows = [blankLogRow()];
+  saveLog();
+  closeColumnsManager();
+  renderLog();
+  updateHeaderClear();
+  setLogExportStatus('Columns updated.');
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  OBSERVER LOG v2 — TEMPLATES
+//  A template = { meta (defaults), columns (roles + settings), srcType, timeSource,
+//  ntpServer }. Save the current config under a name, load it onto the current /
+//  fresh log, delete, plus Export → .json / Import ← .json.
+// ════════════════════════════════════════════════════════════════════════════
+
+const LOG_TPL_KEY = 'seisconv.obslog.templates';
+type LogTemplate = {
+  name: string;
+  meta: LogMeta;
+  columns: LogColumn[];
+  srcType: LogSrcType;
+  timeSource: LogTimeSource;
+  ntpServer: string;
+};
+
+/** Load the saved-templates map from localStorage ({} on miss / corruption). */
+function loadTemplates(): Record<string, LogTemplate> {
+  try {
+    const s = localStorage.getItem(LOG_TPL_KEY);
+    if (!s) return {};
+    const o = JSON.parse(s) as Record<string, LogTemplate>;
+    return (o && typeof o === 'object') ? o : {};
+  } catch { return {}; }
+}
+function saveTemplates(map: Record<string, LogTemplate>): void {
+  try { localStorage.setItem(LOG_TPL_KEY, JSON.stringify(map)); } catch { /* ignore quota */ }
+}
+
+/** Capture the current log configuration (NOT the rows) as a template object. */
+function currentTemplate(name: string): LogTemplate {
+  return {
+    name,
+    meta: { ...logMeta },
+    columns: logColumns.map((c) => ({ ...c, options: c.options ? [...c.options] : undefined })),
+    srcType: logSrcType,
+    timeSource: logTimeSource,
+    ntpServer: logNtpServer,
+  };
+}
+
+/** Validate an unknown object as a template (returns a normalised copy or null). */
+function asTemplate(o: unknown, fallbackName: string): LogTemplate | null {
+  if (!o || typeof o !== 'object') return null;
+  const t = o as Partial<LogTemplate>;
+  if (!Array.isArray(t.columns) || t.columns.length === 0) return null;
+  const columns = t.columns
+    .filter((c): c is LogColumn => !!c && typeof c === 'object' && typeof (c as LogColumn).key === 'string')
+    .map((c) => withColRoleDefaults({ ...c }));
+  if (columns.length === 0) return null;
+  return {
+    name: (typeof t.name === 'string' && t.name.trim()) ? t.name.trim() : fallbackName,
+    meta: (t.meta && typeof t.meta === 'object') ? t.meta : {},
+    columns,
+    srcType: (t.srcType === 'explosive' || t.srcType === 'vibroseis' || t.srcType === 'nodal') ? t.srcType : 'explosive',
+    timeSource: (t.timeSource === 'pc' || t.timeSource === 'ntp') ? t.timeSource : 'pc',
+    ntpServer: (typeof t.ntpServer === 'string' && t.ntpServer.trim()) ? t.ntpServer.trim() : 'pool.ntp.org',
+  };
+}
+
+/** Apply a template's columns/roles/meta-defaults/srcType/timeSource onto the log.
+ *  Confirms before replacing columns when rows already exist. Reconciles rows so
+ *  existing records survive (values kept for matching keys). */
+function applyTemplate(t: LogTemplate): void {
+  if (logColumns.length > 0 && logRows.length > 0 &&
+      !confirm(`Apply template “${t.name}”? It replaces the current ${logColumns.length} columns; existing record values are kept only for matching columns.`)) {
+    return;
+  }
+  logMeta = { ...t.meta };
+  logColumns = t.columns.map((c) => ({ ...c, options: c.options ? [...c.options] : undefined }));
+  ensureColRoles();
+  logSrcType = t.srcType;
+  logTimeSource = t.timeSource;
+  logNtpServer = t.ntpServer;
+  reconcileLogRows(logColumns);
+  if (logRows.length === 0) logRows = [blankLogRow()];
+  saveLog();
+  renderLog();
+  syncTimeSrcUI();
+  updateHeaderClear();
+  setLogExportStatus(`Loaded template “${t.name}”.`);
+}
+
+/** Refresh the Templates <select> from localStorage (+ enable/disable actions). */
+function refreshTemplateSelect(): void {
+  const sel = $opt('ologTplSelect') as HTMLSelectElement | null;
+  if (!sel) return;
+  const map = loadTemplates();
+  const names = Object.keys(map).sort((a, b) => a.localeCompare(b));
+  const prev = sel.value;
+  sel.innerHTML = '';
+  const ph = document.createElement('option');
+  ph.value = ''; ph.textContent = names.length ? 'Choose template…' : '(no templates saved)';
+  sel.appendChild(ph);
+  for (const n of names) {
+    const o = document.createElement('option'); o.value = n; o.textContent = n;
+    sel.appendChild(o);
+  }
+  if (names.includes(prev)) sel.value = prev;
+  const has = sel.value !== '';
+  const load = $opt('ologTplLoad') as HTMLButtonElement | null;
+  const del = $opt('ologTplDelete') as HTMLButtonElement | null;
+  const exp = $opt('ologTplExport') as HTMLButtonElement | null;
+  if (load) load.disabled = !has;
+  if (del) del.disabled = !has;
+  if (exp) exp.disabled = !has;
+}
+
+/** 'Save as template' — prompt for a name, store the current config. */
+function saveCurrentTemplate(): void {
+  if (logColumns.length === 0) { setLogExportStatus('Build the log first.'); return; }
+  const suggested = (logMeta['project'] ?? '').trim() || 'Template';
+  const name = (prompt('Save current configuration as template — name:', suggested) ?? '').trim();
+  if (!name) return;
+  const map = loadTemplates();
+  if (map[name] && !confirm(`A template named “${name}” exists — overwrite it?`)) return;
+  map[name] = currentTemplate(name);
+  saveTemplates(map);
+  refreshTemplateSelect();
+  const sel = $opt('ologTplSelect') as HTMLSelectElement | null;
+  if (sel) { sel.value = name; refreshTemplateSelect(); }
+  setLogExportStatus(`Saved template “${name}”.`);
+}
+
+/** 'Load' — apply the selected template. */
+function loadSelectedTemplate(): void {
+  const sel = $opt('ologTplSelect') as HTMLSelectElement | null;
+  const name = sel?.value ?? '';
+  if (!name) return;
+  const map = loadTemplates();
+  const t = map[name];
+  if (!t) { refreshTemplateSelect(); return; }
+  const norm = asTemplate(t, name);
+  if (norm) applyTemplate(norm);
+}
+
+/** 'Delete' — remove the selected template. */
+function deleteSelectedTemplate(): void {
+  const sel = $opt('ologTplSelect') as HTMLSelectElement | null;
+  const name = sel?.value ?? '';
+  if (!name) return;
+  if (!confirm(`Delete template “${name}”?`)) return;
+  const map = loadTemplates();
+  delete map[name];
+  saveTemplates(map);
+  refreshTemplateSelect();
+  setLogExportStatus(`Deleted template “${name}”.`);
+}
+
+/** Export the selected template to a .json file (reuses exportText). */
+async function exportSelectedTemplate(): Promise<void> {
+  const sel = $opt('ologTplSelect') as HTMLSelectElement | null;
+  const name = sel?.value ?? '';
+  const map = loadTemplates();
+  const t = name ? map[name] : null;
+  // Fall back to the current config when nothing is selected.
+  const tpl = t ?? (logColumns.length ? currentTemplate((logMeta['project'] ?? '').trim() || 'Template') : null);
+  if (!tpl) { setLogExportStatus('Nothing to export.'); return; }
+  const safe = (tpl.name || 'template').replace(/[^a-z0-9_-]+/gi, '-');
+  try {
+    const r = await api.exportText(`obslog-template-${safe}.json`, JSON.stringify(tpl, null, 2));
+    if (r?.ok) setLogExportStatus(`Exported template “${tpl.name}”.`);
+  } catch { /* ignore — dialog cancelled / write error */ }
+}
+
+/** Import a template from a .json file → save it + apply it. */
+async function importTemplateJson(): Promise<void> {
+  let raw: unknown = null;
+  try { raw = await api.openTemplateJson(); } catch { return; }
+  if (raw == null) return;
+  const t = asTemplate(raw, 'Imported template');
+  if (!t) { setLogExportStatus('That file is not a valid Observer Log template.'); return; }
+  const map = loadTemplates();
+  let name = t.name;
+  if (map[name] && !confirm(`A template named “${name}” exists — overwrite it?`)) {
+    // Pick a non-clashing name rather than clobber.
+    let n = 2; while (map[`${t.name} (${n})`]) n++;
+    name = `${t.name} (${n})`;
+    t.name = name;
+  }
+  map[name] = t;
+  saveTemplates(map);
+  refreshTemplateSelect();
+  const sel = $opt('ologTplSelect') as HTMLSelectElement | null;
+  if (sel) { sel.value = name; refreshTemplateSelect(); }
+  applyTemplate(t);
+}
+
+/** Build one <tr> for record index `i`, with editable cells + per-row actions.
+ *  Each cell's editor is chosen by the column's ROLE (counter/time/date/pick/
+ *  sps/plain); see buildLogCell. */
 function buildLogRowEl(i: number): HTMLTableRowElement {
   const row = logRows[i];
   const tr = document.createElement('tr');
@@ -4144,45 +4831,7 @@ function buildLogRowEl(i: number): HTMLTableRowElement {
   rh.textContent = String(i + 1);
   tr.appendChild(rh);
 
-  for (const c of logColumns) {
-    const td = document.createElement('td');
-    const raw = row[c.key];
-    const val = raw == null ? '' : String(raw);
-    if (c.type === 'select') {
-      const sel = document.createElement('select');
-      sel.className = 'olog-cell olog-status-cell';
-      for (const opt of (c.options ?? [])) {
-        const o = document.createElement('option'); o.value = opt; o.textContent = opt;
-        if (opt === val) o.selected = true;
-        sel.appendChild(o);
-      }
-      applyStatusClass(sel, val || (c.options?.[0] ?? ''));
-      sel.addEventListener('change', () => {
-        logRows[i][c.key] = sel.value;
-        applyStatusClass(sel, sel.value);
-        saveLog();
-      });
-      td.appendChild(sel);
-    } else {
-      const inp = document.createElement('input');
-      inp.className = 'olog-cell' + (c.type === 'number' ? ' num' : '');
-      inp.type = c.type === 'number' ? 'number' : c.type === 'date' ? 'date' : c.type === 'time' ? 'time' : 'text';
-      inp.value = val;
-      inp.addEventListener('change', () => {
-        const v = inp.value;
-        logRows[i][c.key] = c.type === 'number' && v.trim() !== '' && isFinite(Number(v)) ? Number(v) : v;
-        saveLog();
-      });
-      // Basic copy/paste support: Ctrl+C copies the cell, Ctrl+V pastes plain text.
-      inp.addEventListener('keydown', (e) => {
-        if ((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C') && inp.selectionStart === inp.selectionEnd) {
-          void navigator.clipboard?.writeText(inp.value).catch(() => { /* ignore */ });
-        }
-      });
-      td.appendChild(inp);
-    }
-    tr.appendChild(td);
-  }
+  for (const c of logColumns) tr.appendChild(buildLogCell(i, c));
 
   // Per-row action buttons: insert-above, delete, move up, move down.
   const act = document.createElement('td');
@@ -4195,6 +4844,184 @@ function buildLogRowEl(i: number): HTMLTableRowElement {
   act.appendChild(wrap);
   tr.appendChild(act);
   return tr;
+}
+
+/** Build a single editable <td> for row `i`, column `c`, dispatching on the
+ *  column ROLE. Falls back to the plain editor for unknown roles. */
+function buildLogCell(i: number, c: LogColumn): HTMLTableCellElement {
+  const role: LogColRole = c.role ?? defaultColRole(c);
+  switch (role) {
+    case 'pick': return logPickCell(i, c);
+    case 'time': return logTimeCell(i, c);
+    case 'date': return logDateCell(i, c);
+    case 'counter': return logCounterCell(i, c);
+    case 'sps': return logSpsCell(i, c);
+    default: return logPlainCell(i, c);
+  }
+}
+
+/** Read the current cell value as a display string. */
+function logCellStr(i: number, key: string): string {
+  const raw = logRows[i]?.[key];
+  return raw == null ? '' : String(raw);
+}
+
+/** Commit a string value into a cell, coercing to number when the column is numeric.
+ *  When the edited cell is a Shot point / Source line DRIVER, kick off a live SPS
+ *  lookup that auto-fills the row's other sps-role columns (no-op without SPS). */
+function commitLogCell(i: number, c: LogColumn, v: string): void {
+  const isNum = c.type === 'number' || c.role === 'counter';
+  logRows[i][c.key] = isNum && v.trim() !== '' && isFinite(Number(v)) ? Number(v) : v;
+  saveLog();
+  if (isSpsDriverColumn(c)) void liveSpsLookup(i);
+}
+
+/** Whether editing column `c` should trigger a live SPS row lookup (it carries the
+ *  shot-point or source-line that drives the match). */
+function isSpsDriverColumn(c: LogColumn): boolean {
+  if (c.key === 'shotPoint' || c.key === 'srcLine') return true;
+  return c.role === 'sps' && (c.srcField === 'point' || c.srcField === 'lineName');
+}
+
+/** Run the live SPS auto-fill for row `i`, re-rendering + persisting if it changed
+ *  anything. Silently no-ops when there are no sps columns / no SPS loaded. */
+async function liveSpsLookup(i: number): Promise<void> {
+  if (!spsLinkAvailable()) return;
+  try {
+    if (await autoFillSpsRow(i)) { saveLog(); renderLog(); }
+  } catch { /* ignore lookup failure */ }
+}
+
+/** Copy-on-Ctrl+C for a plain/number input (matches the original cell behaviour). */
+function wireCellCopy(inp: HTMLInputElement): void {
+  inp.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C') && inp.selectionStart === inp.selectionEnd) {
+      void navigator.clipboard?.writeText(inp.value).catch(() => { /* ignore */ });
+    }
+  });
+}
+
+/** A bare cell wrapper that lays an input next to an optional inline button. */
+function cellWithButton(inp: HTMLElement, btn?: HTMLElement): HTMLTableCellElement {
+  const td = document.createElement('td');
+  if (btn) {
+    const wrap = document.createElement('div');
+    wrap.className = 'olog-cell-wrap';
+    wrap.append(inp, btn);
+    td.appendChild(wrap);
+  } else {
+    td.appendChild(inp);
+  }
+  return td;
+}
+
+/** A small inline cell button (e.g. 'Now' / 'Today' / 'SPS'). */
+function cellBtn(label: string, title: string, fn: () => void): HTMLButtonElement {
+  const b = document.createElement('button');
+  b.type = 'button'; b.className = 'olog-cell-btn'; b.textContent = label; b.title = title;
+  b.addEventListener('click', fn);
+  return b;
+}
+
+/** 'plain' role — text/number input (the original default behaviour). */
+function logPlainCell(i: number, c: LogColumn): HTMLTableCellElement {
+  const inp = document.createElement('input');
+  inp.className = 'olog-cell' + (c.type === 'number' ? ' num' : '');
+  inp.type = c.type === 'number' ? 'number' : 'text';
+  inp.value = logCellStr(i, c.key);
+  inp.addEventListener('change', () => commitLogCell(i, c, inp.value));
+  wireCellCopy(inp);
+  return cellWithButton(inp);
+}
+
+/** 'counter' role — number input. Auto-increment (prev+step) on add-row is an
+ *  OPT-IN per-column flag honoured in addLogRow; the cell itself is a plain number. */
+function logCounterCell(i: number, c: LogColumn): HTMLTableCellElement {
+  const inp = document.createElement('input');
+  inp.className = 'olog-cell num';
+  inp.type = 'number';
+  if (c.step != null && isFinite(c.step)) inp.step = String(c.step);
+  inp.value = logCellStr(i, c.key);
+  if (c.autoInc) inp.title = `Auto-increment (+${c.step ?? 1}) on new row`;
+  inp.addEventListener('change', () => commitLogCell(i, c, inp.value));
+  wireCellCopy(inp);
+  return cellWithButton(inp);
+}
+
+/** 'time' role — time input + a 'Now' button stamping HH:MM:SS from the (NTP-
+ *  corrected) computer clock. */
+function logTimeCell(i: number, c: LogColumn): HTMLTableCellElement {
+  const inp = document.createElement('input');
+  inp.className = 'olog-cell';
+  inp.type = 'time'; inp.step = '1';     // seconds resolution
+  inp.value = logCellStr(i, c.key);
+  inp.addEventListener('change', () => commitLogCell(i, c, inp.value));
+  const btn = cellBtn('Now', `Stamp the current time (${logTimeSource === 'ntp' ? 'NTP-corrected' : 'PC clock'})`, () => {
+    inp.value = nowTimeStr();
+    commitLogCell(i, c, inp.value);
+  });
+  return cellWithButton(inp, btn);
+}
+
+/** 'date' role — date input + a 'Today' button. */
+function logDateCell(i: number, c: LogColumn): HTMLTableCellElement {
+  const inp = document.createElement('input');
+  inp.className = 'olog-cell';
+  inp.type = 'date';
+  inp.value = logCellStr(i, c.key);
+  inp.addEventListener('change', () => commitLogCell(i, c, inp.value));
+  const btn = cellBtn('Today', 'Set to today', () => {
+    inp.value = todayDateStr();
+    commitLogCell(i, c, inp.value);
+  });
+  return cellWithButton(inp, btn);
+}
+
+/** 'pick' role — <select> of the column's options (Status keeps its vocabulary
+ *  + colour coding). */
+function logPickCell(i: number, c: LogColumn): HTMLTableCellElement {
+  const td = document.createElement('td');
+  const val = logCellStr(i, c.key);
+  const sel = document.createElement('select');
+  const isStatus = c.key === 'status';
+  sel.className = 'olog-cell' + (isStatus ? ' olog-status-cell' : '');
+  const opts = c.options ?? [];
+  for (const opt of opts) {
+    const o = document.createElement('option'); o.value = opt; o.textContent = opt;
+    if (opt === val) o.selected = true;
+    sel.appendChild(o);
+  }
+  if (isStatus) applyStatusClass(sel, val || (opts[0] ?? ''));
+  sel.addEventListener('change', () => {
+    logRows[i][c.key] = sel.value;
+    if (isStatus) applyStatusClass(sel, sel.value);
+    saveLog();
+  });
+  td.appendChild(sel);
+  return td;
+}
+
+/** 'sps' role — editable input plus an 'SPS' lookup affordance. The live lookup
+ *  is wired by the backend agent via setSpsLookupHook; until then the button is
+ *  disabled and the cell behaves as a plain editable input. */
+function logSpsCell(i: number, c: LogColumn): HTMLTableCellElement {
+  const inp = document.createElement('input');
+  inp.className = 'olog-cell' + (c.type === 'number' ? ' num' : '');
+  inp.type = c.type === 'number' ? 'number' : 'text';
+  inp.value = logCellStr(i, c.key);
+  inp.addEventListener('change', () => commitLogCell(i, c, inp.value));
+  wireCellCopy(inp);
+  const btn = cellBtn('SPS', `Look up ${c.srcField ?? 'value'} from the loaded SPS survey`, () => {
+    if (!spsLookupHook) return;
+    void spsLookupHook(logRows[i], c).then((v) => {
+      if (v == null) return;
+      inp.value = String(v);
+      logRows[i][c.key] = v;
+      saveLog();
+    }).catch(() => { /* ignore lookup failure */ });
+  });
+  btn.disabled = !spsLookupHook || !spsLinkAvailable();  // needs the hook + a loaded survey
+  return cellWithButton(inp, btn);
 }
 
 function rowBtn(label: string, title: string, fn: () => void): HTMLButtonElement {
@@ -4224,9 +5051,20 @@ function applyStatusClass(el: HTMLElement, val: string) {
   else if (v === 're-shoot' || v === 'skip') el.classList.add('s-reshoot');
 }
 
-/** Append a fresh blank record + re-render. */
+/** Append a fresh record + re-render. Counter columns with auto-increment ENABLED
+ *  (the per-column opt-in flag, default OFF) pre-fill prev+step from the last row. */
 function addLogRow() {
-  logRows.push(blankLogRow());
+  const r = blankLogRow();
+  const prev = logRows.length ? logRows[logRows.length - 1] : null;
+  if (prev) {
+    for (const c of logColumns) {
+      if (c.role !== 'counter' || !c.autoInc) continue;
+      const base = num(prev[c.key]);
+      if (base == null) continue;           // nothing to count from → leave blank
+      r[c.key] = base + (c.step ?? 1);
+    }
+  }
+  logRows.push(r);
   saveLog();
   renderLog();
   updateHeaderClear();
@@ -4252,6 +5090,101 @@ function initObsLog() {
   $opt('ologReconfigBtn')?.addEventListener('click', () => { openLogWizard(); });
   $opt('ologSaveBtn')?.addEventListener('click', () => void saveLogJson());
   $opt('ologReloadBtn')?.addEventListener('click', () => void reloadLogJson());
+  // Columns Manager (edit columns anytime, not just in the wizard).
+  $opt('ologColsBtn')?.addEventListener('click', openColumnsManager);
+  $opt('ologColMgrClose')?.addEventListener('click', closeColumnsManager);
+  $opt('ologColMgrBack')?.addEventListener('click', (e) => { if (e.target === $opt('ologColMgrBack')) closeColumnsManager(); });
+  $opt('ologColMgrAdd')?.addEventListener('click', colMgrAdd);
+  $opt('ologColMgrApply')?.addEventListener('click', applyColumnsManager);
+  $opt('ologColMgrCancel')?.addEventListener('click', closeColumnsManager);
+  // Templates (save / load / delete / export / import named configurations).
+  refreshTemplateSelect();
+  $opt('ologTplSelect')?.addEventListener('change', refreshTemplateSelect);
+  $opt('ologTplSave')?.addEventListener('click', saveCurrentTemplate);
+  $opt('ologTplLoad')?.addEventListener('click', loadSelectedTemplate);
+  $opt('ologTplDelete')?.addEventListener('click', deleteSelectedTemplate);
+  $opt('ologTplExport')?.addEventListener('click', () => void exportSelectedTemplate());
+  $opt('ologTplImport')?.addEventListener('click', () => void importTemplateJson());
+  // SPS link: bulk 'Import sources from SPS' (live lookup is wired via the hook).
+  $opt('ologSpsImportBtn')?.addEventListener('click', () => void importRowsFromSps());
+  installSpsLookupHook();
+  // Time-source control (PC clock | NTP + server + Sync).
+  initLogTimeSource();
+}
+
+/** Enable/disable the SPS-link controls based on whether a survey is loaded.
+ *  Called whenever the grid re-renders so the toolbar tracks the SPS state. */
+function syncSpsLinkUI(): void {
+  const btn = $opt('ologSpsImportBtn') as HTMLButtonElement | null;
+  if (btn) {
+    btn.disabled = !spsLinkAvailable();
+    btn.title = spsLinkAvailable()
+      ? 'Create one row per source point in the loaded SPS survey'
+      : 'Load an SPS survey (SPS tab) to enable source import';
+  }
+}
+
+// ── Observer Log v2: time-source toolbar (PC clock | NTP) ──
+/** Reflect the current time-source choice into the toolbar buttons / inputs. */
+function syncTimeSrcUI() {
+  $opt('ologTsPc')?.classList.toggle('on', logTimeSource === 'pc');
+  $opt('ologTsNtp')?.classList.toggle('on', logTimeSource === 'ntp');
+  const ctl = $opt('ologNtpControls');
+  if (ctl) ctl.style.display = logTimeSource === 'ntp' ? '' : 'none';
+  const srv = $opt('ologNtpServer') as HTMLInputElement | null;
+  if (srv && srv.value !== logNtpServer) srv.value = logNtpServer;
+}
+/** Show the synced offset (e.g. '+0.42 s') or an error in the toolbar. */
+function setNtpOffsetLabel(text: string, kind: '' | 'ok' | 'err') {
+  const el = $opt('ologNtpOffset');
+  if (!el) return;
+  el.textContent = text;
+  el.className = 'ots-offset' + (kind ? ' ' + kind : '');
+}
+function setTimeSource(src: LogTimeSource) {
+  logTimeSource = src;
+  syncTimeSrcUI();
+  saveLog();
+}
+/** Query the configured NTP server, store the offset, and report it. */
+async function syncNtp() {
+  const srv = $opt('ologNtpServer') as HTMLInputElement | null;
+  const server = (srv?.value.trim() || 'pool.ntp.org');
+  logNtpServer = server;
+  saveLog();
+  if (!api?.ntpSync) { setNtpOffsetLabel('unavailable', 'err'); return; }
+  setNtpOffsetLabel('syncing…', '');
+  const syncBtn = $opt('ologNtpSync') as HTMLButtonElement | null;
+  if (syncBtn) syncBtn.disabled = true;
+  try {
+    const r = await api.ntpSync(server);
+    if (r?.ok && typeof r.offsetMs === 'number') {
+      logNtpOffsetMs = r.offsetMs;
+      logNtpSynced = true;
+      const sec = r.offsetMs / 1000;
+      setNtpOffsetLabel(`${sec >= 0 ? '+' : ''}${sec.toFixed(2)} s`, 'ok');
+    } else {
+      logNtpSynced = false;
+      setNtpOffsetLabel(r?.error ? `error: ${r.error}` : 'sync failed', 'err');
+    }
+  } catch (e) {
+    logNtpSynced = false;
+    setNtpOffsetLabel(`error: ${(e as Error)?.message ?? 'sync failed'}`, 'err');
+  } finally {
+    if (syncBtn) syncBtn.disabled = false;
+  }
+}
+function initLogTimeSource() {
+  $opt('ologTsPc')?.addEventListener('click', () => setTimeSource('pc'));
+  $opt('ologTsNtp')?.addEventListener('click', () => setTimeSource('ntp'));
+  const srv = $opt('ologNtpServer') as HTMLInputElement | null;
+  if (srv) {
+    srv.value = logNtpServer;
+    srv.addEventListener('change', () => { logNtpServer = srv.value.trim() || 'pool.ntp.org'; saveLog(); });
+    srv.addEventListener('keydown', (e) => { if ((e as KeyboardEvent).key === 'Enter') { e.preventDefault(); void syncNtp(); } });
+  }
+  $opt('ologNtpSync')?.addEventListener('click', () => void syncNtp());
+  syncTimeSrcUI();
 }
 
 // Wire the custom window-control buttons (frameless window) to the main process
