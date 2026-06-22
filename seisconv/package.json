@@ -15,6 +15,7 @@
     "start": "npm run build && electron .",
     "test:core": "tsx core/__tests__/run.ts",
     "qc:realdata": "tsx scripts/realdata-qc.ts",
+    "qa": "node qa/drive.mjs",
     "typecheck": "tsc --noEmit",
     "dist": "npm run build && electron-builder"
   },
@@ -28,6 +29,7 @@
     "electron": "^33.0.0",
     "electron-builder": "^25.0.0",
     "esbuild": "^0.24.0",
+    "playwright": "^1.61.0",
     "png-to-ico": "^3.0.1",
     "tsx": "^4.19.2",
     "typescript": "^5.6.0"

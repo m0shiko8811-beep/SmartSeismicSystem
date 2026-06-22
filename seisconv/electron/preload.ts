@@ -20,6 +20,7 @@ export interface ParseSummary {
   traceCount: number;
   samplesTrace: number | null;
   sampleInt: number | null;
+  byteOrder: string;
   errors: string[];
   /** 0-based position of this file among its seismic siblings (open file's folder). */
   index: number;

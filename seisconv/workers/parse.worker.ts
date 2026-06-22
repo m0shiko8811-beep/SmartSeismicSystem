@@ -62,12 +62,22 @@ interface Req {
 }
 
 function summarize(pf: ParsedFile) {
+  // Byte order for the File-summary panel: SEG-Y / SU carry a DETECTED `littleEndian`
+  // flag (auto-detection); SEG-2 is little-endian by spec, SEG-D big-endian by spec.
+  const f = (pf.format || '').toUpperCase();
+  const le = pf.bh.littleEndian;
+  const byteOrder =
+    f.includes('SEG-Y') || f === 'SU' ? (le ? 'little-endian' : 'big-endian')
+      : f.includes('SEG-2') ? 'little-endian'
+        : f.includes('SEG-D') ? 'big-endian'
+          : '—';
   return {
     format: pf.format,
     revision: pf.revision,
     traceCount: pf.traceCount,
     samplesTrace: pf.bh.samplesTrace ?? pf.traces[0]?.nSamples ?? null,
     sampleInt: pf.bh.sampleInt ?? null,
+    byteOrder,
     errors: pf.errors,
   };
 }

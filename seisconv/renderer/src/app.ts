@@ -22,6 +22,7 @@ type Summary = {
   traceCount: number;
   samplesTrace: number | null;
   sampleInt: number | null;
+  byteOrder: string;
   errors: string[];
   // Sibling-file navigation (open file's folder): 0-based index, total count,
   // and edge flags. Present on every open/openSiblingFile result.
@@ -429,7 +430,7 @@ function renderSummaryPanel() {
   setText('fsRecord', recMs != null ? `${recMs.toFixed(3)} s` : '—');
   setText('fsData', s.format || '—');
   setText('fsRevision', s.revision ? `Rev ${s.revision}` : '—');
-  setText('fsByteOrder', /seg-?y/i.test(s.format) ? 'big-endian' : '—');
+  setText('fsByteOrder', s.byteOrder || '—');
   setText('fsCrs', spsCrsLabel());
 }
 function clearSummaryPanel() {
