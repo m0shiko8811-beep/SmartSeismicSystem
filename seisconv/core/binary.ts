@@ -33,19 +33,29 @@ export function asciiPrintable(b: Bytes): string {
     .join('');
 }
 
-// ─────────────────────── integer reads (big-endian) ───────────────────────
+// ─────────────────────── integer reads (big-endian default) ───────────────────────
+//
+// Big-endian by default (SEG-Y/SEG-D/SU read BE). Pass `le=true` to read the
+// same bytes little-endian — used by the SEG-Y parser once it has auto-detected
+// a little-endian file. The default keeps every existing caller bit-identical.
 
-export const r16s = (b: Bytes, o: number): number => {
-  const v = (b[o] << 8) | b[o + 1];
+export const r16s = (b: Bytes, o: number, le = false): number => {
+  const v = le ? b[o] | (b[o + 1] << 8) : (b[o] << 8) | b[o + 1];
   return v > 32767 ? v - 65536 : v;
 };
-export const r16u = (b: Bytes, o: number): number => (b[o] << 8) | b[o + 1];
-export const r32s = (b: Bytes, o: number): number => {
-  const v = ((b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]) >>> 0;
+export const r16u = (b: Bytes, o: number, le = false): number =>
+  le ? b[o] | (b[o + 1] << 8) : (b[o] << 8) | b[o + 1];
+export const r32s = (b: Bytes, o: number, le = false): number => {
+  const v =
+    (le
+      ? b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)
+      : (b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]) >>> 0;
   return v > 2147483647 ? v - 4294967296 : v;
 };
-export const r32u = (b: Bytes, o: number): number =>
-  ((b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]) >>> 0;
+export const r32u = (b: Bytes, o: number, le = false): number =>
+  (le
+    ? b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)
+    : (b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]) >>> 0;
 
 // ─────────────────────── integer writes (big-endian) ───────────────────────
 
