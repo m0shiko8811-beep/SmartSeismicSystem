@@ -229,10 +229,12 @@ html[data-theme="dark"] .win-controls .wc-close:hover{ background:#e81123; color
 /* ghost / chip variants of the legacy .btn.ghost used by some controls */
 .btn.ghost{background:var(--card);color:var(--ink-2);border:1px solid var(--hair);}
 .btn.ghost:hover{border-color:var(--teal);color:var(--teal-deep);}
-.btn.ghost.sel{
+.btn.ghost.sel,
+.btn.on{
   border-color:var(--teal);background:var(--teal-tint);color:var(--teal-deep);
   box-shadow:0 0 0 3px rgba(15,179,171,.14);
 }
+.btn.on:hover{color:var(--teal-deep);}
 
 /* -------- Left icon rail (carries tab-* ids) -------- */
 .rail{
@@ -1027,6 +1029,7 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
             <button class="segbtn" id="traceZoomFit" title="Fit / reset time zoom">Fit</button>
             <button class="segbtn" id="traceZoomIn" title="Zoom in (time)">+</button>
           </span>
+          <button class="btn sm" id="traceToWb" title="Add the current trace to the Trace Workbench">Add to Workbench</button>
           <span class="trace-label" id="traceLabel">Open a file to inspect traces</span>
         </div>
         <canvas id="traceCanvas" class="canvas"></canvas>
@@ -1078,6 +1081,7 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
             <button class="segbtn" id="secZoomFit" title="Fit / reset data zoom">Fit</button>
             <button class="segbtn" id="secZoomIn" title="Zoom in (data)">+</button>
           </span>
+          <button class="btn sm" id="secToWb" title="Toggle, then click a trace on the section to add it to the Trace Workbench">+ Workbench</button>
           <span class="trace-label" id="secLabel">Open a file to view the section</span>
         </div>
         <canvas id="secCanvas" class="canvas"></canvas>

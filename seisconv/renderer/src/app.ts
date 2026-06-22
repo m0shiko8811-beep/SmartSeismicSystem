@@ -247,6 +247,9 @@ let lastSection: SectionData | null = null;
 // caches the record extent for clamping; init=false ⇒ "fit whole record".
 const secView = { t0: 0, t1: 0, s0: 0, s1: 0, fullT: 0, fullS: 0, init: false };
 let secFetchPending = false; // coalesce rapid wheel/drag re-fetches
+// File Viewer "click-to-add" mode: when on, a (non-drag) click on the section
+// canvas sends the trace under the cursor to the Trace Workbench (#secToWb toggle).
+let secToWb = false;
 let spsSummary: SpsSummary | null = null;
 let spsGeom: SpsGeometry | null = null;
 // X-ref spider (shot→receiver segments). Cached like spsGeom; cleared when the
@@ -1515,10 +1518,33 @@ function secZoomButton(factor: number) {
   void fetchSectionWindow();
 }
 
-/** Attach wheel-zoom / drag-pan / double-click-fit to the section canvas (once). */
+/** Map a (non-drag) click on the section canvas to an absolute trace index in the
+ *  open file and send that trace to the Trace Workbench. Reuses the shared add
+ *  path (wbAddTrace) so the new trace lands in the same wbTraces the Workbench
+ *  tab renders/analyses/exports. Does NOT switch tabs. */
+async function secAddTraceFromClick(cv: HTMLCanvasElement, e: MouseEvent) {
+  if (!summary || summary.traceCount === 0) return;
+  const { fx } = secPlotFrac(cv, e);
+  // Fractional x across the visible window → absolute trace index in the file.
+  const idx = Math.round(secView.t0 + fx * (secView.t1 - secView.t0));
+  const index = Math.max(0, Math.min(summary.traceCount - 1, idx));
+  try {
+    $('secLabel').textContent = `Adding trace ${index + 1} to Workbench…`;
+    const tr = await api.getTrace(index); // the open file is the active 'current' file
+    wbAddTrace(`${summary.name} #${index + 1}`, index, tr.samples.slice(), tr.sampleInt, tr.nSamples);
+    $('secLabel').textContent = `Added trace ${index + 1} to Workbench`;
+  } catch (err) {
+    $('secLabel').textContent = 'Add to Workbench failed: ' + errMsg(err);
+  }
+}
+
+/** Attach wheel-zoom / drag-pan / double-click-fit / click-to-add to the section canvas (once). */
 function sectionInteractions() {
   const cv = $('secCanvas') as HTMLCanvasElement;
   let dragging = false, lx = 0, ly = 0;
+  // Click-vs-drag guard (mirrors the SPS grid canvas): a click that moved the
+  // cursor more than a few pixels is treated as a pan, not an add.
+  let downX = 0, downY = 0, moved = 0;
   cv.addEventListener('wheel', (e) => {
     if ($('panel-section').style.display === 'none' || !summary || summary.traceCount === 0) return;
     e.preventDefault();
@@ -1528,11 +1554,14 @@ function sectionInteractions() {
   }, { passive: false });
   cv.addEventListener('mousedown', (e) => {
     if ($('panel-section').style.display === 'none' || !summary) return;
-    dragging = true; lx = e.clientX; ly = e.clientY; cv.style.cursor = 'grabbing';
+    dragging = true; lx = e.clientX; ly = e.clientY;
+    downX = e.clientX; downY = e.clientY; moved = 0;
+    cv.style.cursor = 'grabbing';
   });
   window.addEventListener('mouseup', () => { dragging = false; cv.style.cursor = ''; });
   cv.addEventListener('mousemove', (e) => {
     if (!dragging || !secView.init) return;
+    moved += Math.abs(e.clientX - lx) + Math.abs(e.clientY - ly);
     const W = cv.clientWidth || 900, H = cv.clientHeight || 500;
     const pw = W - SEC_ML - SEC_MR, ph = H - SEC_MT - SEC_MB;
     // Pixel drag → index drag (drag right ⇒ window moves left, like grabbing the image).
@@ -1543,6 +1572,14 @@ function sectionInteractions() {
     lx = e.clientX; ly = e.clientY;
     void fetchSectionWindow();
   });
+  // A click (press + release without a real drag) adds the trace under the cursor
+  // when the "+ Workbench" toggle is active; otherwise it behaves as today (no-op).
+  cv.addEventListener('click', (e) => {
+    if ($('panel-section').style.display === 'none' || !summary || summary.traceCount === 0) return;
+    if (!secToWb) return;
+    if (moved > 4 || Math.abs(e.clientX - downX) + Math.abs(e.clientY - downY) > 4) return; // a pan, not a click
+    void secAddTraceFromClick(cv, e);
+  });
   cv.addEventListener('dblclick', () => {
     if ($('panel-section').style.display === 'none' || !summary) return;
     secFit(); void fetchSectionWindow();
@@ -1551,6 +1588,15 @@ function sectionInteractions() {
   $opt('secZoomIn')?.addEventListener('click', () => secZoomButton(1 / 1.4));
   $opt('secZoomOut')?.addEventListener('click', () => secZoomButton(1.4));
   $opt('secZoomFit')?.addEventListener('click', () => { secFit(); void fetchSectionWindow(); });
+  // "+ Workbench" toggle: arm/disarm click-to-add on the section canvas.
+  const wbToggle = $opt('secToWb') as HTMLButtonElement | null;
+  wbToggle?.addEventListener('click', () => {
+    secToWb = !secToWb;
+    wbToggle.classList.toggle('on', secToWb);
+    wbToggle.textContent = secToWb ? 'Send to Workbench' : '+ Workbench';
+    cv.style.cursor = secToWb ? 'copy' : '';
+    $('secLabel').textContent = secToWb ? 'Click a trace to add it to the Workbench' : '';
+  });
 }
 
 // ── Trace Inspector time-axis zoom / pan (renderer-only) ──
@@ -3212,6 +3258,12 @@ function init() {
   });
   $('traceWave').addEventListener('click', () => setTraceMode('wave'));
   $('traceSpec').addEventListener('click', () => setTraceMode('spectrum'));
+  // Trace Inspector: add the current trace to the Trace Workbench (shared add path).
+  $opt('traceToWb')?.addEventListener('click', () => {
+    if (!summary || !lastTrace) { $('traceLabel').textContent = 'Open a file and pick a trace first.'; return; }
+    wbAddTrace(`${summary.name} #${lastTrace.index + 1}`, lastTrace.index, lastTrace.samples.slice(), lastTrace.sampleInt, lastTrace.nSamples);
+    $('traceLabel').textContent = `Added trace ${lastTrace.index + 1} to Workbench`;
+  });
   traceInteractions(); // wheel-zoom / drag-pan / dblclick-fit + toolbar on the trace TIME axis
   for (const id of ['secMode', 'secColor']) ($(id) as HTMLSelectElement).addEventListener('change', redrawSection);
   ($('secGain') as HTMLInputElement).addEventListener('input', redrawSection);
