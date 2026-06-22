@@ -10,7 +10,7 @@
 import { parentPort } from 'node:worker_threads';
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
-import { applyAGC, averageSpectrum, computeSemblance, crsFromSpec, detectSPSType, EPSG_DB, fkSpectrum, generateProjHeaders, getWriter, groupByLine, hRecCode, mergeSPSData, nextPow2, normFactorPercentile, parseAny, parseSPSText, projToLatLon, PROJ_HEADER_CODES, reprojectSPS, resampleLinear, runSPSQC, spectrogram, spsHeaderDesc, type AGCType, type CRSSpec, type ParsedFile, type QCParams, type SPSData, type SPSHeader, type SPSPoint } from '../core';
+import { applyAGC, averageSpectrum, buildPositioningExport, computeSemblance, crsFromSpec, detectPositioningFormat, detectSPSType, EPSG_DB, fkSpectrum, generateProjHeaders, getWriter, groupByLine, hRecCode, mergeSPSData, nextPow2, normFactorPercentile, parseAny, parsePositioning, parseSPSText, projToLatLon, PROJ_HEADER_CODES, reprojectSPS, resampleLinear, runSPSQC, spectrogram, spsHeaderDesc, type AGCType, type BinGrid, type CRSSpec, type ParsedFile, type QCParams, type SPSData, type SPSHeader, type SPSPoint } from '../core';
 
 if (!parentPort) throw new Error('parse.worker must run as a worker thread');
 const port = parentPort;
@@ -18,10 +18,13 @@ const port = parentPort;
 let current: ParsedFile | null = null;
 let currentSPS: SPSData | null = null;
 let currentSPSFiles: { name: string; text: string; type: 'S' | 'R' | 'X' | 'mixed' }[] = [];
+// A P6/11 bin grid loaded alongside (or instead of) the point survey. Held
+// separately from currentSPS since it is a grid, not a list of S/R points.
+let currentBinGrid: BinGrid | null = null;
 
 interface Req {
   id: number;
-  type: 'open' | 'trace' | 'extractTrace' | 'section' | 'convert' | 'convertPath' | 'convertTraces' | 'reset' | 'openSPS' | 'spsClear' | 'spsGeometry' | 'spsXrefLines' | 'spsFold' | 'spsQC' | 'spsPointDetail' | 'spsSourceList' | 'spsReproject' | 'spsExport' | 'spsHeaderList' | 'spsApplyHeaders' | 'spsSaveCorrected' | 'semblance' | 'avgSpectrum' | 'spectrogram' | 'fk';
+  type: 'open' | 'trace' | 'extractTrace' | 'section' | 'convert' | 'convertPath' | 'convertTraces' | 'reset' | 'openSPS' | 'spsClear' | 'binGrid' | 'spsGeometry' | 'spsXrefLines' | 'spsFold' | 'spsQC' | 'spsPointDetail' | 'spsSourceList' | 'spsReproject' | 'spsExport' | 'spsHeaderList' | 'spsApplyHeaders' | 'spsSaveCorrected' | 'semblance' | 'avgSpectrum' | 'spectrogram' | 'fk';
   path?: string;
   // spsApplyHeaders: scope ('shared' = all loaded files, else a file name) + the
   // edit/add/remove batch and an optional CRS rewrite. Mirrors the IPC contract.
@@ -37,7 +40,8 @@ interface Req {
   qc?: QCParams;
   code?: string;
   // spsExport: which artifact to produce + optional QC params for the QC report.
-  kind?: 'kml' | 'geojson' | 'csv' | 'qcreport';
+  // 'p111' / 'coordcsv' re-serialize the point survey via buildPositioningExport.
+  kind?: 'kml' | 'geojson' | 'csv' | 'qcreport' | 'p111' | 'coordcsv';
   qcParams?: QCParams;
   // spsPointDetail lookup key: pick the matching S/R point by line + point (+ idx).
   rtype?: 'S' | 'R';
@@ -96,6 +100,18 @@ function summarize(pf: ParsedFile) {
     byteOrder,
     errors: pf.errors,
   };
+}
+
+/** Map a detectPositioningFormat id to a short human label for the stats badge. */
+function fmtLabel(id: string): string {
+  switch (id) {
+    case 'sps': return 'SPS';
+    case 'segp1': return 'SEG-P1';
+    case 'p111': return 'P1/11';
+    case 'p611': return 'P6/11';
+    case 'coordcsv': return 'Coord CSV';
+    default: return id.toUpperCase();
+  }
 }
 
 // ── SPS exports (CSV / GeoJSON / KML / QC-report) ──
@@ -339,8 +355,8 @@ function applyHeaderEditsToText(
   // code+value, not code alone — without it, two records sharing a code (e.g. two
   // H22x lines with different content) would all be rewritten/dropped together.
   // Keys: `code` for the code-only entries (back-compat: Admin/CRS upserts, adds
-  // reconcile) and `code oldVal` for the value-discriminated ones.
-  const SEP = ' ';
+  // reconcile) and `code oldVal` for the value-discriminated ones.
+  const SEP = ' ';
   const editByCode = new Map<string, string>();
   const editByCodeVal = new Map<string, string>();
   for (const e of edits || []) {
@@ -437,11 +453,14 @@ function spsFilesDiffer(files: { name: string; text: string }[]): boolean {
   return false;
 }
 
-function buildSPSExport(d: SPSData, kind: 'kml' | 'geojson' | 'csv' | 'qcreport', qcParams: QCParams): { ok: boolean; files: { name: string; text: string }[]; error?: string } {
+function buildSPSExport(d: SPSData, kind: 'kml' | 'geojson' | 'csv' | 'qcreport' | 'p111' | 'coordcsv', qcParams: QCParams): { ok: boolean; files: { name: string; text: string }[]; error?: string } {
   if (kind === 'csv') return { ok: true, files: buildSPSCsv(d) };
   if (kind === 'geojson') return { ok: true, files: buildSPSGeoJSON(d) };
   if (kind === 'kml') return buildSPSKml(d);
   if (kind === 'qcreport') return { ok: true, files: buildSPSQCReport(d, qcParams) };
+  // Positioning-format re-serialization (P1/11, coordinate CSV) lives in
+  // core/sps/formats — dispatch through the single buildPositioningExport door.
+  if (kind === 'p111' || kind === 'coordcsv') return { ok: true, files: buildPositioningExport(kind, d) };
   return { ok: false, files: [], error: `unknown export kind: ${kind}` };
 }
 
@@ -459,6 +478,7 @@ port.on('message', (req: Req) => {
       current = null;
       currentSPS = null;
       currentSPSFiles = [];
+      currentBinGrid = null;
       port.postMessage({ id, ok: true });
       return;
     }
@@ -470,7 +490,15 @@ port.on('message', (req: Req) => {
     if (type === 'spsClear') {
       currentSPS = null;
       currentSPSFiles = [];
+      currentBinGrid = null;
       port.postMessage({ id, ok: true });
+      return;
+    }
+
+    // Return the loaded P6/11 bin grid (or null when none is loaded). The grid is
+    // populated by openSPS when a positioning file resolves to kind:'bingrid'.
+    if (type === 'binGrid') {
+      port.postMessage({ id, ok: true, grid: currentBinGrid });
       return;
     }
 
@@ -493,18 +521,38 @@ port.on('message', (req: Req) => {
       // replacing it. Seed `merged` from whatever's already loaded so a 2nd/3rd
       // Load adds its stations to the existing survey, and APPEND to
       // currentSPSFiles (never reset) so reproject/export see every loaded file.
+      //
+      // Every file is now routed through the positioning-format dispatch: the
+      // format is detected per file (extension-first, then content) and parsed.
+      // A point format (sps / segp1 / p111 / coordcsv) merges into currentSPS
+      // exactly as before — the 'sps' path stays byte-identical, since detect
+      // defaults to 'sps' and parsePositioning('sps') calls parseSPSText. A
+      // bin-grid format (p611) populates currentBinGrid instead of the point list.
       let merged: SPSData | null = currentSPS;
+      let lastGrid: BinGrid | null = null;
+      // Collect the distinct positioning formats touched THIS call so the renderer
+      // can badge what was loaded (e.g. "SPS · P1/11", "P6/11"). Order-preserving.
+      const fmtsSeen: string[] = [];
       for (const p of req.paths ?? []) {
         const text = readFileSync(p, 'utf8');
         const name = basename(p);
+        const fmt = detectPositioningFormat(name, text);
+        if (!fmtsSeen.includes(fmt)) fmtsSeen.push(fmt);
+        const parsed = parsePositioning(fmt, text);
+        if (parsed.kind === 'bingrid') {
+          // Bin grids are not point files: store the latest one and skip the
+          // currentSPSFiles point-list (reproject/header-edit don't apply to it).
+          currentBinGrid = parsed.grid;
+          lastGrid = parsed.grid;
+          continue;
+        }
         // Skip a file that's already loaded with identical content: re-loading the
         // same set would otherwise add duplicate scope-selector entries and make
         // spsSaveCorrected zip two files with the same name. Point dedup in
         // mergeSPSData already collapses the stations, but the file list does not.
         if (currentSPSFiles.some((f) => f.name === name && f.text === text)) continue;
         currentSPSFiles.push({ name, text, type: detectSPSType(name, text) });
-        const sps = parseSPSText(text);
-        merged = merged ? mergeSPSData(merged, sps) : sps;
+        merged = merged ? mergeSPSData(merged, parsed.data) : parsed.data;
       }
       currentSPS = merged;
       port.postMessage({
@@ -517,6 +565,14 @@ port.on('message', (req: Req) => {
           layout: merged?.layout ?? null,
           projection: merged?.projection ?? null,
           errors: merged?.errors ?? [],
+          // Distinct positioning format(s) detected this Load, as display labels —
+          // the SPS stats bar badges them so the user sees what was ingested.
+          formats: fmtsSeen.map(fmtLabel),
+          // Present only when a bin grid was loaded this call, so the renderer can
+          // surface a P6/11 grid summary alongside (or instead of) the points.
+          binGrid: lastGrid
+            ? { nInline: lastGrid.nInline, nCrossline: lastGrid.nCrossline, originE: lastGrid.originE, originN: lastGrid.originN, binI: lastGrid.binI, binJ: lastGrid.binJ, inlineAzimuth: lastGrid.inlineAzimuth }
+            : null,
         },
       });
       return;

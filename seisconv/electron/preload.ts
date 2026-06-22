@@ -130,6 +130,30 @@ export interface SPSSummary {
   layout: string | null;
   projection: { type: string | null; subtype: string | null; desc?: string; latOrigin?: number | null; zone?: number | null } | null;
   errors: string[];
+  /** Distinct positioning format label(s) detected this Load (e.g. ['SPS','P1/11']). */
+  formats?: string[];
+  /** Brief P6/11 bin-grid summary when a grid was loaded this Load (else null). */
+  binGrid?: { nInline: number; nCrossline: number; originE: number; originN: number; binI: number; binJ: number; inlineAzimuth: number } | null;
+}
+
+/** A P6/11 acquisition bin grid in projected (E/N) space, as returned by `binGrid()`.
+ *  Mirrors core/sps/bingrid.ts BinGrid (the QC overlay reads origin/azimuth/corners). */
+export interface BinGridInfo {
+  name?: string;
+  crs?: SPSSummary['projection'] | null;
+  originE: number;
+  originN: number;
+  binI: number;
+  binJ: number;
+  nInline: number;
+  nCrossline: number;
+  inlineAzimuth: number;
+  firstInline: number;
+  firstCrossline: number;
+  incInline: number;
+  incCrossline: number;
+  corners?: { e: number; n: number }[];
+  raw: string[];
 }
 
 export interface SpsLines {
@@ -418,6 +442,8 @@ const api = {
   openSPS: (): Promise<SPSSummary | null> => ipcRenderer.invoke('seisconv:openSPS'),
   /** Clear ONLY the loaded SPS survey in the worker (keeps any open seismic file). */
   spsClear: (): Promise<void> => ipcRenderer.invoke('seisconv:spsClear'),
+  /** Get the loaded P6/11 bin grid (or null when none is loaded). */
+  binGrid: (): Promise<BinGridInfo | null> => ipcRenderer.invoke('seisconv:binGrid'),
   /** Get line-grouped survey geometry (projected E/N, or WGS84 lon/lat when geo=true). */
   spsGeometry: (geo: boolean): Promise<SpsGeometry> => ipcRenderer.invoke('seisconv:spsGeometry', geo),
   /** Get shot→receiver "spider" segments (projected E/N, or WGS84 lon/lat when geo=true). */
@@ -443,7 +469,7 @@ const api = {
   spsSaveCorrected: (): Promise<ConvertResult> => ipcRenderer.invoke('seisconv:spsSaveCorrected'),
   /** Export the loaded SPS survey as KML / GeoJSON / a CSV trio / a QC-report CSV.
    *  Multi-file output (csv) is saved as a ZIP; single-file output via a Save dialog. */
-  spsExport: (args: { kind: 'kml' | 'geojson' | 'csv' | 'qcreport'; qcParams?: { srcInt?: number; rcvInt?: number; tol?: number; maxOff?: number; maxSrc?: number; maxRcv?: number } }): Promise<ConvertResult> =>
+  spsExport: (args: { kind: 'kml' | 'geojson' | 'csv' | 'qcreport' | 'p111' | 'coordcsv'; qcParams?: { srcInt?: number; rcvInt?: number; tol?: number; maxOff?: number; maxSrc?: number; maxRcv?: number } }): Promise<ConvertResult> =>
     ipcRenderer.invoke('seisconv:spsExport', args),
   /** Compute an NMO semblance panel for the open file. */
   semblance: (opts: { velMin: number; velMax: number; velStep: number }): Promise<SemblanceData> => ipcRenderer.invoke('seisconv:semblance', opts),

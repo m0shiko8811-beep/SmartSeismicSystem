@@ -40,6 +40,7 @@ import {
   decimateMinMax,
   parseSPSText,
   detectSPSType,
+  parseSegP1,
   runSPSQC,
   reprojectSPS,
   EPSG_DB,
@@ -48,6 +49,13 @@ import {
   amplitudeSpectrum,
   nextPow2,
   rIEEE,
+  parseP611,
+  parsePositioning,
+  parseCoordCsv,
+  buildCoordCsv,
+  parseP111,
+  buildP111,
+  detectPositioningFormat,
 } from '../index';
 import { bytesToBase64, base64ToBytes } from '../base64';
 
@@ -356,6 +364,168 @@ test('SPS reprojection ITM→WGS84 lands near Israel', () => {
   const lat = parseFloat(txt.substring(55, 65));
   assert.ok(lon > 33 && lon < 37, `lon ${lon}`);
   assert.ok(lat > 29 && lat < 34, `lat ${lat}`);
+});
+
+// ── IOGP P1/11 reader + writer (modern, comma-delimited, relational) ───────────
+console.log('\n[p111]');
+test('P1/11 parses CRS header + S/R point + relation records into SPSData', () => {
+  const fixture = [
+    'H,1,1,IOGP P1/11 v1.1,SeisConv',
+    'H,PROJECT,Test Survey',
+    'H,CRS,EPSG:2039,New Israeli Grid,TM,,',
+    'H,ELLIPSOID,6378137,298.257222101,GRS 1980',
+    'H,PROJPARAMS,35.20451694444,31.73439361111,1.0000067,219529.584,626907.39',
+    'H,HELMERT,23.772,17.49,17.859,-0.313,-1.853,1.673,0',
+    'H,UNITS,METRE,1.0',
+    'P,S,101,200,1,179622.00,665896.00,120.0',
+    'P,R,500,10,1,180622.00,666896.00,95.0',
+    'P,R,500,11,1,180652.00,666926.00,96.0',
+    'E,101,200,1001,500,10,11,1,2',
+  ].join('\n');
+  const d = parseP111(fixture);
+  assert.equal(d.errors.length, 0, `errors: ${d.errors.join('; ')}`);
+  assert.equal(d.skipped, 0, `skipped ${d.skipped}`);
+  assert.equal(d.sources.length, 1, `sources ${d.sources.length}`);
+  assert.equal(d.receivers.length, 2, `receivers ${d.receivers.length}`);
+  assert.equal(d.xrefs.length, 1, `xrefs ${d.xrefs.length}`);
+  assert.equal(d.sources[0].lineName, '101');
+  assert.equal(d.sources[0].point, 200);
+  assert.equal(d.sources[0].idx, '1');
+  assert.ok(Math.abs(d.sources[0].easting - 179622) < 1e-6, `E ${d.sources[0].easting}`);
+  assert.ok(Math.abs(d.sources[0].northing - 665896) < 1e-6, `N ${d.sources[0].northing}`);
+  assert.ok(Math.abs(d.sources[0].elevation - 120) < 1e-6, `Z ${d.sources[0].elevation}`);
+  assert.equal(d.receivers[1].point, 11);
+  // CRS recovered into the SPSProjection model (reusing the SPS KNOWN-CRS handling).
+  assert.equal(d.projection?.subtype, 'TM', `subtype ${d.projection?.subtype}`);
+  const lat0 = d.projection?.latOrigin ?? 0;
+  assert.ok(lat0 > 31 && lat0 < 32, `latOrigin ${lat0}`);
+  // Relation fields.
+  assert.equal(String(d.xrefs[0].srcLine), '101');
+  assert.equal(Number(d.xrefs[0].rcvPtTo), 11);
+  // Dispatch + detection agree on the format.
+  assert.equal(detectPositioningFormat('survey.p111', fixture), 'p111');
+  const viaDispatch = parsePositioning('p111', fixture);
+  assert.equal(viaDispatch.kind, 'points');
+});
+
+test('P1/11 round-trips parse → build → parse stably on the points', () => {
+  const fixture = [
+    'H,CRS,EPSG:2039,New Israeli Grid,TM,,',
+    'H,ELLIPSOID,6378137,298.257222101,GRS 1980',
+    'H,PROJPARAMS,35.20451694444,31.73439361111,1.0000067,219529.584,626907.39',
+    'H,HELMERT,23.772,17.49,17.859,-0.313,-1.853,1.673,0',
+    'H,UNITS,METRE,1.0',
+    'P,S,101,200,1,179622.00,665896.00,120.0',
+    'P,R,500,10,1,180622.00,666896.00,95.0',
+    'P,R,500,11,1,180652.00,666926.00,96.0',
+  ].join('\n');
+  const a = parseP111(fixture);
+  const files = buildP111(a);
+  assert.equal(files.length, 1, `expected 1 file, got ${files.length}`);
+  const b = parseP111(files[0].text);
+  assert.equal(b.sources.length, a.sources.length, 'source count drifted');
+  assert.equal(b.receivers.length, a.receivers.length, 'receiver count drifted');
+  const cmp = (x: typeof a.sources, y: typeof b.sources) => {
+    for (let i = 0; i < x.length; i++) {
+      assert.equal(y[i].lineName, x[i].lineName, `lineName[${i}]`);
+      assert.equal(y[i].point, x[i].point, `point[${i}]`);
+      assert.equal(y[i].idx, x[i].idx, `idx[${i}]`);
+      assert.ok(Math.abs(y[i].easting - x[i].easting) < 1e-3, `E[${i}] ${y[i].easting} vs ${x[i].easting}`);
+      assert.ok(Math.abs(y[i].northing - x[i].northing) < 1e-3, `N[${i}] ${y[i].northing} vs ${x[i].northing}`);
+      assert.ok(Math.abs(y[i].elevation - x[i].elevation) < 1e-3, `Z[${i}]`);
+    }
+  };
+  cmp(a.sources, b.sources);
+  cmp(a.receivers, b.receivers);
+  // The writer fills geodetic lat/long columns (proj is resolvable) — re-parse
+  // ignores the extra columns but the E/N stay byte-stable, proving the round-trip.
+  assert.ok(/,P,/.test('\n,' + files[0].text) || files[0].text.includes('P,S,'), 'P records present');
+});
+
+test('P1/11 never throws on malformed input — collects errors/skipped', () => {
+  const junk = [
+    'P,S,101,200,1,NOTANUMBER,665896.00,120.0', // bad E/N → skipped
+    'P,Q,1,1,1,1,1,1', // unknown point type → skipped
+    'Z,garbage,record', // unknown tag → skipped
+    'P,R,500,10,1,180622.00,666896.00,95.0', // valid
+  ].join('\n');
+  let d: ReturnType<typeof parseP111> | undefined;
+  assert.doesNotThrow(() => { d = parseP111(junk); }, 'parseP111 threw');
+  assert.ok(d!.skipped >= 3, `expected ≥3 skipped, got ${d!.skipped}`);
+  assert.equal(d!.receivers.length, 1, 'the one valid record survived');
+});
+
+// ── SEG-P1 reader (deprecated format, read-only) ───────────────────────────────
+console.log('\n[segp1]');
+test('SEG-P1 parses fixed-column points (E/N decimetres→m), packed lat/long, and UTM header', () => {
+  // Place text at a fixed 0-based start within an 80-col record.
+  const put = (line: string, start: number, txt: string) => {
+    const padded = line.padEnd(Math.max(line.length, start + txt.length), ' ');
+    return padded.slice(0, start) + txt + padded.slice(start + txt.length);
+  };
+  // SEG-P1 columns (0-based): line 1-16, point 17-24, reshoot 25, lat 26-34,
+  // long 35-44, easting 45-52 (dm), northing 53-60 (dm), elevation 61-65 (dm).
+  const mk = (line: string, pt: string, lat: string, lon: string, e: string, n: string, z: string) => {
+    let s = ' '.padEnd(80, ' ');     // blank record-id → shotpoint (source)
+    s = put(s, 1, line);
+    s = put(s, 17, pt);
+    s = put(s, 26, lat);
+    s = put(s, 35, lon);
+    s = put(s, 45, e);
+    s = put(s, 53, n);
+    s = put(s, 61, z);
+    return s.slice(0, 80);
+  };
+  // UTM zone 36N header + two points. Easting 6600000 dm = 660000.0 m, etc.
+  const h1 = 'H SURVEY TEST LINE — SEG-P1 EXPORT';
+  const h2 = 'H GRID: UTM ZONE 36 NORTH  DATUM WGS-84';
+  // lat "ddmmssssh" = 9 chars (SSss = seconds in hundredths); lon "dddmmssssh" = 10.
+  // point 1: lat 32°05'07.20"N, lon 034°46'54.48"E
+  const p1 = mk('1001', '101', '32050720N', '034465448E', '06600000', '35500000', '01200');
+  const p2 = mk('1001', '102', '32060000N', '034470000E', '06600100', '35500100', '00950');
+  const segp1 = parseSegP1([h1, h2, p1, p2].join('\n'));
+
+  assert.equal(segp1.skipped, 0, `skipped ${segp1.skipped}: ${segp1.errors.join('; ')}`);
+  assert.equal(segp1.sources.length, 2, `sources ${segp1.sources.length}`);
+  assert.equal(segp1.receivers.length, 0, `receivers ${segp1.receivers.length}`);
+  assert.equal(segp1.layout, 'SEG-P1');
+
+  const s0 = segp1.sources[0];
+  assert.equal(s0.lineName, '1001', `lineName ${s0.lineName}`);
+  assert.equal(s0.point, 101, `point ${s0.point}`);
+  // 06600000 dm / 10 = 660000.0 m
+  assert.ok(Math.abs(s0.easting - 660000) < 1e-6, `E ${s0.easting}`);
+  assert.ok(Math.abs(s0.northing - 3550000) < 1e-6, `N ${s0.northing}`);
+  // 01200 dm / 10 = 120.0 m
+  assert.ok(Math.abs(s0.elevation - 120) < 1e-6, `Z ${s0.elevation}`);
+  assert.ok(Math.abs(segp1.sources[1].easting - 660010) < 1e-6, `E1 ${segp1.sources[1].easting}`);
+
+  // Header → projection: UTM zone 36N.
+  assert.equal(segp1.projection?.subtype, 'UTM', `subtype ${segp1.projection?.subtype}`);
+  assert.equal(segp1.projection?.zone, 36, `zone ${segp1.projection?.zone}`);
+  assert.equal(segp1.projection?.hemi, 'N', `hemi ${segp1.projection?.hemi}`);
+  console.log(`      golden: SEG-P1 src0 E=${s0.easting} N=${s0.northing} Z=${s0.elevation} zone=${segp1.projection?.zone}`);
+});
+
+test('SEG-P1 never throws on malformed/garbage lines (collects skipped, keeps going)', () => {
+  const good = ' ' + 'L1'.padEnd(16) + '1'.padStart(8) + ' ' + ' '.repeat(9) + ' '.repeat(10) + '00012340' + '00056780' + '00100';
+  const garbage = 'qwertyuiopasdfghjkl zxcvbnm not a record at all';
+  let segp1: any;
+  assert.doesNotThrow(() => { segp1 = parseSegP1([good, garbage, '', '   '].join('\n')); }, 'parseSegP1 threw');
+  assert.ok(Array.isArray(segp1.errors), 'returns SPSData with errors[]');
+  // The good line has a usable easting/northing; the garbage line has no point and
+  // no grid/geo → skipped.
+  assert.ok(segp1.sources.length + segp1.receivers.length >= 1, 'parsed the valid record');
+  assert.ok(segp1.skipped >= 1, `garbage not skipped (skipped=${segp1.skipped})`);
+});
+
+test('SEG-P1 honours the MAX header cap without throwing', () => {
+  // An all-'H' file far exceeding the 20-record block must not blow up.
+  const many = Array.from({ length: 5000 }, (_, i) => `H header line ${i}`).join('\n');
+  let segp1: any;
+  assert.doesNotThrow(() => { segp1 = parseSegP1(many); }, 'parseSegP1 threw on huge header block');
+  assert.ok(segp1.headers.length <= 4096, `headers not capped: ${segp1.headers.length}`);
+  assert.equal(segp1.sources.length + segp1.receivers.length, 0, 'no points from a header-only file');
 });
 
 test('semblance returns a valid [0,1] matrix with a coherent peak', () => {
@@ -894,6 +1064,176 @@ if (existsSync(GEODE)) {
 } else {
   skip('valid Geode clamp-is-a-no-op check', `${GEODE} not found`);
 }
+
+// ── Coordinate CSV (generic point CSV) ────────────────────────────────────────
+console.log('\n[coordcsv]');
+
+test('parseCoordCsv reads a CRS-tagged, header-mapped CSV (synonyms, S/R, extra cols)', () => {
+  const csv = [
+    '# CRS: ITM',
+    'Line,Station,Type,Easting,Northing,Elev,Notes',
+    '101,200,S,660000.0,3550000.0,120.0,shot A',
+    '101,201,S,660025.0,3550000.0,121.5,"shot, B"', // quoted field with a comma
+    '',                                              // blank line in the middle
+    '500,10,R,661000.0,3551000.0,95.0,geophone',
+  ].join('\n');
+  const d = parseCoordCsv(csv);
+  assert.equal(d.errors.filter((e) => /cannot parse/.test(e)).length, 0, `parse errors: ${d.errors.join('; ')}`);
+  assert.equal(d.sources.length, 2, `sources ${d.sources.length}`);
+  assert.equal(d.receivers.length, 1, `receivers ${d.receivers.length}`);
+  assert.equal(d.sources[0].lineName, '101');
+  assert.equal(d.sources[0].point, 200);
+  assert.ok(Math.abs(d.sources[0].easting - 660000) < 1e-6, `E ${d.sources[0].easting}`);
+  assert.ok(Math.abs(d.sources[1].easting - 660025) < 1e-6, 'quoted-comma row parsed');
+  assert.ok(Math.abs(d.receivers[0].northing - 3551000) < 1e-6, `N ${d.receivers[0].northing}`);
+  assert.equal(d.receivers[0].rtype, 'R');
+  // CRS tag → ITM (EPSG:2039) projection resolved.
+  assert.equal(d.projection?.subtype, 'TM', `subtype ${d.projection?.subtype}`);
+  assert.ok((d.projection?.latOrigin ?? 0) > 31 && (d.projection?.latOrigin ?? 0) < 32, `latOrigin ${d.projection?.latOrigin}`);
+  // detector routes a .csv to the coordcsv format.
+  assert.equal(detectPositioningFormat('survey.csv', csv), 'coordcsv');
+});
+
+test('parseCoordCsv resolves a `# EPSG:2039` tag and an x/y/z synonym header', () => {
+  const csv = ['# EPSG:2039', 'line,sp,x,y,z', 'A1,5,200000,650000,10'].join('\n');
+  const d = parseCoordCsv(csv);
+  assert.equal(d.receivers.length, 1, 'defaults to receiver when no type column');
+  assert.equal(d.receivers[0].lineName, 'A1');
+  assert.ok(Math.abs(d.receivers[0].easting - 200000) < 1e-6);
+  assert.equal(d.projection?.desc, 'EPSG:2039', `desc ${d.projection?.desc}`);
+});
+
+test('parseCoordCsv leaves projection undefined when there is no CRS tag', () => {
+  const d = parseCoordCsv('line,point,type,easting,northing,elevation\nL,1,S,100,200,5');
+  assert.equal(d.projection, undefined, 'no tag → no projection');
+  assert.equal(d.sources.length, 1);
+});
+
+test('parseCoordCsv never throws on malformed rows — bad coords go to skipped', () => {
+  const csv = 'line,point,easting,northing\nL,1,notanumber,oops\nL,2,300,400';
+  let d: any;
+  assert.doesNotThrow(() => { d = parseCoordCsv(csv); }, 'parseCoordCsv threw');
+  assert.equal(d.skipped, 1, `skipped ${d.skipped}`);
+  assert.equal(d.receivers.length, 1, 'the valid row still parses');
+});
+
+test('parseCoordCsv ignores a prototype-pollution column header (no proto leak)', () => {
+  // A header naming __proto__ must NOT pollute Object.prototype, and the row's
+  // coordinate columns must still parse normally.
+  const csv = '__proto__,easting,northing\npolluted,500,600';
+  const d = parseCoordCsv(csv);
+  assert.equal(({} as any).polluted, undefined, 'Object.prototype was polluted!');
+  assert.equal(d.receivers.length, 1, 'coords still parsed past the hostile column');
+  assert.ok(Math.abs(d.receivers[0].easting - 500) < 1e-6);
+});
+
+test('coordcsv parse → build → parse round-trips points and CRS tag', () => {
+  const csv = ['# CRS: ITM', 'line,point,type,easting,northing,elevation', '101,200,S,660000,3550000,120', '500,10,R,661000,3551000,95'].join('\n');
+  const d1 = parseCoordCsv(csv);
+  const files = buildCoordCsv(d1);
+  assert.equal(files.length, 1, 'one file emitted');
+  assert.ok(/^# CRS:/.test(files[0].text), `tag line present: ${files[0].text.split('\n')[0]}`);
+  const d2 = parseCoordCsv(files[0].text);
+  assert.equal(d2.sources.length, d1.sources.length, 'sources stable');
+  assert.equal(d2.receivers.length, d1.receivers.length, 'receivers stable');
+  assert.equal(d2.sources[0].point, 200);
+  assert.ok(Math.abs(d2.sources[0].easting - 660000) < 1e-6, 'easting stable');
+  assert.ok(Math.abs(d2.receivers[0].northing - 3551000) < 1e-6, 'northing stable');
+  assert.equal(d2.projection?.subtype, 'TM', 'CRS round-trips');
+});
+
+// ── IOGP P6/11 bin-grid (read-only) ────────────────────────────────────────────
+// A bin-grid file DEFINES a seismic acquisition grid (origin, bin size, rotation,
+// inline/crossline numbering, corners) rather than per-point positions, so it maps
+// onto a BinGrid (kind:'bingrid'), not SPSData. The fixture below is a small,
+// spec-shaped P6/11 header block using the canonical EPSG "P6" parameter labels;
+// the assertions pin origin / rotation / bin sizes and the four computed corners.
+console.log('\n[p611]');
+test('parseP611 reads origin, bin sizes, rotation, numbering and computes corners', () => {
+  // J-axis bears 340° clockwise from grid north → I-axis (I=J-90) bears 250°.
+  // Grid: 4 bins on I (width 25 m), 2 bins on J (width 25 m), origin at E/N below.
+  const p611 = [
+    'H6,0,0,0, IOGP P6/11 Seismic Bin Grid Data Exchange Format v1.1',
+    'C  synthetic fixture for the unit test',
+    'H1, Survey area name, DEMO 3D SURVEY',
+    'H18, Projection type, UTM',
+    'H19, Projection zone, 36 North',
+    'H6,1,1, Bin grid origin I, 1000',
+    'H6,1,2, Bin grid origin J, 2000',
+    'H6,1,3, Bin grid origin Easting, 500000.0',
+    'H6,1,4, Bin grid origin Northing, 4000000.0',
+    'H6,1,5, Scale factor of bin grid, 1.0',
+    'H6,1,6, Bin width on I-axis, 25.0',
+    'H6,1,7, Bin width on J-axis, 25.0',
+    'H6,1,8, Map grid bearing of bin grid J-axis, 340.0',
+    'H6,1,9, Bin node increment on I-axis, 1',
+    'H6,1,10, Bin node increment on J-axis, 1',
+    'H6,2,1, Number of inlines, 4',
+    'H6,2,2, Number of crosslines, 2',
+  ].join('\n');
+
+  const g = parseP611(p611);
+  assert.equal(g.name, 'DEMO 3D SURVEY', `name ${g.name}`);
+  assert.ok(Math.abs(g.originE - 500000) < 1e-6, `originE ${g.originE}`);
+  assert.ok(Math.abs(g.originN - 4000000) < 1e-6, `originN ${g.originN}`);
+  assert.ok(Math.abs(g.binI - 25) < 1e-9, `binI ${g.binI}`);
+  assert.ok(Math.abs(g.binJ - 25) < 1e-9, `binJ ${g.binJ}`);
+  assert.equal(g.firstInline, 1000, `firstInline ${g.firstInline}`);
+  assert.equal(g.firstCrossline, 2000, `firstCrossline ${g.firstCrossline}`);
+  assert.equal(g.incInline, 1, `incInline ${g.incInline}`);
+  assert.equal(g.incCrossline, 1, `incCrossline ${g.incCrossline}`);
+  assert.equal(g.nInline, 4, `nInline ${g.nInline}`);
+  assert.equal(g.nCrossline, 2, `nCrossline ${g.nCrossline}`);
+  // inlineAzimuth = I-axis bearing = J-axis bearing (340) − 90 = 250°.
+  assert.ok(Math.abs(g.inlineAzimuth - 250) < 1e-6, `inlineAzimuth ${g.inlineAzimuth}`);
+  // Map CRS lifted from the H18/H19 projection records.
+  assert.equal(g.crs?.subtype, 'UTM', `crs subtype ${g.crs?.subtype}`);
+  assert.equal(g.crs?.zone, 36, `crs zone ${g.crs?.zone}`);
+
+  // Four corners = origin + a·Î + b·Ĵ, a∈{0, 4·25=100}, b∈{0, 2·25=50}.
+  // Î bears 250° → (sin,cos)=(−0.93969, −0.34202); Ĵ bears 340° → (−0.34202, 0.93969).
+  assert.ok(g.corners && g.corners.length === 4, `corners ${g.corners?.length}`);
+  const c = g.corners!;
+  const D2R = Math.PI / 180;
+  const iE = Math.sin(250 * D2R), iN = Math.cos(250 * D2R);
+  const jE = Math.sin(340 * D2R), jN = Math.cos(340 * D2R);
+  const expect = [
+    { e: 500000, n: 4000000 },
+    { e: 500000 + 100 * iE, n: 4000000 + 100 * iN },
+    { e: 500000 + 100 * iE + 50 * jE, n: 4000000 + 100 * iN + 50 * jN },
+    { e: 500000 + 50 * jE, n: 4000000 + 50 * jN },
+  ];
+  for (let k = 0; k < 4; k++) {
+    assert.ok(Math.abs(c[k].e - expect[k].e) < 1e-4, `corner ${k} E ${c[k].e} vs ${expect[k].e}`);
+    assert.ok(Math.abs(c[k].n - expect[k].n) < 1e-4, `corner ${k} N ${c[k].n} vs ${expect[k].n}`);
+  }
+  console.log(`      golden: P6/11 origin (${g.originE},${g.originN}) az=${g.inlineAzimuth}° corners=${c.length}`);
+});
+
+test('detectPositioningFormat + parsePositioning route P6/11 to a bingrid', () => {
+  // .p611 extension → 'p611'; content banner → 'p611'; dispatch yields kind:'bingrid'.
+  assert.equal(detectPositioningFormat('grid.p611', ''), 'p611', 'extension routes to p611');
+  const banner = 'H6,0,0,0, IOGP P6/11 Seismic Bin Grid\nH6,1,3, origin Easting, 1000.0';
+  assert.equal(detectPositioningFormat('grid.txt', banner), 'p611', 'P6/11 banner sniffed');
+  const res = parsePositioning('p611', banner);
+  assert.equal(res.kind, 'bingrid', `kind ${res.kind}`);
+  if (res.kind === 'bingrid') assert.ok(Math.abs(res.grid.originE - 1000) < 1e-6, `originE ${res.grid.originE}`);
+});
+
+test('parseP611 never throws on garbage / hostile input and stays bounded', () => {
+  // Empty, non-string, and a pathological huge single line must all degrade to a
+  // (possibly empty) BinGrid — never throw, never allocate from an unbounded count.
+  assert.doesNotThrow(() => parseP611(''), 'empty input threw');
+  assert.doesNotThrow(() => parseP611('not a grid\n\n,,,\nH6,xxx'), 'garbage input threw');
+  // 200k-char single line: must be clipped, not carried verbatim, and not hang.
+  const huge = 'H6,1,3, origin Easting, ' + '9'.repeat(200000);
+  let g: any;
+  assert.doesNotThrow(() => { g = parseP611(huge); }, 'huge line threw');
+  assert.ok(g.raw.every((l: string) => l.length <= 4096), 'raw lines clipped to the per-line cap');
+  // A prototype-pollution attempt via a forged header code must not touch Object.proto.
+  assert.doesNotThrow(() => parseP611('H__proto__, x, 1\nHconstructor, y, 2'), '__proto__ header threw');
+  assert.equal(({} as any).polluted, undefined, 'no prototype pollution');
+});
 
 // ── Summary ───────────────────────────────────────────────────────────────────
 console.log('\n----------------------');

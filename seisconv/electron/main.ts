@@ -525,7 +525,7 @@ ipcMain.handle('seisconv:openSPS', async () => {
   const res = await dialog.showOpenDialog(win, {
     properties: ['openFile', 'multiSelections'],
     filters: [
-      { name: 'SPS files', extensions: ['s', 'r', 'x', 's01', 'r01', 'x01', 'sps', 'txt'] },
+      { name: 'Positioning files', extensions: ['s', 'r', 'x', 's01', 'r01', 'x01', 'sps', 'p1', 'segp1', 'p111', 'p611', 'csv', 'txt'] },
       { name: 'All files', extensions: ['*'] },
     ],
   });
@@ -540,6 +540,14 @@ ipcMain.handle('seisconv:openSPS', async () => {
 // drops the open file; this backs the SPS tab's dedicated "Clear SPS" button.
 ipcMain.handle('seisconv:spsClear', async () => {
   await callWorker({ type: 'spsClear' });
+});
+
+// Return the loaded P6/11 bin grid (or null when none is loaded). Populated when
+// openSPS ingests a positioning file that resolves to a bin grid rather than points.
+ipcMain.handle('seisconv:binGrid', async () => {
+  const r = await callWorker<{ ok: boolean; grid?: unknown; error?: string }>({ type: 'binGrid' });
+  if (!r.ok) throw new Error(r.error || 'bin grid failed');
+  return r.grid ?? null;
 });
 
 ipcMain.handle('seisconv:spsGeometry', async (_e, geo: boolean) => {
@@ -649,7 +657,7 @@ ipcMain.handle('seisconv:spsSaveCorrected', async () => {
 // as spsReproject: multi-file output is zipped (JSZip), single-file output uses a
 // plain native save dialog. The CSV kind yields three files → ZIP; kml / geojson /
 // qcreport each yield one file → single-file Save dialog.
-ipcMain.handle('seisconv:spsExport', async (_e, args: { kind: 'kml' | 'geojson' | 'csv' | 'qcreport'; qcParams?: Record<string, number> }) => {
+ipcMain.handle('seisconv:spsExport', async (_e, args: { kind: 'kml' | 'geojson' | 'csv' | 'qcreport' | 'p111' | 'coordcsv'; qcParams?: Record<string, number> }) => {
   const r = await callWorker<{ ok: boolean; files?: { name: string; text: string }[]; error?: string }>({ type: 'spsExport', kind: args?.kind, qcParams: args?.qcParams });
   if (!r.ok || !r.files) return { ok: false, error: r.error ?? 'export failed' };
   if (!win) return { ok: false, error: 'no window' };

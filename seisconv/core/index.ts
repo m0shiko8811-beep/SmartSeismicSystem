@@ -32,6 +32,8 @@ export * from './dsp/fk';
 export * from './render/colormaps';
 export * from './render/model';
 export * from './sps/parse';
+export * from './sps/bingrid';
+export * from './sps/formats';
 export * from './sps/qc';
 export * from './sps/reproject';
 export * from './export/xlsx';
