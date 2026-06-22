@@ -315,6 +315,127 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
 }
 .chip.sel .nm{color:var(--teal-deep);}
 
+/* ---- Mode switcher: "Convert single file" vs "Convert a folder (batch)" ---- */
+.mode-pick{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px;}
+@media (max-width:780px){.mode-pick{grid-template-columns:1fr;}}
+.mode-card{
+  text-align:left;cursor:pointer;font-family:inherit;color:var(--ink);
+  border:1.5px solid var(--hair);background:var(--card);border-radius:var(--radius);
+  padding:16px 18px;display:flex;align-items:flex-start;gap:14px;
+  box-shadow:var(--shadow-card);
+  transition:border-color .12s ease, box-shadow .12s ease, background .12s ease;
+}
+.mode-card:hover{border-color:var(--cyan);}
+.mode-card .mc-ic{
+  width:46px;height:46px;border-radius:13px;flex:none;display:grid;place-items:center;
+  background:var(--teal-tint);color:var(--teal-deep);
+}
+.mode-card .mc-tx h3{font-size:14px;font-weight:800;color:var(--ink);}
+.mode-card .mc-tx p{font-size:12px;color:var(--ink-3);margin-top:3px;max-width:40ch;}
+.mode-card .mc-go{margin-left:auto;color:var(--ink-4);align-self:center;}
+.mode-card.sel{
+  border-color:var(--teal);background:var(--teal-tint);
+  box-shadow:0 0 0 3px rgba(15,179,171,.14);
+}
+.mode-card.sel .mc-go{color:var(--teal-deep);}
+
+/* ---- Wizard scaffolding (batch) ---- */
+.wiz-step{
+  display:flex;align-items:flex-start;gap:13px;padding:14px 0;border-bottom:1px solid var(--hair-soft);
+}
+.wiz-step:last-child{border-bottom:none;}
+.wiz-num{
+  width:26px;height:26px;border-radius:50%;flex:none;display:grid;place-items:center;
+  font-size:12px;font-weight:800;background:var(--surface);border:1px solid var(--hair);color:var(--ink-3);
+}
+.wiz-step.done .wiz-num{background:var(--green-tint);border-color:var(--green);color:var(--green);}
+.wiz-step.active .wiz-num{background:var(--teal-tint);border-color:var(--teal);color:var(--teal-deep);}
+.wiz-body{flex:1;min-width:0;}
+.wiz-body .wt{font-size:12.5px;font-weight:700;color:var(--ink);}
+.wiz-body .ws{font-size:11.5px;color:var(--ink-3);margin-top:2px;}
+.wiz-body .wval{font-family:var(--mono);color:var(--teal-deep);font-weight:600;}
+.wiz-actions{margin-top:14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+
+/* ---- Found-files banner ---- */
+.found{
+  margin-bottom:14px;padding:11px 15px;border:1px solid var(--hair);border-radius:12px;
+  background:var(--teal-tint);display:flex;align-items:center;gap:11px;font-size:12.5px;color:var(--ink);
+}
+.found b{color:var(--teal-deep);}
+.found .fdir{font-family:var(--mono);color:var(--ink-2);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+
+/* ---- Live progress (batch + single) ---- */
+.prog-wrap{margin-top:6px;}
+.prog-head{display:flex;align-items:baseline;gap:10px;margin-bottom:7px;}
+.prog-head .pt{font-size:12.5px;font-weight:700;color:var(--ink);}
+.prog-head .pc{margin-left:auto;font-size:11.5px;color:var(--ink-3);font-family:var(--mono);}
+.prog-bar{height:9px;border-radius:999px;background:var(--surface);border:1px solid var(--hair);overflow:hidden;}
+.prog-fill{
+  height:100%;width:0;border-radius:999px;
+  background:linear-gradient(90deg,var(--teal),var(--cyan));
+  transition:width .18s ease;
+}
+.prog-fill.indet{
+  width:34% !important;
+  background:linear-gradient(90deg,transparent,var(--teal),var(--cyan),transparent);
+  animation:indet 1.1s linear infinite;
+}
+@keyframes indet{0%{transform:translateX(-110%);}100%{transform:translateX(340%);}}
+.prog-sub{margin-top:7px;font-size:12px;color:var(--ink-2);font-family:var(--mono);min-height:16px;}
+
+/* per-file result list */
+.file-list{margin-top:12px;max-height:32vh;overflow:auto;font-size:12px;}
+.file-row{
+  display:grid;grid-template-columns:74px 1fr auto;gap:10px;align-items:center;
+  padding:6px 0;border-bottom:1px solid var(--hair-soft);
+}
+.file-row:last-child{border-bottom:none;}
+.file-row .fr-st{font-weight:700;font-size:10.5px;letter-spacing:.4px;}
+.file-row .fr-nm{color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.file-row .fr-x{color:var(--ink-3);font-family:var(--mono);font-size:11px;justify-self:end;}
+.file-row.run .fr-st{color:var(--teal-deep);}
+.file-row.done .fr-st{color:var(--green);}
+.file-row.error .fr-st{color:var(--red);}
+.file-row.error .fr-nm{color:var(--red);}
+.file-row.cancelled .fr-st{color:var(--amber);}
+.file-row.queued .fr-st{color:var(--ink-4);}
+.file-row.queued .fr-nm{color:var(--ink-3);}
+
+/* ---- Modal (Help / Manual) ---- */
+.modal-back{
+  position:fixed;inset:0;z-index:50;display:none;align-items:center;justify-content:center;
+  background:rgba(13,31,51,.46);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);padding:24px;
+}
+.modal-back.open{display:flex;}
+.modal{
+  background:var(--card);border:1px solid var(--hair);border-radius:var(--radius);
+  box-shadow:var(--shadow-pop);width:min(760px,100%);max-height:86vh;display:flex;flex-direction:column;
+}
+.modal .mh{
+  display:flex;align-items:center;gap:12px;padding:16px 20px;border-bottom:1px solid var(--hair-soft);flex:none;
+}
+.modal .mh h2{font-size:15px;font-weight:800;color:var(--ink);}
+.modal .mh .mclose{
+  margin-left:auto;width:30px;height:30px;border-radius:9px;border:1px solid var(--hair);
+  background:var(--surface);color:var(--ink-2);cursor:pointer;display:grid;place-items:center;
+}
+.modal .mh .mclose:hover{border-color:var(--teal);color:var(--teal-deep);}
+.modal .mbody{padding:18px 22px;overflow:auto;font-size:13px;color:var(--ink-2);line-height:1.55;}
+.modal .mbody h3{font-size:13px;font-weight:800;color:var(--ink);margin:18px 0 7px;letter-spacing:.2px;}
+.modal .mbody h3:first-child{margin-top:0;}
+.modal .mbody p{margin:6px 0;}
+.modal .mbody ul{margin:6px 0 6px 18px;}
+.modal .mbody li{margin:3px 0;}
+.modal .mbody code,.modal .mbody .kbd{font-family:var(--mono);font-size:11px;background:var(--surface);border:1px solid var(--hair);border-radius:5px;padding:1px 5px;color:var(--ink);}
+.modal .mbody .fmt-tbl{width:100%;border-collapse:collapse;margin:8px 0;font-size:12px;}
+.modal .mbody .fmt-tbl th{text-align:left;color:var(--ink-3);font-weight:700;padding:5px 8px;border-bottom:1px solid var(--hair);}
+.modal .mbody .fmt-tbl td{padding:5px 8px;border-bottom:1px solid var(--hair-soft);color:var(--ink-2);}
+.modal .mbody .fmt-tbl td:first-child{font-weight:700;color:var(--ink);}
+.modal .mbody .fmt-tbl td .mono{font-family:var(--mono);color:var(--teal-deep);}
+
+/* utility: show/hide blocks driven by app.ts */
+.hidden{display:none !important;}
+
 /* key/value rows for File summary */
 .kv{display:flex;justify-content:space-between;align-items:baseline;padding:7px 0;border-bottom:1px solid var(--hair-soft);font-size:12.5px;}
 .kv:last-child{border-bottom:none;}
@@ -419,6 +540,10 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
     </div>
 
     <div class="right">
+      <button class="btn sm ghost" id="helpBtn" title="Help / Manual" aria-label="Help">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 0 1 4.4 1.6c0 1.6-2.4 2-2.4 3.4" stroke-linecap="round"/><circle cx="12" cy="17" r=".7" fill="currentColor"/></svg>
+        Help
+      </button>
       <div class="toggle" title="Theme" role="group" aria-label="Theme">
         <button id="themeDark" title="Dark">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg>
@@ -464,9 +589,10 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
     </button>
 
     <div class="spacer"></div>
-    <div class="nav-item" title="Keys — ⌘O open · 1–5 tabs" style="cursor:default;">
+    <button class="nav-item" id="railHelp" title="Help / Manual">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 0 1 4.4 1.6c0 1.6-2.4 2-2.4 3.4" stroke-linecap="round"/><circle cx="12" cy="17" r=".6" fill="currentColor"/></svg>
-    </div>
+      <span class="lbl">Help / Manual</span>
+    </button>
   </nav>
 
   <!-- ============================ MAIN ============================ -->
@@ -492,110 +618,233 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
 
       <!-- ===================== CONVERTER ===================== -->
       <section id="panel-conv">
-        <div class="drop">
-          <div class="ic">
-            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M12 18v-6m0 0-2.5 2.5M12 12l2.5 2.5"/></svg>
-          </div>
-          <div>
-            <h3>Open a seismic file to begin</h3>
-            <p class="muted" style="margin-top:3px;">SEG-Y · SEG-D · SEG-2 / .dat (Geode) · SU — parsed off the UI thread, so big files stay responsive.</p>
-          </div>
-          <div class="acts">
-            <button class="btn btn-primary" id="openBtn2">Open seismic file…</button>
-          </div>
+
+        <!-- STEP 0 — choose a mode -->
+        <div class="mode-pick">
+          <button class="mode-card sel" id="modeSingle" aria-pressed="true">
+            <span class="mc-ic">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M9 14h6m0 0-2-2m2 2-2 2"/></svg>
+            </span>
+            <span class="mc-tx">
+              <h3>Convert single file</h3>
+              <p>Open one seismic file, inspect it, then export to any format with a save dialog.</p>
+            </span>
+            <span class="mc-go">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M9 6l6 6-6 6"/></svg>
+            </span>
+          </button>
+          <button class="mode-card" id="modeBatch" aria-pressed="false">
+            <span class="mc-ic">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 13h6m0 0-2-2m2 2-2 2"/></svg>
+            </span>
+            <span class="mc-tx">
+              <h3>Convert a folder (batch)</h3>
+              <p>Point at a folder, pick a format and a destination, convert every seismic file at once.</p>
+            </span>
+            <span class="mc-go">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M9 6l6 6-6 6"/></svg>
+            </span>
+          </button>
         </div>
 
-        <div class="conv-grid">
-
-          <!-- LEFT: format chips + convert + batch -->
-          <div style="display:flex;flex-direction:column;gap:16px;">
-
-            <div class="card">
-              <div class="ch">
-                <h2>Convert to</h2>
-                <span class="hint">Pick one output format</span>
-                <div class="right"><span class="pill teal">9 formats</span></div>
-              </div>
-              <div class="cb">
-                <div class="chips" id="fmtChips">
-                  <button class="chip sel" data-fmt="segy1"><span class="nm">SEG-Y Rev 1</span><span class="ex">.sgy</span></button>
-                  <button class="chip" data-fmt="segy0"><span class="nm">SEG-Y Rev 0</span><span class="ex">.sgy</span></button>
-                  <button class="chip" data-fmt="segy2"><span class="nm">SEG-Y Rev 2</span><span class="ex">.sgy</span></button>
-                  <button class="chip" data-fmt="su"><span class="nm">Seismic Unix</span><span class="ex">.su</span></button>
-                  <button class="chip" data-fmt="seg2"><span class="nm">SEG-2 / .dat</span><span class="ex">.dat</span></button>
-                  <button class="chip" data-fmt="segd1"><span class="nm">SEG-D Rev 1</span><span class="ex">.segd</span></button>
-                  <button class="chip" data-fmt="segd3"><span class="nm">SEG-D Rev 3</span><span class="ex">.segd</span></button>
-                  <button class="chip" data-fmt="tpimage"><span class="nm">Tape Image</span><span class="ex">.tim</span></button>
-                  <button class="chip" data-fmt="csv"><span class="nm">CSV / ASCII</span><span class="ex">.csv</span></button>
-                </div>
-
-                <div style="margin-top:16px;display:flex;align-items:center;gap:14px;">
-                  <button class="btn btn-primary lg" id="convertBtn" disabled>
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14m0 0-5-5m5 5-5 5"/></svg>
-                    Convert &amp; Save…
-                  </button>
-                </div>
-                <div class="status" id="convStatus"></div>
-              </div>
+        <!-- ============ SINGLE-FILE MODE ============ -->
+        <div id="convSingle">
+          <div class="drop">
+            <div class="ic">
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M12 18v-6m0 0-2.5 2.5M12 12l2.5 2.5"/></svg>
             </div>
-
-            <div class="card">
-              <div class="ch">
-                <h2>Batch queue</h2>
-                <span class="hint">Convert multiple files → ZIP</span>
-              </div>
-              <div class="cb">
-                <button class="btn sm" id="batchBtn">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
-                  Convert multiple files → ZIP…
-                </button>
-                <div id="batchResults" class="qc-results"></div>
-              </div>
+            <div>
+              <h3>Open a seismic file to begin</h3>
+              <p class="muted" style="margin-top:3px;">SEG-Y · SEG-D · SEG-2 / .dat (Geode) · SU — parsed off the UI thread, so big files stay responsive.</p>
+            </div>
+            <div class="acts">
+              <button class="btn btn-primary" id="openBtn2">Open seismic file…</button>
             </div>
           </div>
 
-          <!-- RIGHT: file summary + header QC -->
-          <div style="display:flex;flex-direction:column;gap:16px;">
+          <div class="conv-grid">
 
-            <div class="card">
-              <div class="ch">
-                <h2>File summary</h2>
-                <div class="right"><span class="pill neutral mono" id="fsFormat">—</span></div>
-              </div>
-              <div class="cb" style="padding-top:6px;padding-bottom:8px;">
-                <div class="kv"><span class="k">Traces</span><span class="v num" id="fsTraces">—</span></div>
-                <div class="kv"><span class="k">Samples / trace</span><span class="v num" id="fsSamples">—</span></div>
-                <div class="kv"><span class="k">Sample interval</span><span class="v mono" id="fsInterval">—</span></div>
-                <div class="kv"><span class="k">Record length</span><span class="v mono" id="fsRecord">—</span></div>
-                <div class="kv"><span class="k">Data format</span><span class="v" id="fsData">—</span></div>
-                <div class="kv"><span class="k">Revision</span><span class="v" id="fsRevision">—</span></div>
-                <div class="kv"><span class="k">Byte order</span><span class="v" id="fsByteOrder">—</span></div>
-                <div class="kv"><span class="k">CRS</span><span class="v mono" id="fsCrs">—</span></div>
+            <!-- LEFT: format chips + convert -->
+            <div style="display:flex;flex-direction:column;gap:16px;">
+
+              <div class="card">
+                <div class="ch">
+                  <h2>Convert to</h2>
+                  <span class="hint">Pick one output format</span>
+                  <div class="right"><span class="pill teal">9 formats</span></div>
+                </div>
+                <div class="cb">
+                  <div class="chips" id="fmtChips">
+                    <button class="chip sel" data-fmt="segy1"><span class="nm">SEG-Y Rev 1</span><span class="ex">.sgy</span></button>
+                    <button class="chip" data-fmt="segy0"><span class="nm">SEG-Y Rev 0</span><span class="ex">.sgy</span></button>
+                    <button class="chip" data-fmt="segy2"><span class="nm">SEG-Y Rev 2</span><span class="ex">.sgy</span></button>
+                    <button class="chip" data-fmt="su"><span class="nm">Seismic Unix</span><span class="ex">.su</span></button>
+                    <button class="chip" data-fmt="seg2"><span class="nm">SEG-2 / .dat</span><span class="ex">.dat</span></button>
+                    <button class="chip" data-fmt="segd1"><span class="nm">SEG-D Rev 1</span><span class="ex">.segd</span></button>
+                    <button class="chip" data-fmt="segd3"><span class="nm">SEG-D Rev 3</span><span class="ex">.segd</span></button>
+                    <button class="chip" data-fmt="tpimage"><span class="nm">Tape Image</span><span class="ex">.tim</span></button>
+                    <button class="chip" data-fmt="csv"><span class="nm">CSV / ASCII</span><span class="ex">.csv</span></button>
+                  </div>
+
+                  <div style="margin-top:16px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+                    <button class="btn btn-primary lg" id="convertBtn" disabled>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14m0 0-5-5m5 5-5 5"/></svg>
+                      Convert &amp; Save…
+                    </button>
+                    <button class="btn sm" id="clearBtn">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M6 6l1 14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-14"/></svg>
+                      Clear
+                    </button>
+                  </div>
+
+                  <!-- single-file converting indicator -->
+                  <div class="prog-wrap hidden" id="singleProg">
+                    <div class="prog-head"><span class="pt" id="singleProgTitle">Converting…</span></div>
+                    <div class="prog-bar"><div class="prog-fill indet" id="singleProgFill"></div></div>
+                  </div>
+
+                  <div class="status" id="convStatus"></div>
+                </div>
               </div>
             </div>
 
-            <div class="card">
-              <div class="ch">
-                <h2>Header QC</h2>
-                <div class="right"><span class="pill neutral" id="hdrQcPill">—</span></div>
+            <!-- RIGHT: file summary + header QC -->
+            <div style="display:flex;flex-direction:column;gap:16px;">
+
+              <div class="card">
+                <div class="ch">
+                  <h2>File summary</h2>
+                  <div class="right"><span class="pill neutral mono" id="fsFormat">—</span></div>
+                </div>
+                <div class="cb" style="padding-top:6px;padding-bottom:8px;">
+                  <div class="kv"><span class="k">Traces</span><span class="v num" id="fsTraces">—</span></div>
+                  <div class="kv"><span class="k">Samples / trace</span><span class="v num" id="fsSamples">—</span></div>
+                  <div class="kv"><span class="k">Sample interval</span><span class="v mono" id="fsInterval">—</span></div>
+                  <div class="kv"><span class="k">Record length</span><span class="v mono" id="fsRecord">—</span></div>
+                  <div class="kv"><span class="k">Data format</span><span class="v" id="fsData">—</span></div>
+                  <div class="kv"><span class="k">Revision</span><span class="v" id="fsRevision">—</span></div>
+                  <div class="kv"><span class="k">Byte order</span><span class="v" id="fsByteOrder">—</span></div>
+                  <div class="kv"><span class="k">CRS</span><span class="v mono" id="fsCrs">—</span></div>
+                </div>
               </div>
-              <div class="cb" style="padding-top:6px;padding-bottom:8px;">
-                <div class="flag-list" id="hdrQcList">
-                  <div class="fl">
-                    <span class="pill neutral" style="justify-self:start">—</span>
-                    <span class="msg">Open a file to run header QC.</span>
-                    <span class="cat"></span>
+
+              <div class="card">
+                <div class="ch">
+                  <h2>Header QC</h2>
+                  <div class="right"><span class="pill neutral" id="hdrQcPill">—</span></div>
+                </div>
+                <div class="cb" style="padding-top:6px;padding-bottom:8px;">
+                  <div class="flag-list" id="hdrQcList">
+                    <div class="fl">
+                      <span class="pill neutral" style="justify-self:start">—</span>
+                      <span class="msg">Open a file to run header QC.</span>
+                      <span class="cat"></span>
+                    </div>
                   </div>
                 </div>
               </div>
-            </div>
 
+            </div>
           </div>
         </div>
 
-        <p class="note">
-          Tip — <span class="kbd">⌘O</span> open · <span class="kbd">⌘B</span> batch · <span class="kbd">1–5</span> switch tabs.
+        <!-- ============ BATCH (FOLDER) MODE ============ -->
+        <div id="convBatch" class="hidden">
+          <div class="card">
+            <div class="ch">
+              <h2>Convert a folder</h2>
+              <span class="hint">Every seismic file in the folder → your chosen format</span>
+              <div class="right"><span class="pill teal">batch</span></div>
+            </div>
+            <div class="cb">
+
+              <!-- found-files banner (shown once a folder is picked) -->
+              <div class="found hidden" id="batchFound">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="color:var(--teal-deep);flex:none;"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+                <span>Found <b id="batchCount">0</b> seismic files in</span>
+                <span class="fdir" id="batchDir">—</span>
+              </div>
+
+              <!-- WIZARD -->
+              <!-- step 1: source folder -->
+              <div class="wiz-step active" id="wizStepFolder">
+                <span class="wiz-num">1</span>
+                <div class="wiz-body">
+                  <div class="wt">Choose the source folder</div>
+                  <div class="ws" id="wizFolderSub">Pick a folder; SeisConv lists every .segy/.sgy/.segd/.seg/.seg2/.dat/.bat/.su file in it.</div>
+                </div>
+                <button class="btn btn-primary sm" id="pickFolderBtn">Pick folder…</button>
+              </div>
+
+              <!-- step 2: output format (reuses the 9 format chips) -->
+              <div class="wiz-step" id="wizStepFormat">
+                <span class="wiz-num">2</span>
+                <div class="wiz-body">
+                  <div class="wt">Output format</div>
+                  <div class="ws">Same 9 writers as single-file conversion.</div>
+                  <div class="chips" id="fmtChipsBatch" style="margin-top:10px;">
+                    <button class="chip sel" data-fmt="segy1"><span class="nm">SEG-Y Rev 1</span><span class="ex">.sgy</span></button>
+                    <button class="chip" data-fmt="segy0"><span class="nm">SEG-Y Rev 0</span><span class="ex">.sgy</span></button>
+                    <button class="chip" data-fmt="segy2"><span class="nm">SEG-Y Rev 2</span><span class="ex">.sgy</span></button>
+                    <button class="chip" data-fmt="su"><span class="nm">Seismic Unix</span><span class="ex">.su</span></button>
+                    <button class="chip" data-fmt="seg2"><span class="nm">SEG-2 / .dat</span><span class="ex">.dat</span></button>
+                    <button class="chip" data-fmt="segd1"><span class="nm">SEG-D Rev 1</span><span class="ex">.segd</span></button>
+                    <button class="chip" data-fmt="segd3"><span class="nm">SEG-D Rev 3</span><span class="ex">.segd</span></button>
+                    <button class="chip" data-fmt="tpimage"><span class="nm">Tape Image</span><span class="ex">.tim</span></button>
+                    <button class="chip" data-fmt="csv"><span class="nm">CSV / ASCII</span><span class="ex">.csv</span></button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- step 3: destination -->
+              <div class="wiz-step" id="wizStepDest">
+                <span class="wiz-num">3</span>
+                <div class="wiz-body">
+                  <div class="wt">Destination folder</div>
+                  <div class="ws" id="wizDestSub">Where the converted files are written.</div>
+                </div>
+                <button class="btn sm" id="pickOutBtn">Pick destination…</button>
+              </div>
+
+              <!-- run / cancel -->
+              <div class="wiz-actions">
+                <button class="btn btn-primary lg" id="runBatchBtn" disabled>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l14 9-14 9z"/></svg>
+                  <span id="runBatchLabel">Convert files</span>
+                </button>
+                <button class="btn sm hidden" id="cancelBatchBtn">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+                  Cancel
+                </button>
+                <button class="btn sm" id="clearBatchBtn">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M6 6l1 14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-14"/></svg>
+                  Clear
+                </button>
+              </div>
+
+              <!-- live progress -->
+              <div class="prog-wrap hidden" id="batchProg">
+                <div class="prog-head">
+                  <span class="pt" id="batchProgTitle">Converting…</span>
+                  <span class="pc" id="batchProgCount">0 / 0</span>
+                </div>
+                <div class="prog-bar"><div class="prog-fill" id="batchProgFill"></div></div>
+                <div class="prog-sub" id="batchProgSub"></div>
+              </div>
+
+              <!-- per-file results -->
+              <div class="file-list" id="batchFileList"></div>
+
+              <div class="status" id="batchStatus"></div>
+            </div>
+          </div>
+        </div>
+
+        <p class="note" id="convTip">
+          Tip — open · batch · switch tabs.
         </p>
       </section>
 
@@ -688,6 +937,67 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
     </div>
 
   </main>
+</div>
+
+<!-- ============================ HELP / MANUAL MODAL ============================ -->
+<div class="modal-back" id="manualBack" role="dialog" aria-modal="true" aria-labelledby="manualTitle">
+  <div class="modal">
+    <div class="mh">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--teal-deep)" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 0 1 4.4 1.6c0 1.6-2.4 2-2.4 3.4" stroke-linecap="round"/><circle cx="12" cy="17" r=".7" fill="var(--teal-deep)"/></svg>
+      <h2 id="manualTitle">SeisConv — Manual</h2>
+      <button class="mclose" id="manualClose" title="Close" aria-label="Close">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="mbody">
+      <h3>What SeisConv does</h3>
+      <p>SeisConv reads common seismic exchange formats off the UI thread and converts them between formats, with built-in QC and quick visual checks. Use the icon rail on the left to move between tabs; press <span class="kbd" data-key="tabs">1–5</span> to jump directly to a tab.</p>
+
+      <h3>Converter tab</h3>
+      <p>Two modes, chosen from the cards at the top:</p>
+      <ul>
+        <li><b>Convert single file</b> — <span class="kbd" data-key="open">Open</span> a seismic file, review the <b>File summary</b> and <b>Header QC</b>, pick an output format chip, then <b>Convert &amp; Save…</b> to choose where the converted file goes.</li>
+        <li><b>Convert a folder (batch)</b> — <b>Pick folder…</b> to scan a directory for seismic files; choose an output <b>format</b>; <b>Pick destination…</b>; then <b>Convert files</b>. A live progress bar and per-file result list show what happened. Use <b>Cancel</b> to stop a running batch.</li>
+      </ul>
+      <p><b>Clear</b> resets the Converter — it forgets the open file and empties the panels.</p>
+
+      <h3>Trace Inspector</h3>
+      <p>Step through individual traces with <span class="kbd">‹ Prev</span> / <span class="kbd">Next ›</span> or the slider, and toggle between the <b>Waveform</b> and the <b>amplitude Spectrum</b> (FFT) of the selected trace.</p>
+
+      <h3>File Viewer</h3>
+      <p>Render the whole record as a section — <b>Variable Density</b>, <b>Wiggle</b>, <b>Variable Area</b>, or <b>VD + Wiggle</b> — with a choice of colormap, a <b>Gain</b> slider, and optional <b>AGC</b>.</p>
+
+      <h3>SPS 2.1</h3>
+      <p>Load SPS <b>S / R / X</b> files to plot source/receiver geometry on a <b>Survey grid</b> (offline, pan/zoom/hover) or a <b>Real map</b> basemap. <b>Run QC</b> checks station intervals and offsets; you can <b>reproject</b> the survey to another EPSG CRS and export it.</p>
+
+      <h3>Velocity</h3>
+      <p>Compute an <b>NMO semblance</b> panel over a velocity range, then click the panel to pick a stacking-velocity function and export the picks as CSV.</p>
+
+      <h3>The 9 output formats</h3>
+      <table class="fmt-tbl">
+        <thead><tr><th>Format</th><th>Ext</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td>SEG-Y Rev 1</td><td><span class="mono">.sgy</span></td><td>Most common modern SEG-Y; IEEE/IBM floats, big-endian.</td></tr>
+          <tr><td>SEG-Y Rev 0</td><td><span class="mono">.sgy</span></td><td>Original SEG-Y for legacy tooling.</td></tr>
+          <tr><td>SEG-Y Rev 2</td><td><span class="mono">.sgy</span></td><td>Latest SEG-Y revision with extended headers.</td></tr>
+          <tr><td>Seismic Unix</td><td><span class="mono">.su</span></td><td>SU trace format (SEG-Y traces, no reel header).</td></tr>
+          <tr><td>SEG-2 / .dat</td><td><span class="mono">.dat</span></td><td>SEG-2 engineering format (e.g. Geode land recorders).</td></tr>
+          <tr><td>SEG-D Rev 1</td><td><span class="mono">.segd</span></td><td>Field acquisition format, revision 1.</td></tr>
+          <tr><td>SEG-D Rev 3</td><td><span class="mono">.segd</span></td><td>Field acquisition format, revision 3.</td></tr>
+          <tr><td>Tape Image</td><td><span class="mono">.tim</span></td><td>Raw tape-image container.</td></tr>
+          <tr><td>CSV / ASCII</td><td><span class="mono">.csv</span></td><td>Plain numeric export for spreadsheets / scripts.</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Keyboard</h3>
+      <ul>
+        <li><span class="kbd" data-key="open">Open</span> — open a single file</li>
+        <li><span class="kbd" data-key="batch">Batch</span> — jump to folder (batch) mode</li>
+        <li><span class="kbd" data-key="tabs">1–5</span> — switch tabs</li>
+        <li><span class="kbd" data-key="help">?</span> — this manual · <span class="kbd">Esc</span> closes it</li>
+      </ul>
+    </div>
+  </div>
 </div>
 
   <script src="./dist/app.js"></script>

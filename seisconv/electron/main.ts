@@ -6,7 +6,7 @@
 // only through the typed `seisconvAPI` in preload.
 
 import { app, BrowserWindow, dialog, ipcMain, Menu } from 'electron';
-import { writeFile } from 'node:fs/promises';
+import { writeFile, readdir } from 'node:fs/promises';
 import { Worker } from 'node:worker_threads';
 import * as path from 'node:path';
 import JSZip from 'jszip';
@@ -18,8 +18,17 @@ const SEISMIC_FILTERS = [
   { name: 'All files', extensions: ['*'] },
 ];
 
+// Input-folder enumeration: extensions (lower-case, no dot) we treat as seismic.
+const INPUT_EXTS = new Set(['.segy', '.sgy', '.segd', '.seg', '.seg2', '.dat', '.bat', '.su']);
+
 let win: BrowserWindow | null = null;
 let lastOpenedPath = '';
+
+// Set true by a cancel signal; the running batch checks it between files.
+let cancelRequested = false;
+ipcMain.on('seisconv:cancelConvert', () => {
+  cancelRequested = true;
+});
 
 // ── Persistent worker with id-correlated request/response ──
 let worker: Worker | null = null;
@@ -104,8 +113,32 @@ ipcMain.handle('seisconv:getSection', async (_e, opts: Record<string, unknown>) 
   return { numTraces: r.numTraces, colLen: r.colLen, norm: r.norm, sampleInt: r.sampleInt, traceStep: r.traceStep, data: r.data };
 });
 
-ipcMain.handle('seisconv:convert', async (_e, args: { format: string }) => {
-  const r = await callWorker<{ ok: boolean; bytes?: ArrayBuffer; ext?: string; error?: string }>({ type: 'convert', format: args.format });
+// Pick a folder and enumerate its seismic files (by extension), sorted by name.
+ipcMain.handle('seisconv:pickInputFolder', async () => {
+  if (!win) return null;
+  const res = await dialog.showOpenDialog(win, { properties: ['openDirectory'] });
+  if (res.canceled || !res.filePaths.length) return null;
+  const dir = res.filePaths[0];
+  const entries = await readdir(dir, { withFileTypes: true });
+  const files = entries
+    .filter((e) => e.isFile() && INPUT_EXTS.has(path.extname(e.name).toLowerCase()))
+    .map((e) => ({ name: e.name, path: path.join(dir, e.name) }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  if (!files.length) return null;
+  return { dir, files };
+});
+
+// Pick an output folder; returns the chosen path or null.
+ipcMain.handle('seisconv:pickOutputFolder', async () => {
+  if (!win) return null;
+  const res = await dialog.showOpenDialog(win, { properties: ['openDirectory'] });
+  if (res.canceled || !res.filePaths.length) return null;
+  return res.filePaths[0];
+});
+
+// Convert the CURRENTLY-OPEN file to `format` and save via a native dialog.
+ipcMain.handle('seisconv:convertSingle', async (_e, format: string) => {
+  const r = await callWorker<{ ok: boolean; bytes?: ArrayBuffer; ext?: string; error?: string }>({ type: 'convert', format });
   if (!r.ok || !r.bytes) return { ok: false, error: r.error ?? 'conversion failed' };
   if (!win) return { ok: false, error: 'no window' };
   const base = lastOpenedPath ? path.basename(lastOpenedPath).replace(/\.[^.]+$/, '') : 'output';
@@ -115,16 +148,56 @@ ipcMain.handle('seisconv:convert', async (_e, args: { format: string }) => {
   return { ok: true, path: save.filePath };
 });
 
-ipcMain.handle('seisconv:batchConvert', async (_e, format: string) => {
-  if (!win) return null;
-  const res = await dialog.showOpenDialog(win, { properties: ['openFile', 'multiSelections'], filters: SEISMIC_FILTERS });
-  if (res.canceled || !res.filePaths.length) return null;
-  const r = await callWorker<{ ok: boolean; zip?: ArrayBuffer; results?: unknown[]; error?: string }>({ type: 'batchConvert', paths: res.filePaths, format });
-  if (!r.ok || !r.zip) return { ok: false, error: r.error ?? 'batch failed' };
-  const save = await dialog.showSaveDialog(win, { defaultPath: `converted_${format}.zip`, filters: [{ name: 'ZIP archive', extensions: ['zip'] }] });
-  if (save.canceled || !save.filePath) return { ok: false, canceled: true, results: r.results };
-  await writeFile(save.filePath, Buffer.from(r.zip));
-  return { ok: true, path: save.filePath, results: r.results };
+// Convert a list of files to `format`, writing <basename>.<ext> into outDir.
+// Emits a per-file progress event; honors cancel between files.
+ipcMain.handle(
+  'seisconv:batchConvert',
+  async (_e, opts: { files: { name: string; path: string }[]; format: string; outDir: string }) => {
+    const files = opts?.files ?? [];
+    const total = files.length;
+    const results: { name: string; ok: boolean; error?: string }[] = [];
+    let done = 0;
+    let failed = 0;
+    let canceled = false;
+    cancelRequested = false;
+
+    const emit = (payload: { index: number; total: number; file: string; state: 'start' | 'done' | 'error' | 'cancelled' | 'finished'; error?: string }) => {
+      win?.webContents.send('seisconv:convertProgress', payload);
+    };
+
+    for (let i = 0; i < total; i++) {
+      const f = files[i];
+      const index = i + 1;
+      if (cancelRequested) {
+        canceled = true;
+        emit({ index, total, file: f.name, state: 'cancelled' });
+        break;
+      }
+      emit({ index, total, file: f.name, state: 'start' });
+      try {
+        const r = await callWorker<{ ok: boolean; bytes?: ArrayBuffer; ext?: string; error?: string }>({ type: 'convertPath', path: f.path, format: opts.format });
+        if (!r.ok || !r.bytes) throw new Error(r.error ?? 'conversion failed');
+        const base = f.name.replace(/\.[^.]+$/, '');
+        await writeFile(path.join(opts.outDir, `${base}.${r.ext}`), Buffer.from(r.bytes));
+        done++;
+        results.push({ name: f.name, ok: true });
+        emit({ index, total, file: f.name, state: 'done' });
+      } catch (e) {
+        failed++;
+        const error = (e as Error).message;
+        results.push({ name: f.name, ok: false, error });
+        emit({ index, total, file: f.name, state: 'error', error });
+      }
+    }
+
+    emit({ index: total, total, file: '', state: 'finished' });
+    return { ok: failed === 0 && !canceled, total, done, failed, canceled, results };
+  },
+);
+
+// Clear the open file + cached state in the worker.
+ipcMain.handle('seisconv:resetState', async () => {
+  await callWorker({ type: 'reset' });
 });
 
 ipcMain.handle('seisconv:openSPS', async () => {

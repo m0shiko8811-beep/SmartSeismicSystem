@@ -27,18 +27,55 @@ type SpsLines = { x: Float32Array; y: Float32Array; line: Int32Array; pt: Float3
 type SpsGeometry = { geo: boolean; src: SpsLines; rcv: SpsLines; bbox: { minX: number; maxX: number; minY: number; maxY: number } };
 type QCParamsUI = { srcInt?: number; rcvInt?: number; tol?: number; maxOff?: number };
 type QCRow = { sev: string; cat: string; msg: string };
-type BatchRow = { name: string; ok: boolean; traces?: number; error?: string };
 type SemblanceData = { semb: Float32Array; vels: number[]; nT: number; dt: number; siUs: number; offNote: string };
 type VelPick = { v: number; tMs: number };
 
+// ── Converter contract (folder-batch) types ──
+type ConvResult = { ok: boolean; path?: string; canceled?: boolean; error?: string };
+type FolderFile = { name: string; path: string };
+type PickFolderResult = { dir: string; files: FolderFile[] } | null;
+type BatchSummary = {
+  ok: boolean;
+  total: number;
+  done: number;
+  failed: number;
+  canceled: boolean;
+  results: { name: string; ok: boolean; error?: string }[];
+};
+type ConvProgress = {
+  index: number;
+  total: number;
+  file: string;
+  state: 'start' | 'done' | 'error' | 'cancelled' | 'finished';
+  error?: string;
+};
+
+// The renderer is the sole owner of the `window.seisconvAPI` type. The preload
+// backend implements the SAME contract (channel names + signatures) in parallel;
+// declaring the shape here keeps the renderer compiling even if the backend
+// types are not yet present, and documents exactly what the UI relies on.
 declare global {
   interface Window {
     seisconvAPI: {
+      // OS for key hints ('win32' | 'darwin' | 'linux' | …), set at preload load.
+      platform: string;
       openAndParse(): Promise<Summary | null>;
       getTrace(i: number): Promise<TraceData>;
       getSection(o?: SectionOpts): Promise<SectionData>;
-      convert(format: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
-      batchConvert(format: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string; results?: BatchRow[] } | null>;
+      // Single-file conversion of the currently-open file (save dialog).
+      convertSingle(format: string): Promise<ConvResult>;
+      // Folder picker → enumerated seismic files; null if cancelled / none.
+      pickInputFolder(): Promise<PickFolderResult>;
+      // Destination-folder picker; null if cancelled.
+      pickOutputFolder(): Promise<string | null>;
+      // Batch-convert a set of files into outDir, emitting per-file progress.
+      batchConvert(opts: { files: FolderFile[]; format: string; outDir: string }): Promise<BatchSummary>;
+      // Subscribe to per-file conversion progress; returns an unsubscribe fn.
+      onConvertProgress(cb: (p: ConvProgress) => void): () => void;
+      // Signal a running batch to stop.
+      cancelConvert(): void;
+      // Clear the open file + cached state in the worker.
+      resetState(): Promise<void>;
       openSPS(): Promise<SpsSummary | null>;
       spsGeometry(geo: boolean): Promise<SpsGeometry>;
       spsQC(qc?: QCParamsUI): Promise<QCRow[]>;
@@ -73,6 +110,36 @@ function initTheme() {
   $opt('themeDark')?.addEventListener('click', () => applyTheme('dark'));
 }
 
+// ── Help / Manual modal ──
+function openManual() { $opt('manualBack')?.classList.add('open'); }
+function closeManual() { $opt('manualBack')?.classList.remove('open'); }
+function manualOpen(): boolean { return !!$opt('manualBack')?.classList.contains('open'); }
+
+/** Replace every hard-coded key glyph with an OS-aware label (Ctrl on win32, Cmd on darwin). */
+function applyKeyHints() {
+  // bottom tip line on the Converter
+  const tip = $opt('convTip');
+  if (tip) {
+    tip.innerHTML =
+      `Tip — <span class="kbd">${KEY_OPEN}</span> open · ` +
+      `<span class="kbd">${KEY_BATCH}</span> batch · ` +
+      `<span class="kbd">1–5</span> switch tabs · ` +
+      `<span class="kbd">?</span> help.`;
+  }
+  // rail + header tooltips
+  $opt('railHelp')?.setAttribute('title', `Help / Manual — keys: ${KEY_OPEN} open · ${KEY_BATCH} batch · 1–5 tabs · ? help`);
+  $opt('helpBtn')?.setAttribute('title', `Help / Manual (?)`);
+  $opt('openBtn')?.setAttribute('title', `Open a seismic file (${KEY_OPEN})`);
+  // in-manual key chips that carry a data-key marker
+  document.querySelectorAll<HTMLElement>('.kbd[data-key]').forEach((el) => {
+    const k = el.getAttribute('data-key');
+    if (k === 'open') el.textContent = KEY_OPEN;
+    else if (k === 'batch') el.textContent = KEY_BATCH;
+    else if (k === 'tabs') el.textContent = '1–5';
+    else if (k === 'help') el.textContent = '?';
+  });
+}
+
 // Tab chrome metadata (title + breadcrumb + description in the tab header).
 const TAB_META: Record<string, { title: string; desc: string }> = {
   conv: { title: 'Converter', desc: 'Read SEG-Y · SEG-D · SEG-2 / .dat · SU off the UI thread, then export to any supported format.' },
@@ -96,6 +163,21 @@ let leafletMap: L.Map | null = null;
 let leafletLayers: { src: L.LayerGroup; rcv: L.LayerGroup } | null = null;
 let velResult: SemblanceData | null = null;
 let velPicks: VelPick[] = [];
+
+// ── Converter (single / folder-batch) state ──
+type ConvMode = 'single' | 'batch';
+let convMode: ConvMode = 'single';
+let batchFiles: FolderFile[] = [];
+let batchDir = '';
+let batchOutDir = '';
+let batchRunning = false;
+let convProgressOff: (() => void) | null = null;
+// 'win32' → Windows; default to a Mac glyph hint only when actually on darwin.
+const PLATFORM = (typeof api?.platform === 'string' ? api.platform : 'win32');
+const IS_MAC = PLATFORM === 'darwin';
+const MOD = IS_MAC ? 'Cmd' : 'Ctrl';      // primary modifier label
+const KEY_OPEN = `${MOD}+O`;
+const KEY_BATCH = `${MOD}+B`;
 
 const TABS = ['conv', 'trace', 'section', 'sps', 'vel'] as const;
 type Tab = (typeof TABS)[number];
@@ -279,14 +361,48 @@ async function onOpen() {
   }
 }
 
-// ── Converter ──
+// ══════════════════════════════════════════════════════════════════════════
+//  CONVERTER — two modes: single file & folder (batch)
+// ══════════════════════════════════════════════════════════════════════════
+
+const FMT_LABEL: Record<string, string> = {
+  segy1: 'SEG-Y Rev 1', segy0: 'SEG-Y Rev 0', segy2: 'SEG-Y Rev 2',
+  su: 'Seismic Unix', seg2: 'SEG-2 / .dat', segd1: 'SEG-D Rev 1',
+  segd3: 'SEG-D Rev 3', tpimage: 'Tape Image', csv: 'CSV / ASCII',
+};
+function fmtLabel(f: string): string { return FMT_LABEL[f] || f.toUpperCase(); }
+
+/** Switch the Converter between single-file and folder-batch modes. */
+function setConvMode(m: ConvMode) {
+  if (batchRunning) return; // don't tear the UI out from under a running batch
+  convMode = m;
+  $opt('modeSingle')?.classList.toggle('sel', m === 'single');
+  $opt('modeBatch')?.classList.toggle('sel', m === 'batch');
+  $opt('modeSingle')?.setAttribute('aria-pressed', String(m === 'single'));
+  $opt('modeBatch')?.setAttribute('aria-pressed', String(m === 'batch'));
+  $opt('convSingle')?.classList.toggle('hidden', m !== 'single');
+  $opt('convBatch')?.classList.toggle('hidden', m !== 'batch');
+}
+
+/** Mirror the chosen output format onto both chip groups + the shared state. */
+function selectFormat(fmt: string) {
+  outFormat = fmt;
+  for (const groupId of ['fmtChips', 'fmtChipsBatch']) {
+    const g = $opt(groupId);
+    if (!g) continue;
+    for (const b of g.querySelectorAll('button')) b.classList.toggle('sel', b.getAttribute('data-fmt') === fmt);
+  }
+}
+
+// ── Single-file convert ──
 async function onConvert() {
   if (!summary) return;
-  setStatus('convStatus', 'Converting…');
+  showSingleProgress(true);
+  setStatus('convStatus', `Converting → ${fmtLabel(outFormat)}…`);
   setState('busy', 'Converting…');
   ($('convertBtn') as HTMLButtonElement).disabled = true;
   try {
-    const r = await api.convert(outFormat);
+    const r = await api.convertSingle(outFormat);
     if (r.ok) { setStatus('convStatus', '✓ Saved ' + r.path, 'ok'); setState('ok', 'Saved'); }
     else if (r.canceled) { setStatus('convStatus', ''); updateStatusStrip(); }
     else { setStatus('convStatus', 'Conversion failed: ' + (r.error || 'unknown'), 'err'); setState('err', 'Convert failed'); }
@@ -294,53 +410,239 @@ async function onConvert() {
     setStatus('convStatus', 'Conversion failed: ' + errMsg(e), 'err');
     setState('err', 'Convert failed');
   } finally {
+    showSingleProgress(false);
     ($('convertBtn') as HTMLButtonElement).disabled = !(summary && summary.traceCount > 0);
   }
 }
 
-async function batchConvert() {
-  setStatus('convStatus', 'Pick files to convert…');
+function showSingleProgress(on: boolean) {
+  $opt('singleProg')?.classList.toggle('hidden', !on);
+  const t = $opt('singleProgTitle');
+  if (t) t.textContent = `Converting → ${fmtLabel(outFormat)}…`;
+}
+
+// ── Folder batch: wizard ──
+async function pickBatchFolder() {
+  if (batchRunning) return;
+  setStatus('batchStatus', 'Choosing folder…');
   try {
-    const r = await api.batchConvert(outFormat);
-    if (!r) {
-      setStatus('convStatus', '');
-      return;
-    }
-    renderBatchResults(r.results);
-    if (r.ok) setStatus('convStatus', '✓ Saved ' + r.path, 'ok');
-    else if (r.canceled) setStatus('convStatus', 'Converted — save cancelled');
-    else setStatus('convStatus', 'Batch failed: ' + (r.error || 'unknown'), 'err');
+    const res = await api.pickInputFolder();
+    if (!res) { setStatus('batchStatus', ''); return; }
+    batchFiles = res.files;
+    batchDir = res.dir;
+    const found = $opt('batchFound');
+    found?.classList.toggle('hidden', false);
+    setText('batchCount', String(res.files.length));
+    setText('batchDir', res.dir);
+    setText('wizFolderSub', `${res.files.length} seismic file${res.files.length === 1 ? '' : 's'} in this folder.`);
+    $('batchFileList').innerHTML = '';
+    setStatus('batchStatus', res.files.length ? '' : 'No seismic files in that folder.', res.files.length ? '' : 'err');
+    refreshWizard();
   } catch (e) {
-    setStatus('convStatus', 'Batch failed: ' + errMsg(e), 'err');
+    setStatus('batchStatus', 'Folder scan failed: ' + errMsg(e), 'err');
   }
 }
 
-function renderBatchResults(results?: BatchRow[]) {
-  const el = $('batchResults');
-  el.innerHTML = '';
-  if (!results || !results.length) return;
-  const ok = results.filter((r) => r.ok).length;
-  const hdr = document.createElement('div');
-  hdr.className = 'qc-hdr';
-  hdr.textContent = `${ok}/${results.length} converted`;
-  el.appendChild(hdr);
-  for (const r of results) {
-    const row = document.createElement('div');
-    row.className = 'qc-row ' + (r.ok ? 'ok' : 'error');
-    const sev = document.createElement('span');
-    sev.className = 'qc-sev';
-    sev.textContent = r.ok ? 'OK' : 'ERR';
-    const cat = document.createElement('span');
-    cat.className = 'qc-cat';
-    cat.textContent = r.ok ? `${r.traces ?? 0} tr` : '';
-    const msg = document.createElement('span');
-    msg.className = 'qc-msg';
-    msg.textContent = r.ok ? r.name : `${r.name}: ${r.error || 'failed'}`;
-    row.appendChild(sev);
-    row.appendChild(cat);
-    row.appendChild(msg);
-    el.appendChild(row);
+async function pickBatchOut() {
+  if (batchRunning) return;
+  try {
+    const dir = await api.pickOutputFolder();
+    if (!dir) return;
+    batchOutDir = dir;
+    setText('wizDestSub', dir);
+    refreshWizard();
+  } catch (e) {
+    setStatus('batchStatus', 'Destination pick failed: ' + errMsg(e), 'err');
   }
+}
+
+/** Light up wizard steps + enable the run button once folder + dest are set. */
+function refreshWizard() {
+  const haveFiles = batchFiles.length > 0;
+  const haveOut = batchOutDir.length > 0;
+  $opt('wizStepFolder')?.classList.toggle('done', haveFiles);
+  $opt('wizStepFolder')?.classList.toggle('active', !haveFiles);
+  $opt('wizStepFormat')?.classList.toggle('active', haveFiles && !haveOut);
+  $opt('wizStepFormat')?.classList.toggle('done', haveFiles && haveOut);
+  $opt('wizStepDest')?.classList.toggle('done', haveOut);
+  $opt('wizStepDest')?.classList.toggle('active', haveFiles && !haveOut);
+  const btn = $opt('runBatchBtn') as HTMLButtonElement | null;
+  if (btn) btn.disabled = !(haveFiles && haveOut) || batchRunning;
+  setText('runBatchLabel', haveFiles ? `Convert ${batchFiles.length} file${batchFiles.length === 1 ? '' : 's'}` : 'Convert files');
+}
+
+async function runBatch() {
+  if (batchRunning || !batchFiles.length || !batchOutDir) return;
+  batchRunning = true;
+  setBatchControlsRunning(true);
+  // Seed the per-file list so users see the full queue up front.
+  buildBatchQueue();
+  $opt('batchProg')?.classList.toggle('hidden', false);
+  setBatchProgress(0, batchFiles.length, '', fmtLabel(outFormat));
+  setStatus('batchStatus', '');
+  setState('busy', `Converting 0 / ${batchFiles.length}`);
+  try {
+    const r = await api.batchConvert({ files: batchFiles, format: outFormat, outDir: batchOutDir });
+    finishBatch(r);
+  } catch (e) {
+    setStatus('batchStatus', 'Batch failed: ' + errMsg(e), 'err');
+    setState('err', 'Batch failed');
+    batchRunning = false;
+    setBatchControlsRunning(false);
+    refreshWizard();
+  }
+}
+
+function cancelBatch() {
+  if (!batchRunning) return;
+  api.cancelConvert();
+  setStatus('batchStatus', 'Cancelling…');
+}
+
+/** Handle a progress tick from the backend (start/done/error/cancelled/finished). */
+function onBatchProgress(p: ConvProgress) {
+  if (p.state === 'finished') return; // summary handled by the resolved promise
+  const total = p.total || batchFiles.length;
+  if (p.state === 'cancelled') {
+    setBatchProgress(p.index, total, p.file, fmtLabel(outFormat), 'cancelled');
+    markFileRow(p.index, 'cancelled', p.file);
+    setState('busy', 'Cancelling…');
+    return;
+  }
+  if (p.state === 'start') {
+    setBatchProgress(p.index - 1, total, p.file, fmtLabel(outFormat));
+    markFileRow(p.index, 'run', p.file);
+    setState('busy', `Converting ${p.index} / ${total}`);
+  } else if (p.state === 'done') {
+    setBatchProgress(p.index, total, p.file, fmtLabel(outFormat));
+    markFileRow(p.index, 'done', p.file);
+  } else if (p.state === 'error') {
+    setBatchProgress(p.index, total, p.file, fmtLabel(outFormat));
+    markFileRow(p.index, 'error', p.file, p.error);
+  }
+}
+
+function setBatchProgress(done: number, total: number, file: string, fmt: string, note?: string) {
+  const pct = total > 0 ? Math.max(0, Math.min(100, (done / total) * 100)) : 0;
+  const fill = $opt('batchProgFill');
+  if (fill) (fill as HTMLElement).style.width = pct + '%';
+  setText('batchProgCount', `${done} / ${total}`);
+  setText('batchProgTitle', note === 'cancelled' ? 'Cancelled' : `Converting ${Math.min(done + 1, total)} / ${total} · ${fmt}`);
+  setText('batchProgSub', file ? `${file}` : '');
+}
+
+/** Pre-populate the result list with every queued file. */
+function buildBatchQueue() {
+  const el = $('batchFileList');
+  el.innerHTML = '';
+  batchFiles.forEach((f, i) => {
+    const row = document.createElement('div');
+    row.className = 'file-row queued';
+    row.id = `bfr-${i + 1}`; // 1-based to match backend progress index
+    row.innerHTML =
+      `<span class="fr-st">QUEUED</span>` +
+      `<span class="fr-nm"></span>` +
+      `<span class="fr-x">${fmtLabel(outFormat)}</span>`;
+    (row.querySelector('.fr-nm') as HTMLElement).textContent = f.name;
+    el.appendChild(row);
+  });
+}
+
+const ROW_STATE_LABEL: Record<string, string> = { run: 'CONVERTING', done: 'DONE', error: 'ERROR', cancelled: 'CANCELLED', queued: 'QUEUED' };
+function markFileRow(index: number, state: 'run' | 'done' | 'error' | 'cancelled', file: string, error?: string) {
+  const row = $opt(`bfr-${index}`);
+  if (!row) return;
+  row.className = 'file-row ' + state;
+  const st = row.querySelector('.fr-st') as HTMLElement | null;
+  if (st) st.textContent = ROW_STATE_LABEL[state] || state.toUpperCase();
+  const nm = row.querySelector('.fr-nm') as HTMLElement | null;
+  if (nm) nm.textContent = error ? `${file} — ${error}` : file;
+  row.scrollIntoView({ block: 'nearest' });
+}
+
+function finishBatch(r: BatchSummary) {
+  batchRunning = false;
+  setBatchControlsRunning(false);
+  refreshWizard();
+  const processed = r.done + r.failed;
+  const fill = $opt('batchProgFill');
+  const pct = r.canceled ? (r.total > 0 ? (processed / r.total) * 100 : 0) : 100;
+  if (fill) (fill as HTMLElement).style.width = pct + '%';
+  setText('batchProgCount', `${processed} / ${r.total}`);
+  if (r.canceled) {
+    setText('batchProgTitle', 'Cancelled');
+    setText('batchProgSub', `${r.done} converted · ${r.failed} failed · cancelled`);
+    setStatus('batchStatus', `Cancelled — ${r.done} of ${r.total} converted.`, '');
+    setState('idle', 'Cancelled');
+    // Any file that never started shows as cancelled rather than stuck on QUEUED.
+    for (let i = processed + 1; i <= batchFiles.length; i++) {
+      const f = batchFiles[i - 1];
+      if (f) markFileRow(i, 'cancelled', f.name);
+    }
+  } else if (r.failed > 0) {
+    setText('batchProgTitle', 'Finished with errors');
+    setText('batchProgSub', `${r.done} converted · ${r.failed} failed`);
+    setStatus('batchStatus', `Done — ${r.done} converted, ${r.failed} failed → ${batchOutDir}`, r.done ? '' : 'err');
+    setState(r.done ? 'ok' : 'err', `${r.done}/${r.total} done`);
+  } else {
+    setText('batchProgTitle', 'Finished');
+    setText('batchProgSub', `${r.done} converted → ${batchOutDir}`);
+    setStatus('batchStatus', `✓ Converted ${r.done} file${r.done === 1 ? '' : 's'} → ${batchOutDir}`, 'ok');
+    setState('ok', `${r.done}/${r.total} done`);
+  }
+  // Reconcile rows against the authoritative summary (covers any missed ticks).
+  r.results.forEach((res, i) => {
+    if (res.ok) markFileRow(i + 1, 'done', res.name);
+    else markFileRow(i + 1, 'error', res.name, res.error);
+  });
+}
+
+function setBatchControlsRunning(running: boolean) {
+  $opt('cancelBatchBtn')?.classList.toggle('hidden', !running);
+  for (const id of ['pickFolderBtn', 'pickOutBtn', 'runBatchBtn', 'clearBatchBtn', 'modeSingle', 'modeBatch']) {
+    const b = $opt(id) as HTMLButtonElement | null;
+    if (b) b.disabled = running;
+  }
+  // format chips disabled while running
+  for (const groupId of ['fmtChipsBatch', 'fmtChips']) {
+    const g = $opt(groupId);
+    if (g) for (const b of g.querySelectorAll('button')) (b as HTMLButtonElement).disabled = running;
+  }
+}
+
+// ── Clear (reset worker + renderer) ──
+async function clearConverter() {
+  if (batchRunning) return;
+  try { await api.resetState(); } catch { /* best-effort */ }
+  // renderer state
+  summary = null;
+  lastTrace = null;
+  lastSection = null;
+  traceIndex = 0;
+  // batch state
+  batchFiles = [];
+  batchDir = '';
+  batchOutDir = '';
+  // single-file panels back to empty
+  renderInfo();                 // hides fileInfo + clears summary/QC/strip
+  setStatus('convStatus', '');
+  showSingleProgress(false);
+  ($('convertBtn') as HTMLButtonElement).disabled = true;
+  // batch UI back to empty
+  $opt('batchFound')?.classList.toggle('hidden', true);
+  $opt('batchProg')?.classList.toggle('hidden', true);
+  $('batchFileList').innerHTML = '';
+  setStatus('batchStatus', '');
+  setText('batchProgSub', '');
+  setText('wizFolderSub', 'Pick a folder; SeisConv lists every .segy/.sgy/.segd/.seg/.seg2/.dat/.bat/.su file in it.');
+  setText('wizDestSub', 'Where the converted files are written.');
+  const fill = $opt('batchProgFill');
+  if (fill) (fill as HTMLElement).style.width = '0%';
+  refreshWizard();
+  setState('idle', 'Cleared');
+  // labels back on the empty Trace / Section views
+  setText('traceLabel', 'Open a file to inspect traces');
+  setText('secLabel', 'Open a file to view the section');
 }
 
 // ── Trace Inspector ──
@@ -1133,14 +1435,38 @@ function init() {
   for (const t of TABS) $(`tab-${t}`).addEventListener('click', () => switchTab(t));
   $('openBtn').addEventListener('click', onOpen);
   $('openBtn2').addEventListener('click', onOpen);
-  $('convertBtn').addEventListener('click', onConvert);
-  $('batchBtn').addEventListener('click', () => void batchConvert());
-  $('fmtChips').addEventListener('click', (e) => {
+
+  // ── Converter: mode switcher ──
+  $opt('modeSingle')?.addEventListener('click', () => setConvMode('single'));
+  $opt('modeBatch')?.addEventListener('click', () => setConvMode('batch'));
+
+  // ── Converter: format chips (both single + batch groups stay in sync) ──
+  const onChip = (e: Event) => {
     const btn = (e.target as HTMLElement).closest('button[data-fmt]') as HTMLElement | null;
-    if (!btn) return;
-    outFormat = btn.getAttribute('data-fmt')!;
-    for (const b of $('fmtChips').querySelectorAll('button')) b.classList.toggle('sel', b === btn);
-  });
+    if (!btn || batchRunning) return;
+    selectFormat(btn.getAttribute('data-fmt')!);
+  };
+  $opt('fmtChips')?.addEventListener('click', onChip);
+  $opt('fmtChipsBatch')?.addEventListener('click', onChip);
+
+  // ── Converter: single-file ──
+  $('convertBtn').addEventListener('click', onConvert);
+  $opt('clearBtn')?.addEventListener('click', () => void clearConverter());
+
+  // ── Converter: folder batch wizard ──
+  $opt('pickFolderBtn')?.addEventListener('click', () => void pickBatchFolder());
+  $opt('pickOutBtn')?.addEventListener('click', () => void pickBatchOut());
+  $opt('runBatchBtn')?.addEventListener('click', () => void runBatch());
+  $opt('cancelBatchBtn')?.addEventListener('click', cancelBatch);
+  $opt('clearBatchBtn')?.addEventListener('click', () => void clearConverter());
+  // live per-file progress from the backend
+  convProgressOff = api.onConvertProgress(onBatchProgress);
+
+  // ── Help / Manual modal ──
+  $opt('helpBtn')?.addEventListener('click', openManual);
+  $opt('railHelp')?.addEventListener('click', openManual);
+  $opt('manualClose')?.addEventListener('click', closeManual);
+  $opt('manualBack')?.addEventListener('click', (e) => { if (e.target === $opt('manualBack')) closeManual(); });
   const slider = $('traceSlider') as HTMLInputElement;
   slider.addEventListener('input', () => {
     traceIndex = parseInt(slider.value, 10) || 0;
@@ -1178,11 +1504,40 @@ function init() {
   $('velComputeBtn').addEventListener('click', () => void computeVelocity());
   $('velExportBtn').addEventListener('click', () => void exportPicks());
   ($('velCanvas') as HTMLCanvasElement).addEventListener('click', onVelClick);
+  // OS-aware key hints (replaces the hard-coded ⌘ glyphs everywhere).
+  applyKeyHints();
+
+  // Global keyboard shortcuts.
+  document.addEventListener('keydown', onKeyDown);
+
+  // Tidy the progress subscription on teardown.
+  window.addEventListener('beforeunload', () => { convProgressOff?.(); });
+
   // Paint the empty File-summary / Header-QC / status-strip placeholders.
   clearSummaryPanel();
   renderHeaderQc();
   updateStatusStrip();
+  setConvMode('single');
+  refreshWizard();
   switchTab('conv');
+}
+
+/** App-wide keyboard shortcuts. */
+function onKeyDown(e: KeyboardEvent) {
+  // Esc always closes the manual.
+  if (e.key === 'Escape' && manualOpen()) { closeManual(); return; }
+  // Ignore when typing in a field.
+  const tgt = e.target as HTMLElement | null;
+  if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'SELECT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)) return;
+  const mod = e.ctrlKey || e.metaKey;
+  // '?' opens the manual (Shift+/ on most layouts).
+  if (!mod && (e.key === '?' )) { e.preventDefault(); manualOpen() ? closeManual() : openManual(); return; }
+  if (mod && (e.key === 'o' || e.key === 'O')) { e.preventDefault(); void onOpen(); return; }
+  if (mod && (e.key === 'b' || e.key === 'B')) { e.preventDefault(); switchTab('conv'); setConvMode('batch'); return; }
+  if (!mod && e.key >= '1' && e.key <= '5') {
+    const idx = parseInt(e.key, 10) - 1;
+    if (idx >= 0 && idx < TABS.length) { e.preventDefault(); switchTab(TABS[idx]); }
+  }
 }
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);

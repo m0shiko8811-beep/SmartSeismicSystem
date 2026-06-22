@@ -49,6 +49,34 @@ export interface ConvertResult {
   error?: string;
 }
 
+export interface InputFolder {
+  dir: string;
+  files: { name: string; path: string }[];
+}
+
+export interface BatchOpts {
+  files: { name: string; path: string }[];
+  format: string;
+  outDir: string;
+}
+
+export interface BatchResult {
+  ok: boolean;
+  total: number;
+  done: number;
+  failed: number;
+  canceled: boolean;
+  results: { name: string; ok: boolean; error?: string }[];
+}
+
+export interface ConvertProgress {
+  index: number;
+  total: number;
+  file: string;
+  state: 'start' | 'done' | 'error' | 'cancelled' | 'finished';
+  error?: string;
+}
+
 export interface SPSSummary {
   sources: number;
   receivers: number;
@@ -89,17 +117,32 @@ export interface SemblanceData {
 }
 
 const api = {
+  /** Host OS, for OS-aware key hints (set to process.platform at preload load). */
+  platform: process.platform as string,
   /** Open a file picker, parse the chosen file off-thread; returns a summary (or null if cancelled). */
   openAndParse: (): Promise<ParseSummary | null> => ipcRenderer.invoke('seisconv:openAndParse'),
   /** Get one trace's samples + header from the currently-open file. */
   getTrace: (index: number): Promise<TraceData> => ipcRenderer.invoke('seisconv:getTrace', index),
   /** Get a decimated section matrix (for variable-density / wiggle display). */
   getSection: (opts?: SectionOpts): Promise<SectionData> => ipcRenderer.invoke('seisconv:getSection', opts ?? {}),
+  /** Pick an input folder; returns its seismic files (sorted by name) or null. */
+  pickInputFolder: (): Promise<InputFolder | null> => ipcRenderer.invoke('seisconv:pickInputFolder'),
+  /** Pick an output folder; returns the chosen path or null. */
+  pickOutputFolder: (): Promise<string | null> => ipcRenderer.invoke('seisconv:pickOutputFolder'),
   /** Convert the currently-open file to `format` ('segy1' | 'segy0' | 'su') and save via a native dialog. */
-  convert: (format: string): Promise<ConvertResult> => ipcRenderer.invoke('seisconv:convert', { format }),
-  /** Convert many files to `format` and save them as a single ZIP. */
-  batchConvert: (format: string): Promise<(ConvertResult & { results?: { name: string; ok: boolean; traces?: number; error?: string }[] }) | null> =>
-    ipcRenderer.invoke('seisconv:batchConvert', format),
+  convertSingle: (format: string): Promise<ConvertResult> => ipcRenderer.invoke('seisconv:convertSingle', format),
+  /** Convert a list of files to `format`, writing each into outDir; emits progress per file. */
+  batchConvert: (opts: BatchOpts): Promise<BatchResult> => ipcRenderer.invoke('seisconv:batchConvert', opts),
+  /** Subscribe to batch-convert progress; returns an unsubscribe fn. */
+  onConvertProgress: (cb: (p: ConvertProgress) => void): (() => void) => {
+    const listener = (_e: unknown, p: ConvertProgress) => cb(p);
+    ipcRenderer.on('seisconv:convertProgress', listener);
+    return () => ipcRenderer.removeListener('seisconv:convertProgress', listener);
+  },
+  /** Signal the running batch to stop. */
+  cancelConvert: (): void => ipcRenderer.send('seisconv:cancelConvert'),
+  /** Clear the open file + cached state in the worker. */
+  resetState: (): Promise<void> => ipcRenderer.invoke('seisconv:resetState'),
   /** Open one or more SPS files (S/R/X), parse + merge them, return a summary. */
   openSPS: (): Promise<SPSSummary | null> => ipcRenderer.invoke('seisconv:openSPS'),
   /** Get line-grouped survey geometry (projected E/N, or WGS84 lon/lat when geo=true). */

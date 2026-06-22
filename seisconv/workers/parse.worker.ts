@@ -10,7 +10,6 @@
 import { parentPort } from 'node:worker_threads';
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
-import JSZip from 'jszip';
 import { applyAGC, computeSemblance, detectSPSType, EPSG_DB, getWriter, groupByLine, mergeSPSData, normFactorPercentile, parseAny, parseSPSText, projToLatLon, reprojectSPS, resampleLinear, runSPSQC, type AGCType, type ParsedFile, type QCParams, type SPSData, type SPSPoint } from '../core';
 
 if (!parentPort) throw new Error('parse.worker must run as a worker thread');
@@ -22,7 +21,7 @@ let currentSPSFiles: { name: string; text: string; type: 'S' | 'R' | 'X' | 'mixe
 
 interface Req {
   id: number;
-  type: 'open' | 'trace' | 'section' | 'convert' | 'openSPS' | 'spsGeometry' | 'spsQC' | 'spsReproject' | 'batchConvert' | 'semblance';
+  type: 'open' | 'trace' | 'section' | 'convert' | 'convertPath' | 'reset' | 'openSPS' | 'spsGeometry' | 'spsQC' | 'spsReproject' | 'semblance';
   path?: string;
   paths?: string[];
   qc?: QCParams;
@@ -51,34 +50,6 @@ function summarize(pf: ParsedFile) {
   };
 }
 
-/** Convert many files and bundle the results into a ZIP (async). */
-async function doBatchConvert(req: Req): Promise<void> {
-  const { id } = req;
-  try {
-    const writer = getWriter(req.format!);
-    if (!writer) {
-      port.postMessage({ id, ok: false, error: `unknown output format: ${req.format}` });
-      return;
-    }
-    const zip = new JSZip();
-    const results: { name: string; ok: boolean; traces?: number; error?: string }[] = [];
-    for (const p of req.paths ?? []) {
-      const name = basename(p);
-      try {
-        const pf = parseAny(new Uint8Array(readFileSync(p)), name);
-        zip.file(`${name.replace(/\.[^.]+$/, '')}.${writer.ext}`, writer.write(pf));
-        results.push({ name, ok: true, traces: pf.traceCount });
-      } catch (e) {
-        results.push({ name, ok: false, error: (e as Error).message });
-      }
-    }
-    const zipBytes = (await zip.generateAsync({ type: 'arraybuffer' })) as ArrayBuffer;
-    port.postMessage({ id, ok: true, zip: zipBytes, results }, [zipBytes]);
-  } catch (e) {
-    port.postMessage({ id, ok: false, error: (e as Error).message });
-  }
-}
-
 port.on('message', (req: Req) => {
   const { id, type } = req;
   try {
@@ -89,8 +60,25 @@ port.on('message', (req: Req) => {
       return;
     }
 
-    if (type === 'batchConvert') {
-      void doBatchConvert(req);
+    if (type === 'reset') {
+      current = null;
+      currentSPS = null;
+      currentSPSFiles = [];
+      port.postMessage({ id, ok: true });
+      return;
+    }
+
+    if (type === 'convertPath') {
+      const writer = getWriter(req.format!);
+      if (!writer) {
+        port.postMessage({ id, ok: false, error: `unknown output format: ${req.format}` });
+        return;
+      }
+      // Parse into a LOCAL variable — never overwrite the persistent `current`.
+      const local = parseAny(new Uint8Array(readFileSync(req.path!)), basename(req.path!));
+      const out = writer.write(local);
+      const ab = out.buffer.slice(out.byteOffset, out.byteOffset + out.byteLength) as ArrayBuffer;
+      port.postMessage({ id, ok: true, bytes: ab, ext: writer.ext }, [ab]);
       return;
     }
 
