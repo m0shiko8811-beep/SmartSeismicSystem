@@ -65,3 +65,14 @@ export const MAX_SAMPLE_TRACES = 2000;
 
 /** Hard ceiling on trace count to avoid runaway loops on malformed input. */
 export const MAX_TRACES = 500000;
+
+/**
+ * Hard ceiling on the per-trace sample count a parser will honour from an
+ * attacker-controllable header field, BEFORE it is also bounded by the bytes
+ * actually present on disk. Caps a single trace's Float32Array at ~4 MB so a
+ * crafted header (huge declared nSamples, tiny data block) cannot drive a
+ * multi-gigabyte allocation and OOM-crash the parse worker. Parsers must ALSO
+ * clamp to the real on-disk byte budget — this constant is the upper guard, not
+ * the only guard. Shared by segy.ts / seg2.ts / segd.ts so the limit lives in
+ * one place. */
+export const MAX_SAMPLES_PER_TRACE = 1000000;

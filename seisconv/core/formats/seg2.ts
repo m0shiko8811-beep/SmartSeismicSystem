@@ -6,6 +6,14 @@
 
 import { dv, getF32, getF64 } from '../binary';
 import type { Bytes, ParsedFile, Trace, TraceHeader } from '../types';
+import { MAX_SAMPLES_PER_TRACE } from '../types';
+
+/** Bytes-per-sample for a SEG-2 per-trace data-format code. Format 3 is 20-bit
+ * packed (2 samples / 5 bytes = 2.5 B/sample); the rest are whole-byte widths.
+ * Used both to decode and to bound `nSamples` by the on-disk data-block size. */
+function seg2BytesPerSample(trDataFmt: number): number {
+  return trDataFmt === 1 ? 2 : trDataFmt === 2 ? 4 : trDataFmt === 3 ? 2.5 : trDataFmt === 5 ? 8 : 4;
+}
 
 const ri16 = (buf: Bytes, o: number): number => buf[o] | (buf[o + 1] << 8); // always LE
 const ri32 = (buf: Bytes, o: number): number =>
@@ -115,6 +123,25 @@ export function parseSEG2(b: Bytes): ParsedFile {
     return seg2FreeFormObj(b, ffStart, ffEnd, strTerm, lineTerm);
   }
 
+  // SECURITY (memory-DoS, defense-in-depth): a FILE-WIDE cumulative allocation
+  // budget. The per-trace clamp below bounds each trace by ITS OWN available
+  // bytes, but a crafted file can point many trace pointers at the SAME data
+  // region (overlapping/non-monotonic offsets, dataBlockSize=0) so every trace
+  // independently clamps to ~filesize/bps and still allocates O(traces×filesize)
+  // in total. This budget caps the TOTAL sample bytes allocated across ALL
+  // traces at the bytes the file could plausibly hold — the on-disk sample
+  // region (b.length minus the fixed 32-byte FDB header). For any valid file the
+  // sum of all traces' sample bytes is ≤ filesize ≤ budget, so the budget never
+  // clamps a legit trace and parsing stays bit-identical. Once exhausted we stop
+  // allocating sample arrays (samples=null / nSamples=0), mirroring the
+  // MAX_SAMPLE_TRACES (t < 2000) cap below.
+  let sampleByteBudget = Math.max(0, b.length - ptrBase);
+  // Track the previous trace's data-block start to detect non-monotonic /
+  // overlapping data pointers (a hallmark of the budget-bypass attack). We only
+  // record it for diagnostics; the budget above is what makes the allocation
+  // safe regardless of pointer ordering.
+  let prevDataStart = -1;
+
   for (let t = 0; t < nTraces && t < 500000; t++) {
     const trcOff = ri32(b, ptrBase + t * 4);
     if (trcOff === 0 || trcOff + 32 > b.length) break;
@@ -126,16 +153,42 @@ export function parseSEG2(b: Bytes): ParsedFile {
     const tdbSize = ri16(b, trcOff + 2);
     if (tdbSize < 32 || trcOff + tdbSize > b.length) break;
     const dataBlockSize = ri32(b, trcOff + 4);
-    const nSamples = ri32(b, trcOff + 8);
+    let nSamples = ri32(b, trcOff + 8);
     const trDataFmt = ri16(b, trcOff + 12); // per-trace data format (NOT from FDB)
-    if (nSamples <= 0 || nSamples > 1000000) break;
+    if (nSamples <= 0 || nSamples > MAX_SAMPLES_PER_TRACE) break;
     if (trcOff + tdbSize + dataBlockSize > b.length) break;
 
-    const trHdr = getTrHdr(trcOff, tdbSize);
     const dataStart = trcOff + tdbSize;
+    // SECURITY (memory-DoS): nSamples is attacker-controllable and decoupled
+    // from the on-disk data block. Bound it by the bytes ACTUALLY available for
+    // this trace's samples before allocating, so a crafted header (huge declared
+    // nSamples, tiny data block) can't drive a multi-GB Float32Array. Use the
+    // trace's own data-block size when present, else the remaining file bytes.
+    // For a valid file the data block holds exactly nSamples*bps bytes, so this
+    // clamp is a no-op and parsing stays bit-identical.
+    const bps = seg2BytesPerSample(trDataFmt);
+    const availBytes = dataBlockSize > 0 ? Math.min(dataBlockSize, b.length - dataStart) : b.length - dataStart;
+    nSamples = Math.min(nSamples, Math.max(0, Math.floor(availBytes / bps)));
+    if (nSamples <= 0) break;
+
+    // FILE-WIDE budget clamp: cap this trace's samples so its sample bytes don't
+    // exceed the budget remaining for ALL remaining traces combined. This is the
+    // piece the per-trace clamp can't provide on its own — without it, N traces
+    // sharing one data region each allocate ~filesize/bps for an O(N×filesize)
+    // blow-up. For a valid file the budget is never the binding constraint.
+    nSamples = Math.min(nSamples, Math.max(0, Math.floor(sampleByteBudget / bps)));
+    if (nSamples <= 0) break; // budget exhausted → stop allocating sample arrays
+
+    // Diagnostic only: flag overlapping / non-monotonic trace data pointers.
+    if (dataStart <= prevDataStart) r.errors.push(`Trace ${t}: non-monotonic/overlapping data pointer`);
+    prevDataStart = dataStart;
+
+    const trHdr = getTrHdr(trcOff, tdbSize);
     let samples: Float32Array | null = null;
     if (t < 2000) {
       samples = new Float32Array(nSamples);
+      // Charge the budget for the bytes this trace actually consumes.
+      sampleByteBudget -= nSamples * bps;
       const bpsInt = trDataFmt === 1 ? 2 : trDataFmt === 2 ? 4 : trDataFmt === 5 ? 8 : 4;
       if (trDataFmt === 3) {
         // 20-bit packed (2 samples per 5 bytes)

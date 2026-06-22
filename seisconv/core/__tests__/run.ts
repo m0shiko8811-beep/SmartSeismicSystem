@@ -621,6 +621,207 @@ test('writeTapeImage wraps a SEG-Y that parseTpimage + detect() recover', () => 
   assert.ok(raw.length >= 1 && detect(raw[0].bytes, raw[0].name) === 'SEG-Y', 'unlabeled image still extracts SEG-Y');
 });
 
+// ── Security: memory-DoS hardening in the binary parsers ──────────────────────
+// Regression for two parser allocation findings:
+//  (HIGH) seg2.ts allocated new Float32Array(nSamples) from an attacker-controlled
+//         header field that was DECOUPLED from the on-disk data-block size — a
+//         crafted ~100KB SEG-2 (nSamples=999999, tiny data block) could allocate
+//         ~7.6 GB and OOM the worker. nSamples must be bounded by available bytes.
+//  (LOW)  segd.ts 20-bit branch used sptStored WITHOUT the Math.min clamp the
+//         32-bit / 24-bit branches have, so an inflated bytes-per-scan field could
+//         over-allocate. It must clamp ns = min(ns, floor(rem*2/5)).
+// The valid Geode sample must still parse to its true, unchanged sample counts.
+console.log('\n[security]');
+
+// LE writers for crafting a hostile SEG-2 buffer.
+function w16le(b: Uint8Array, o: number, v: number): void {
+  b[o] = v & 0xff;
+  b[o + 1] = (v >> 8) & 0xff;
+}
+function w32le(b: Uint8Array, o: number, v: number): void {
+  b[o] = v & 0xff;
+  b[o + 1] = (v >> 8) & 0xff;
+  b[o + 2] = (v >> 16) & 0xff;
+  b[o + 3] = (v >> 24) & 0xff;
+}
+
+/**
+ * Craft a structurally-valid SEG-2 with ONE trace whose TDB declares a huge
+ * nSamples (999999) but whose on-disk data block is tiny (8 bytes = 2 IEEE
+ * float32 samples). A pre-fix parser would allocate ~4 MB for this single trace
+ * (and ~7.6 GB for the x2000 multi-trace variant in the wild); the fix must clamp
+ * nSamples to the data-block budget (= 2 here).
+ */
+function craftHostileSEG2(): Uint8Array {
+  const tdbSize = 32; // fixed TDB header only, no free-form
+  const dataBlockSize = 8; // 2 IEEE float32 samples actually on disk
+  const trcOff = 64; // past the 32-byte FDB + a 32-slot pad; well clear of ptr array
+  const buf = new Uint8Array(trcOff + tdbSize + dataBlockSize);
+  // FDB
+  buf[0] = 0x3a;
+  buf[1] = 0x55; // LE magic
+  w16le(buf, 2, 1); // revision 1
+  w16le(buf, 6, 1); // nTraces = 1
+  buf[10] = 0; // string-terminator length = 0 → ST defaults to 0x00
+  buf[11] = 1; // line-terminator length = 1
+  buf[12] = 0x0a; // line terminator '\n'
+  // Trace pointer array at fixed byte 32: trace 0 → trcOff.
+  w32le(buf, 32, trcOff);
+  // Trace descriptor block.
+  w16le(buf, trcOff, 0x4422); // TDB ID
+  w16le(buf, trcOff + 2, tdbSize); // TDB size
+  w32le(buf, trcOff + 4, dataBlockSize); // data block size (TINY)
+  w32le(buf, trcOff + 8, 999999); // nSamples (HUGE / attacker-controlled)
+  w16le(buf, trcOff + 12, 4); // data format 4 = IEEE float32 (4 bytes/sample)
+  // 8 bytes of sample data follow at trcOff+tdbSize.
+  return buf;
+}
+
+test('SEG-2 with a huge declared nSamples + tiny data block parses without OOM (samples bounded by bytes)', () => {
+  const hostile = craftHostileSEG2();
+  let pf: any;
+  assert.doesNotThrow(() => { pf = parseSEG2(hostile); }, 'parseSEG2 threw on the crafted file');
+  assert.ok(pf.traceCount >= 1, `expected the trace to be parsed, got ${pf.traceCount}`);
+  const t0 = pf.traces[0];
+  // The allocation MUST be bounded by the 8-byte data block / 4 = 2 samples,
+  // NOT the declared 999999. Assert it is small (not ~1M).
+  assert.ok(t0.nSamples <= 2, `nSamples not clamped to data block: ${t0.nSamples}`);
+  assert.ok(t0.samples != null && t0.samples.length === t0.nSamples, 'samples length matches clamped nSamples');
+  assert.ok(t0.nSamples < 1000, `sanity: clamped count must be far below 1M, got ${t0.nSamples}`);
+});
+
+/**
+ * Craft a MULTI-TRACE budget-bypass SEG-2 (~100KB): up to 2000 trace pointers
+ * ALL aimed at the SAME tiny data region, each TDB declaring nSamples=999999
+ * with dataBlockSize=0 (so the per-trace clamp falls back to "remaining file
+ * bytes"). Pre-budget-fix, every trace independently clamped to ~filesize/4 and
+ * allocated a full ~filesize/4 Float32Array → total = O(traces × filesize)
+ * (measured: a 2MB file → ~3.9 GB). The FILE-WIDE budget must bound the TOTAL
+ * sample allocation across ALL traces to O(filesize).
+ */
+function craftBudgetBypassSEG2(): Uint8Array {
+  const N = 2000; // trace pointers
+  const ptrBase = 32; // fixed trace-pointer array offset
+  const ptrArrayEnd = ptrBase + N * 4;
+  // Shared trace descriptor block, placed just past the pointer array. Every
+  // pointer aims here, so all traces overlap on the same data region.
+  const trcOff = ptrArrayEnd + 16;
+  const tdbSize = 32; // fixed TDB header only
+  const dataStart = trcOff + tdbSize;
+  // Pad the file out to ~100KB so "remaining bytes" per trace is large.
+  const fileLen = Math.max(100 * 1024, dataStart + 64);
+  const buf = new Uint8Array(fileLen);
+  // FDB
+  buf[0] = 0x3a;
+  buf[1] = 0x55; // LE magic
+  w16le(buf, 2, 1); // revision 1
+  w16le(buf, 6, N); // nTraces = 2000
+  buf[10] = 0; // string-terminator length = 0 → ST defaults to 0x00
+  buf[11] = 1; // line-terminator length = 1
+  buf[12] = 0x0a; // line terminator '\n'
+  // Trace pointer array: ALL N pointers → the SAME trcOff (overlapping).
+  for (let t = 0; t < N; t++) w32le(buf, ptrBase + t * 4, trcOff);
+  // The single shared trace descriptor block.
+  w16le(buf, trcOff, 0x4422); // TDB ID
+  w16le(buf, trcOff + 2, tdbSize); // TDB size
+  w32le(buf, trcOff + 4, 0); // dataBlockSize = 0 → clamp falls back to remaining bytes
+  w32le(buf, trcOff + 8, 999999); // nSamples (HUGE / attacker-controlled)
+  w16le(buf, trcOff + 12, 4); // data format 4 = IEEE float32 (4 bytes/sample)
+  return buf;
+}
+
+test('SEG-2 with 2000 overlapping trace pointers (dataBlockSize=0) bounds TOTAL allocation by filesize, not traces×filesize', () => {
+  const hostile = craftBudgetBypassSEG2();
+  const start = Date.now();
+  let pf: any;
+  assert.doesNotThrow(() => { pf = parseSEG2(hostile); }, 'parseSEG2 threw on the multi-trace budget-bypass file');
+  const elapsed = Date.now() - start;
+  // The whole point: TOTAL sample bytes across ALL traces must be O(filesize),
+  // not O(traces × filesize). Sum the allocated bytes and assert a small multiple
+  // of the file size. (Pre-fix this was ~2000 × filesize/4 = 500× filesize.)
+  let totalSampleBytes = 0;
+  let allocatedTraces = 0;
+  for (const tr of pf.traces) {
+    const n = tr.samples ? tr.samples.length : 0;
+    totalSampleBytes += n * 4; // IEEE float32 = 4 B/sample
+    if (tr.samples) allocatedTraces++;
+    // Every individual trace must also still be per-trace clamped.
+    assert.ok(!tr.samples || tr.samples.length === tr.nSamples, 'samples length matches nSamples');
+  }
+  assert.ok(
+    totalSampleBytes <= 4 * hostile.length,
+    `TOTAL sample allocation must be ≤ 4× filesize: ${totalSampleBytes} bytes vs file ${hostile.length} (×${(totalSampleBytes / hostile.length).toFixed(1)})`,
+  );
+  // And it must not hang: parsing 2000 overlapping pointers should be sub-second.
+  assert.ok(elapsed < 3000, `parse took too long (${elapsed} ms) — possible O(traces×filesize) blow-up`);
+  console.log(
+    `      golden: budget-bypass — traces=${pf.traceCount} allocated=${allocatedTraces} ` +
+      `totalSampleBytes=${totalSampleBytes} (file ${hostile.length}, ${(totalSampleBytes / hostile.length).toFixed(2)}× filesize, ${elapsed} ms)`,
+  );
+});
+
+/**
+ * Craft a SEG-D whose GH1 declares a 20-bit packed format with an inflated
+ * bytes-per-scan field (→ sptStored ~400000) on a tiny file. The 20-bit decode
+ * branch must clamp ns to floor(rem*2/5), not honour the forged sptStored.
+ */
+function craftHostileSEGD20bit(): Uint8Array {
+  const buf = new Uint8Array(120);
+  // GH1: file number (BCD) bytes 0-1, format code (BCD) bytes 2-3.
+  // fmtCode must NOT be 32/8032/68/8068 so the parser takes the 20-bit branch.
+  buf[2] = 0x00;
+  buf[3] = 0x36; // fmtCode = 0036 (20-bit), bcd2 → 0*100 + 36
+  buf[9] = 0x24; // year BCD (cosmetic)
+  // addlBlocks = (b[10]>>4)&0xf = 0; Julian-day low bits = 0.
+  buf[10] = 0x00;
+  buf[11] = 0x00;
+  // bytes-per-scan (BCD) in 18-20 → inflate to 999999 → sptStored = round(/2.5) = 400000.
+  buf[18] = 0x99;
+  buf[19] = 0x99;
+  buf[20] = 0x99;
+  // numChanSets = (b[22]>>4)&0xf, extHdrLen = (b[23]>>4)&0xf, extlHdrLen = b[23]&0xf.
+  buf[21] = 0x20; // base-scan-interval code 2 (cosmetic, → 2000us)
+  buf[22] = 0x00; // numChanSets = 0 → loop runs (numChanSets||1)=1 channel-set block
+  buf[23] = 0x00; // no extended headers
+  // The channel-set descriptor block (32 bytes) starts at off=32; leave it zero
+  // (seisCC stays 0 → defaults to 1). The trace record header begins thereafter.
+  return buf;
+}
+
+test('SEG-D 20-bit packed with a forged bytes-per-scan is bounded by remaining bytes (not ~400k)', () => {
+  const hostile = craftHostileSEGD20bit();
+  let pf: any;
+  assert.doesNotThrow(() => { pf = parseSEGD(hostile); }, 'parseSEGD threw on the crafted 20-bit file');
+  assert.ok(pf.traceCount >= 1, `expected a trace, got ${pf.traceCount}`);
+  const t0 = pf.traces[0];
+  // floor(rem*2/5) on this ~120-byte file is a few dozen samples at most — assert
+  // it is nowhere near the forged sptStored (~400000).
+  assert.ok(t0.nSamples < 1000, `20-bit ns not clamped to remaining bytes: ${t0.nSamples}`);
+  if (t0.samples) assert.equal(t0.samples.length, t0.nSamples, 'samples length matches clamped ns');
+});
+
+// The fix must NOT alter valid parsing: the real Geode sample still decodes to
+// its true, unchanged per-trace sample counts (data block == nSamples*bps, so the
+// new clamp is a no-op).
+if (existsSync(GEODE)) {
+  test('valid Geode .dat still parses to its true, unchanged sample counts (clamp is a no-op)', () => {
+    const pf = parseSEG2(readBytes(GEODE));
+    assert.equal(pf.errors.length, 0, `errors: ${pf.errors.join('; ')}`);
+    assert.ok(pf.traceCount > 0, 'expected > 0 traces');
+    for (const tr of pf.traces) {
+      if (tr.samples) {
+        assert.equal(tr.samples.length, tr.nSamples, 'decoded length matches header nSamples');
+        // A real Geode trace carries hundreds–thousands of samples; the clamp must
+        // NOT have truncated it to the data-block-undershoot seen in the attack.
+        assert.ok(tr.nSamples > 2, `valid trace truncated by the clamp: nSamples=${tr.nSamples}`);
+      }
+    }
+    console.log(`      golden: Geode traceCount=${pf.traceCount} samplesPerTrace=${pf.traces[0].nSamples}`);
+  });
+} else {
+  skip('valid Geode clamp-is-a-no-op check', `${GEODE} not found`);
+}
+
 // ── Summary ───────────────────────────────────────────────────────────────────
 console.log('\n----------------------');
 console.log(`passed: ${passed}   failed: ${failed}   skipped: ${skipped}\n`);

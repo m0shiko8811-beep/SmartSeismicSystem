@@ -7,6 +7,7 @@
 
 import { bcd2, dv, r32u, rIEEE, w32 } from '../binary';
 import type { Bytes, ParsedFile, Trace } from '../types';
+import { MAX_SAMPLES_PER_TRACE } from '../types';
 
 export function parseSEGD(b: Bytes): ParsedFile {
   const r: ParsedFile = { format: 'SEG-D', revision: 1, gh1: {}, bh: {}, traces: [], traceCount: 0, errors: [] };
@@ -65,7 +66,7 @@ export function parseSEGD(b: Bytes): ParsedFile {
     let samples: Float32Array | null = null;
     let ns = 0;
     if (bpsBits === 32) {
-      ns = sptStored > 0 ? sptStored : Math.min(Math.floor(rem / (4 * Math.max(seisCC, 1))), 100000);
+      ns = sptStored > 0 ? sptStored : Math.min(Math.floor(rem / (4 * Math.max(seisCC, 1))), MAX_SAMPLES_PER_TRACE);
       if (sptStored > 0) ns = Math.min(ns, Math.floor(rem / 4));
       if (ns <= 0) break;
       if (tc < 2000) {
@@ -74,7 +75,7 @@ export function parseSEGD(b: Bytes): ParsedFile {
       }
       off += ns * 4;
     } else if (bpsBits === 24) {
-      ns = sptStored > 0 ? sptStored : Math.min(Math.floor(rem / (3 * Math.max(seisCC, 1))), 100000);
+      ns = sptStored > 0 ? sptStored : Math.min(Math.floor(rem / (3 * Math.max(seisCC, 1))), MAX_SAMPLES_PER_TRACE);
       if (sptStored > 0) ns = Math.min(ns, Math.floor(rem / 3));
       if (ns <= 0) break;
       if (tc < 2000) {
@@ -87,7 +88,12 @@ export function parseSEGD(b: Bytes): ParsedFile {
       }
       off += ns * 3;
     } else {
-      ns = sptStored > 0 ? sptStored : Math.min(Math.floor((rem * 2) / (5 * Math.max(seisCC, 1))), 100000);
+      ns = sptStored > 0 ? sptStored : Math.min(Math.floor((rem * 2) / (5 * Math.max(seisCC, 1))), MAX_SAMPLES_PER_TRACE);
+      // SECURITY: when sptStored>0 it is attacker-controllable, so bound it by the
+      // bytes actually remaining (2 samples per 5 packed bytes → floor(rem*2/5)),
+      // mirroring the 32-bit and 24-bit branches above. Without this an inflated
+      // bytes-per-scan field drives a multi-GB Float32Array on a tiny file.
+      if (sptStored > 0) ns = Math.min(ns, Math.floor((rem * 2) / 5));
       const nb = Math.ceil((ns * 5) / 2);
       if (ns <= 0) break;
       if (tc < 2000) {

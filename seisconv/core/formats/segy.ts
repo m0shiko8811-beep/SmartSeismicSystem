@@ -5,7 +5,7 @@
 
 import { asciiPrintable, dv, ebcdic, getF32, getI16, getI32, ibm2f, r16s, r16u, r32s, w16, w32 } from '../binary';
 import type { Bytes, ParsedFile, Trace, TraceHeader } from '../types';
-import { MAX_TRACES } from '../types';
+import { MAX_SAMPLES_PER_TRACE, MAX_TRACES } from '../types';
 
 /** Product tag stamped into written SEG-Y textual headers. Neutral; change here if rebranding. */
 export const WRITER_TAG = 'SeisConv';
@@ -60,7 +60,7 @@ export function parseSEGY(b: Bytes): ParsedFile {
       muteStart: r16s(b, off + 110), muteEnd: r16s(b, off + 112), traceWeight: r16s(b, off + 168),
     };
     const ns = (hdr.nSamples as number) || spt;
-    if (ns <= 0 || ns > 500000) {
+    if (ns <= 0 || ns > MAX_SAMPLES_PER_TRACE) {
       off += 240 + Math.max(spt > 0 ? spt * bps : 0, 4);
       continue;
     }
