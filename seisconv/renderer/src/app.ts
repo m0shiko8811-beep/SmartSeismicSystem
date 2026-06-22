@@ -2629,8 +2629,16 @@ async function clearSPS() {
   updateSpsStats();
   renderSummaryPanel();
   updateStatusStrip();
-  // Repaint the (now empty) grid; the map, if active, is cleared by hiding it
-  // and falling back to the grid view on the next load.
+  // Clear the Leaflet map layers too — without this the map VIEW kept showing the
+  // survey after "Clear SPS" (the bug), since only the grid was repainted. Mirror
+  // updateMap's teardown: drop the src/rcv layer groups + any highlight ring.
+  if (leafletMap && leafletLayers) {
+    leafletMap.removeLayer(leafletLayers.src);
+    leafletMap.removeLayer(leafletLayers.rcv);
+    leafletLayers = null;
+  }
+  if (leafletMap && mapHighlight) { leafletMap.removeLayer(mapHighlight); mapHighlight = null; }
+  // Repaint the (now empty) grid view.
   if (spsView === 'grid') drawEmptyGrid();
 }
 
