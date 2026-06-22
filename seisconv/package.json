@@ -14,6 +14,7 @@
     "build": "npm run build:main && npm run build:preload && npm run build:worker && npm run build:renderer",
     "start": "npm run build && electron .",
     "test:core": "tsx core/__tests__/run.ts",
+    "qc:realdata": "tsx scripts/realdata-qc.ts",
     "typecheck": "tsc --noEmit",
     "dist": "npm run build && electron-builder"
   },
