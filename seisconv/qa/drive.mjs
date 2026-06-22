@@ -265,6 +265,37 @@ const globalPageErrors = [];
     return { canvasFail: grid.blank ? `spsCanvas ${grid.reason}` : null };
   });
 
+  // ── 4b) SPS HEADERS editor — open the H-record modal, assert it populates ──
+  // Runs while still on the SPS tab (S/R/X loaded in step 4). The modal is shown
+  // by toggling the `.open` class on #spsHeadersBack (not display: in the panel),
+  // and loadSpsHeaders() fills #spsHdrGroups from the worker, clearing
+  // #spsHdrStatus on success. We assert it opens, populates, and has no error.
+  await step('tab-sps', 'panel-sps', '4b-sps-headers.png', async (notes) => {
+    await win.click('#spsHeadersBtn');
+    // wait for the modal to open AND the View groups to render (status clears on ok).
+    await win.waitForFunction(() => {
+      const back = document.getElementById('spsHeadersBack');
+      const open = back && back.classList.contains('open');
+      const groups = document.getElementById('spsHdrGroups');
+      const groupsReady = groups && groups.children.length > 0;
+      return open && groupsReady;
+    }, null, { timeout: 20000 }).catch(() => notes.push('WARN: SPS headers modal/groups did not populate in 20s'));
+    await sleep(300);
+    const isOpen = await win.evaluate(() => !!document.getElementById('spsHeadersBack')?.classList.contains('open'));
+    const groupRows = await win.evaluate(() => document.getElementById('spsHdrGroups')?.children.length || 0);
+    const status = (await win.textContent('#spsHdrStatus'))?.trim() || '';
+    notes.push(`headers modal open=${isOpen} groupSections=${groupRows} status="${status}"`);
+    // close it again so it doesn't sit over later tabs.
+    await win.click('#spsHeadersClose'); await sleep(200);
+    const closed = await win.evaluate(() => !document.getElementById('spsHeadersBack')?.classList.contains('open'));
+    notes.push(`closed=${closed}`);
+    const fails = [];
+    if (!isOpen) fails.push('modal did not open');
+    if (groupRows === 0) fails.push('no header group sections rendered');
+    if (/^Failed/i.test(status)) fails.push(`status error: ${status}`);
+    return { assertFail: fails.length ? fails.join('; ') : null };
+  }, 'tab-sps-headers');
+
   // ── 5) VELOCITY — compute NMO semblance + canvas ──
   await step('tab-vel', 'panel-vel', '5-velocity.png', async (notes) => {
     await win.click('#velComputeBtn');
@@ -277,6 +308,49 @@ const globalPageErrors = [];
     const vel = await canvasBlank(win, 'velCanvas', CANVAS_BG);
     notes.push(`vel canvas distinct=${vel.distinct} label="${(await win.textContent('#velLabel'))?.trim()}"`);
     return { canvasFail: vel.blank ? `velCanvas ${vel.reason}` : null };
+  });
+
+  // ── 5b) SPECTRUM — Average / Spectrogram / F-K displays (SEGY still open) ──
+  // The spectrum panel needs an open file; the big-endian SEGY from step 1 is
+  // still the open summary here (workbench/velocity don't replace it). Switching
+  // the segmented DISPLAY selector triggers an async (worker) fetch+paint guarded
+  // by specBusy, so after each click we wait for #specLabel to leave its
+  // "Computing…/Open a file" states before sampling the canvas.
+  await step('tab-spectrum', 'panel-spectrum', '5b-spectrum.png', async (notes) => {
+    // helper: wait until the spectrum label settles (not Computing/empty) then
+    // sample specCanvas; record distinct/blank for the named display.
+    const settleAndCheck = async (label) => {
+      await win.waitForFunction(() => {
+        const l = document.getElementById('specLabel');
+        const t = (l?.textContent || '').trim();
+        return t !== '' && !/^Computing/i.test(t) && !/Open a seismic file/i.test(t);
+      }, null, { timeout: 30000 }).catch(() => notes.push(`WARN: ${label} label did not settle in 30s`));
+      await sleep(400);
+      const r = await canvasBlank(win, 'specCanvas', CANVAS_BG);
+      notes.push(`${label}: distinct=${r.distinct} label="${(await win.textContent('#specLabel'))?.trim()}"`);
+      return r;
+    };
+
+    // Average spectrum is the default display and should already be painting.
+    const avg = await settleAndCheck('average');
+
+    // Spectrogram (STFT heatmap of the current trace).
+    await win.click('#specDispGram');
+    const gram = await settleAndCheck('spectrogram');
+
+    // F-K (frequency–wavenumber heatmap over the whole file).
+    await win.click('#specDispFk');
+    const fk = await settleAndCheck('f-k');
+
+    // Back to Average for a clean final canvas + assert each display drew.
+    await win.click('#specDispAvg');
+    await settleAndCheck('average(return)');
+
+    const fails = [];
+    if (avg.blank)  fails.push(`average ${avg.reason}`);
+    if (gram.blank) fails.push(`spectrogram ${gram.reason}`);
+    if (fk.blank)   fails.push(`f-k ${fk.reason}`);
+    return { canvasFail: fails.length ? fails.join('; ') : null };
   });
 
   // ── 6) TRACE WORKBENCH — add open trace + (LE pick) + analysis ──
@@ -294,6 +368,43 @@ const globalPageErrors = [];
     const wb = await canvasBlank(win, 'wbCanvas', CANVAS_BG);
     notes.push(`workbench canvas distinct=${wb.distinct}`);
     return { canvasFail: wb.blank ? `wbCanvas ${wb.reason}` : null };
+  });
+
+  // ── 6b) OBSERVER LOG — run the setup wizard, build a log, assert grid shows ──
+  // The wizard pre-checks at least one column group, so clicking #ologBuildBtn
+  // commits a valid log: buildLog() hides #obslogWizard, reveals #obslogGrid and
+  // stamps #ologGridLabel ("N records · M columns"). If a log was already built
+  // in a prior run (persisted to localStorage) the grid shows immediately; in
+  // that case we still add a row to exercise the live grid.
+  await step('tab-obslog', 'panel-obslog', '6b-obslog.png', async (notes) => {
+    const gridVisible = async () => win.evaluate(() => {
+      const g = document.getElementById('obslogGrid');
+      return !!g && getComputedStyle(g).display !== 'none';
+    });
+    if (await gridVisible()) {
+      notes.push('log already configured (grid shown) — adding a row');
+      await win.click('#ologAddRowBtn').catch(() => {}); await sleep(300);
+    } else {
+      // Build from the wizard with its default selections.
+      await win.click('#ologBuildBtn');
+      await win.waitForFunction(() => {
+        const g = document.getElementById('obslogGrid');
+        return !!g && getComputedStyle(g).display !== 'none';
+      }, null, { timeout: 15000 }).catch(() => notes.push('WARN: obslog grid did not appear in 15s'));
+      await sleep(300);
+      // add a row to prove the live grid edits.
+      await win.click('#ologAddRowBtn').catch(() => {}); await sleep(300);
+    }
+    const built = await gridVisible();
+    const label = (await win.textContent('#ologGridLabel'))?.trim() || '';
+    const cols = await win.evaluate(() => document.querySelectorAll('#ologThead th').length);
+    const rows = await win.evaluate(() => document.querySelectorAll('#ologTbody tr').length);
+    const wizStatus = (await win.textContent('#ologWizStatus'))?.trim() || '';
+    notes.push(`grid built=${built} label="${label}" cols=${cols} rows=${rows} wizStatus="${wizStatus}"`);
+    const fails = [];
+    if (!built) fails.push('grid did not appear after Build');
+    if (cols === 0) fails.push('no columns rendered');
+    return { assertFail: fails.length ? fails.join('; ') : null };
   });
 
   // ── 7) LITTLE-ENDIAN re-open back on Converter (expect 251 traces) ──
