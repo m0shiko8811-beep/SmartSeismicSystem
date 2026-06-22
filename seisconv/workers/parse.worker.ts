@@ -21,11 +21,16 @@ let currentSPSFiles: { name: string; text: string; type: 'S' | 'R' | 'X' | 'mixe
 
 interface Req {
   id: number;
-  type: 'open' | 'trace' | 'section' | 'convert' | 'convertPath' | 'reset' | 'openSPS' | 'spsGeometry' | 'spsQC' | 'spsReproject' | 'semblance';
+  type: 'open' | 'trace' | 'section' | 'convert' | 'convertPath' | 'reset' | 'openSPS' | 'spsGeometry' | 'spsQC' | 'spsPointDetail' | 'spsReproject' | 'semblance';
   path?: string;
   paths?: string[];
   qc?: QCParams;
   code?: string;
+  // spsPointDetail lookup key: pick the matching S/R point by line + point (+ idx).
+  rtype?: 'S' | 'R';
+  lineName?: string;
+  point?: number;
+  idx?: string;
   geo?: boolean;
   velMin?: number;
   velMax?: number;
@@ -175,7 +180,55 @@ port.on('message', (req: Req) => {
         return;
       }
       const results = runSPSQC(currentSPS, req.qc ?? {});
-      port.postMessage({ id, ok: true, results: results.map((r) => ({ sev: r.sev, cat: r.cat, msg: r.msg })) });
+      // Forward each finding's offending points as lightweight coords so the
+      // renderer can locate + highlight them (the full SPSPoint stays here).
+      port.postMessage({
+        id,
+        ok: true,
+        results: results.map((r) => ({
+          sev: r.sev,
+          cat: r.cat,
+          msg: r.msg,
+          pts: (r.pts || []).map((p) => ({ rtype: p.rtype, lineName: p.lineName, point: p.point, easting: p.easting, northing: p.northing })),
+        })),
+      });
+      return;
+    }
+
+    if (type === 'spsPointDetail') {
+      if (!currentSPS) {
+        port.postMessage({ id, ok: true, detail: null });
+        return;
+      }
+      const rtype = req.rtype;
+      const lineName = (req.lineName ?? '').trim();
+      const point = req.point;
+      const arr = rtype === 'S' ? currentSPS.sources : rtype === 'R' ? currentSPS.receivers : [];
+      const match = arr.find(
+        (p) => (p.lineName || '').trim() === lineName && p.point === point && (req.idx == null || (p.idx || '') === req.idx),
+      );
+      if (!match) {
+        port.postMessage({ id, ok: true, detail: null });
+        return;
+      }
+      // Return only the defined fields (source vs receiver carry different extras).
+      const d: Record<string, unknown> = {
+        rtype: match.rtype,
+        lineName: match.lineName,
+        point: match.point,
+        idx: match.idx,
+        easting: match.easting,
+        northing: match.northing,
+        elevation: match.elevation,
+        raw: match.raw,
+      };
+      if (match.upholeMs !== undefined) d.upholeMs = match.upholeMs;
+      if (match.srcType !== undefined) d.srcType = match.srcType;
+      if (match.date !== undefined) d.date = match.date;
+      if (match.time !== undefined) d.time = match.time;
+      if (match.ffid !== undefined) d.ffid = match.ffid;
+      if (match.staticMs !== undefined) d.staticMs = match.staticMs;
+      port.postMessage({ id, ok: true, detail: d });
       return;
     }
 

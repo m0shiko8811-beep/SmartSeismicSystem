@@ -355,6 +355,15 @@ ipcMain.handle('seisconv:spsQC', async (_e, qc: Record<string, number>) => {
   return r.results;
 });
 
+// Fetch the FULL field set of one source/receiver point (the worker owns the
+// parsed SPSData; the renderer only holds bare position arrays). Returns null
+// when no SPS is loaded or the point can't be matched.
+ipcMain.handle('seisconv:spsPointDetail', async (_e, args: { rtype: 'S' | 'R'; lineName: string; point: number; idx?: string }) => {
+  const r = await callWorker<{ ok: boolean; detail?: Record<string, unknown> | null; error?: string }>({ type: 'spsPointDetail', ...(args || {}) });
+  if (!r.ok) throw new Error(r.error || 'point detail failed');
+  return r.detail ?? null;
+});
+
 ipcMain.handle('seisconv:spsReproject', async (_e, code: string) => {
   const r = await callWorker<{ ok: boolean; files?: { name: string; text: string }[]; error?: string }>({ type: 'spsReproject', code });
   if (!r.ok || !r.files) return { ok: false, error: r.error ?? 'reprojection failed' };

@@ -530,6 +530,20 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
 .qc-row.ok .qc-sev{color:var(--green);}
 .qc-cat{color:var(--ink-3);font-family:var(--mono);}
 .qc-msg{color:var(--ink-2);}
+/* Clickable QC rows (those carrying offending-point coords) jump + highlight. */
+.qc-row.clickable{cursor:pointer;border-radius:6px;transition:background .12s;}
+.qc-row.clickable:hover{background:var(--surface);}
+
+/* SPS toolbar stats — survey counts; kept SEPARATE from #spsLabel (hover overwrites that). */
+.sps-stats{font-size:12px;color:var(--ink-2);font-family:var(--mono);font-variant-numeric:tabular-nums lining-nums;white-space:nowrap;}
+
+/* SPS station inspector card (#spsInspector) — reuses .kv for each field. */
+.sps-inspector .ci-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;}
+.sps-inspector .ci-head h3{font-size:12px;font-weight:700;letter-spacing:.6px;color:var(--ink-2);margin:0;}
+.sps-inspector .kv-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 22px;}
+.sps-inspector .kv .v{font-family:var(--mono);font-weight:500;}
+.sps-inspector .kv.full{grid-column:1 / -1;}
+.sps-inspector .kv.full .v{font-size:11px;word-break:break-all;}
 
 /* Header-QC flag list (#hdrQcList rows built in app.ts) */
 .flag-list .fl{display:grid;grid-template-columns:54px 1fr auto;gap:10px;align-items:center;padding:8px 0;border-bottom:1px solid var(--hair-soft);font-size:12px;}
@@ -1055,10 +1069,21 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
           <label class="ctl-lbl"><input type="checkbox" id="spsShowS" checked> Sources</label>
           <label class="ctl-lbl"><input type="checkbox" id="spsShowR" checked> Receivers</label>
           <span class="seg"><button class="segbtn on" id="viewGrid">Survey grid</button><button class="segbtn" id="viewMap">Real map</button></span>
+          <span class="sps-stats" id="spsStats"></span>
           <span class="trace-label" id="spsLabel">Load S/R/X files to plot the survey</span>
         </div>
         <canvas id="spsCanvas" class="canvas"></canvas>
         <div id="spsMap" class="canvas" style="display:none;"></div>
+        <!-- Station inspector — populated on a grid/map point click; hidden until then. -->
+        <div class="card sps-inspector" id="spsInspector" style="display:none;margin-top:12px;">
+          <div class="ci-head">
+            <h3 id="spsInspTitle">Station</h3>
+            <button class="mclose" id="spsInspClose" title="Close" aria-label="Close inspector">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+            </button>
+          </div>
+          <div class="kv-grid" id="spsInspBody"></div>
+        </div>
         <div class="sec-bar" style="margin-top:12px;">
           <button class="btn sm" id="spsQcBtn">Run QC</button>
           <label class="ctl-lbl">Src int <input type="number" id="qcSrcInt" class="numin" value="0"></label>

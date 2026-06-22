@@ -133,10 +133,39 @@ export interface SpsGeometry {
   bbox: { minX: number; maxX: number; minY: number; maxY: number };
 }
 
+/** Lightweight coords for one offending point in a QC finding (no full SPSPoint). */
+export interface QCPoint {
+  rtype: 'S' | 'R';
+  lineName: string;
+  point: number;
+  easting: number;
+  northing: number;
+}
+
 export interface QCRow {
   sev: string;
   cat: string;
   msg: string;
+  /** Offending points for this finding (empty for findings without locations). */
+  pts: QCPoint[];
+}
+
+/** Full field set for one source/receiver point (source vs receiver extras differ). */
+export interface SPSPointDetail {
+  rtype: 'S' | 'R';
+  lineName: string;
+  point: number;
+  idx: string;
+  easting: number;
+  northing: number;
+  elevation: number;
+  raw: string;
+  upholeMs?: number;
+  srcType?: string;
+  date?: string;
+  time?: string;
+  ffid?: number;
+  staticMs?: number;
 }
 
 export interface SemblanceData {
@@ -188,6 +217,9 @@ const api = {
   /** Run survey QC on the loaded SPS data. */
   spsQC: (qc?: { srcInt?: number; rcvInt?: number; tol?: number; maxOff?: number; maxSrc?: number; maxRcv?: number }): Promise<QCRow[]> =>
     ipcRenderer.invoke('seisconv:spsQC', qc ?? {}),
+  /** Fetch the full field set of one source/receiver point; null if not found / no SPS. */
+  spsPointDetail: (args: { rtype: 'S' | 'R'; lineName: string; point: number; idx?: string }): Promise<SPSPointDetail | null> =>
+    ipcRenderer.invoke('seisconv:spsPointDetail', args),
   /** Reproject the loaded SPS survey to an EPSG target and save a ZIP. */
   spsReproject: (code: string): Promise<ConvertResult> => ipcRenderer.invoke('seisconv:spsReproject', code),
   /** Compute an NMO semblance panel for the open file. */

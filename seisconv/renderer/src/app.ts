@@ -32,7 +32,13 @@ type SpsSummary = { sources: number; receivers: number; xrefs: number; layout: s
 type SpsLines = { x: Float32Array; y: Float32Array; line: Int32Array; pt: Float32Array; names: string[] };
 type SpsGeometry = { geo: boolean; src: SpsLines; rcv: SpsLines; bbox: { minX: number; maxX: number; minY: number; maxY: number } };
 type QCParamsUI = { srcInt?: number; rcvInt?: number; tol?: number; maxOff?: number };
-type QCRow = { sev: string; cat: string; msg: string };
+type QCPoint = { rtype: 'S' | 'R'; lineName: string; point: number; easting: number; northing: number };
+type QCRow = { sev: string; cat: string; msg: string; pts?: QCPoint[] };
+type SPSPointDetail = {
+  rtype: 'S' | 'R'; lineName: string; point: number; idx: string;
+  easting: number; northing: number; elevation: number; raw: string;
+  upholeMs?: number; srcType?: string; date?: string; time?: string; ffid?: number; staticMs?: number;
+};
 type SemblanceData = { semb: Float32Array; vels: number[]; nT: number; dt: number; siUs: number; offNote: string };
 type VelPick = { v: number; tMs: number };
 
@@ -89,6 +95,7 @@ declare global {
       openSPS(): Promise<SpsSummary | null>;
       spsGeometry(geo: boolean): Promise<SpsGeometry>;
       spsQC(qc?: QCParamsUI): Promise<QCRow[]>;
+      spsPointDetail(args: { rtype: 'S' | 'R'; lineName: string; point: number; idx?: string }): Promise<SPSPointDetail | null>;
       spsReproject(code: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
       semblance(opts: { velMin: number; velMax: number; velStep: number }): Promise<SemblanceData>;
       exportText(name: string, text: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
@@ -223,6 +230,11 @@ let spsView: 'grid' | 'map' = 'grid';
 const gridView = { sc: 1, ox: 0, oy: 0, init: false }; // canvas pan/zoom: x_px = ox + e*sc, y_px = oy - n*sc
 let leafletMap: L.Map | null = null;
 let leafletLayers: { src: L.LayerGroup; rcv: L.LayerGroup } | null = null;
+// Highlight ring for a clicked / jumped-to point. Grid coords are in the CURRENT
+// geometry space (projected E/N when geo=false, lon/lat when geo=true) so the
+// ring tracks pan/zoom; null clears it. The Leaflet ring is a live map layer.
+let gridHighlight: { x: number; y: number } | null = null;
+let mapHighlight: L.CircleMarker | null = null;
 let velResult: SemblanceData | null = null;
 let velPicks: VelPick[] = [];
 
@@ -1482,6 +1494,127 @@ function spsLabel(s: SpsSummary): string {
   return `${s.sources} sources · ${s.receivers} receivers · ${s.xrefs} X-refs · ${s.layout || '?'} · ${proj}` + (s.errors.length ? ` · ⚠ ${s.errors.length}` : '');
 }
 
+/** Paint the dedicated SPS stats element (counts + line totals). Lives apart
+ *  from #spsLabel, which hoverGrid overwrites. Line counts come from geometry. */
+function updateSpsStats() {
+  const el = $opt('spsStats');
+  if (!el) return;
+  if (!spsSummary) { el.textContent = ''; return; }
+  const srcLines = spsGeom ? spsGeom.src.names.length : 0;
+  const rcvLines = spsGeom ? spsGeom.rcv.names.length : 0;
+  el.textContent =
+    `${spsSummary.sources} sources · ${spsSummary.receivers} receivers · ${spsSummary.xrefs} X-refs · ${srcLines} src lines · ${rcvLines} rcv lines`;
+}
+
+// ── Station inspector (full point detail, fetched from the worker on click) ──
+/** Hide + empty the inspector card. */
+function clearInspector() {
+  const card = $opt('spsInspector');
+  if (card) card.style.display = 'none';
+  const body = $opt('spsInspBody');
+  if (body) body.innerHTML = '';
+}
+
+/** Append one key/value row to the inspector body (reuses the .kv styling).
+ *  `full` rows span both columns (used for the raw SPS line). */
+function kvRow(parent: HTMLElement, k: string, v: string, full = false) {
+  const row = document.createElement('div');
+  row.className = 'kv' + (full ? ' full' : '');
+  const ks = document.createElement('span'); ks.className = 'k'; ks.textContent = k;
+  const vs = document.createElement('span'); vs.className = 'v mono'; vs.textContent = v;
+  row.appendChild(ks); row.appendChild(vs);
+  parent.appendChild(row);
+}
+
+/** Render a fetched point's full field set into the inspector card. Guards
+ *  NaN / empty / undefined so only meaningful fields show. */
+function showInspector(d: SPSPointDetail) {
+  const card = $opt('spsInspector');
+  const body = $opt('spsInspBody');
+  const title = $opt('spsInspTitle');
+  if (!card || !body) return;
+  body.innerHTML = '';
+  const isSrc = d.rtype === 'S';
+  if (title) title.textContent = `${isSrc ? 'Source' : 'Receiver'} — Line ${d.lineName || '?'} · pt ${d.point}`;
+  const numOk = (v: number | undefined): v is number => v != null && isFinite(v);
+  const strOk = (v: string | undefined): v is string => v != null && v.trim() !== '';
+
+  kvRow(body, 'Type', isSrc ? 'Source (S)' : 'Receiver (R)');
+  kvRow(body, 'Line', d.lineName || '—');
+  kvRow(body, 'Point', String(d.point));
+  if (strOk(d.idx)) kvRow(body, 'Index', d.idx);
+  if (numOk(d.easting)) kvRow(body, 'Easting', d.easting.toFixed(2));
+  if (numOk(d.northing)) kvRow(body, 'Northing', d.northing.toFixed(2));
+  if (numOk(d.elevation)) kvRow(body, 'Elevation', d.elevation.toFixed(2) + ' m');
+  if (isSrc) {
+    if (numOk(d.upholeMs) && d.upholeMs !== 0) kvRow(body, 'Uphole', d.upholeMs.toFixed(1) + ' ms');
+    if (strOk(d.srcType)) kvRow(body, 'Source type', d.srcType);
+    if (strOk(d.date)) kvRow(body, 'Date', d.date);
+    if (strOk(d.time)) kvRow(body, 'Time', d.time);
+    if (numOk(d.ffid) && d.ffid !== 0) kvRow(body, 'FFID', String(d.ffid));
+  } else if (numOk(d.staticMs) && d.staticMs !== 0) {
+    kvRow(body, 'Static', d.staticMs.toFixed(1) + ' ms');
+  }
+  if (strOk(d.raw)) kvRow(body, 'Raw', d.raw.trimEnd(), true);
+  card.style.display = 'block';
+}
+
+/** Fetch + show one point's detail by S/R line + point. Best-effort: a missing
+ *  match (or no SPS) simply leaves the inspector untouched. */
+async function inspectPoint(rtype: 'S' | 'R', lineName: string, point: number) {
+  try {
+    const d = await api.spsPointDetail({ rtype, lineName, point });
+    if (d) showInspector(d);
+  } catch { /* ignore — inspector stays as-is */ }
+}
+
+/** Center the survey grid on a world point (current geometry space) + highlight
+ *  it. Pans the cached transform without changing scale. */
+function jumpGridTo(x: number, y: number) {
+  if (!spsGeom) return;
+  const cv = $('spsCanvas') as HTMLCanvasElement;
+  if (!gridView.init) gridFit();
+  const W = cv.clientWidth || 900, H = cv.clientHeight || 500;
+  gridView.ox = W / 2 - x * gridView.sc;
+  gridView.oy = H / 2 + y * gridView.sc;
+  gridHighlight = { x, y };
+  drawSurveyGrid();
+}
+
+/** Pan + highlight the Leaflet map at lat/lon (when the map view is active). */
+function jumpMapTo(lat: number, lon: number) {
+  if (!leafletMap || !isFinite(lat) || !isFinite(lon)) return;
+  const map = leafletMap;
+  map.panTo([lat, lon]);
+  if (mapHighlight) { map.removeLayer(mapHighlight); mapHighlight = null; }
+  mapHighlight = L.circleMarker([lat, lon], { radius: 11, color: '#ffe04a', weight: 3, fill: false }).addTo(map);
+}
+
+/** Locate a point's coords in the CURRENT geometry arrays (already transformed
+ *  for the active view) by rtype + line + point. Returns null if not present. */
+function geomCoordsFor(rtype: 'S' | 'R', lineName: string, point: number): { x: number; y: number } | null {
+  if (!spsGeom) return null;
+  const g = rtype === 'S' ? spsGeom.src : spsGeom.rcv;
+  const want = (lineName || '').trim();
+  for (let i = 0; i < g.x.length; i++) {
+    if (g.pt[i] === point && (g.names[g.line[i]] || '').trim() === want) return { x: g.x[i], y: g.y[i] };
+  }
+  return null;
+}
+
+/** Focus a QC / clicked point: center the grid + ring it, mirror onto the map if
+ *  active, and open the inspector. `qp` carries the geometry-independent key. */
+function focusPoint(qp: QCPoint) {
+  const c = geomCoordsFor(qp.rtype, qp.lineName, qp.point);
+  if (c) {
+    if (spsView === 'grid') jumpGridTo(c.x, c.y);
+    else gridHighlight = { x: c.x, y: c.y }; // ring shows when the grid is next drawn
+    // In map space the geometry arrays already hold lon/lat (x=lon, y=lat).
+    if (spsView === 'map') jumpMapTo(c.y, c.x);
+  }
+  void inspectPoint(qp.rtype, qp.lineName, qp.point);
+}
+
 async function loadSPS() {
   $('spsLabel').textContent = 'Loading…';
   try {
@@ -1493,7 +1626,10 @@ async function loadSPS() {
     spsSummary = s;
     spsGeom = null;
     gridView.init = false;
+    gridHighlight = null;
+    clearInspector();
     $('spsLabel').textContent = spsLabel(s);
+    updateSpsStats();
     // CRS is now known — refresh the File-summary + status-strip CRS cells.
     renderSummaryPanel();
     updateStatusStrip();
@@ -1521,6 +1657,9 @@ async function refreshSps() {
     try {
       spsGeom = await api.spsGeometry(wantGeo);
       gridView.init = false;
+      // Geometry space (E/N vs lon/lat) changed → any stale highlight is invalid.
+      gridHighlight = null;
+      updateSpsStats(); // line counts come from geometry
     } catch (e) {
       $('spsLabel').textContent = 'SPS geometry failed: ' + errMsg(e);
       return;
@@ -1628,6 +1767,16 @@ function drawSurveyGrid() {
   if (showR) drawSet(spsGeom.rcv, 'rgba(58,160,224,0.45)', '#3aa0e0');
   if (showS) drawSet(spsGeom.src, 'rgba(255,140,0,0.5)', '#ff8c00');
 
+  // Highlight ring for a clicked / jumped-to point (drawn in the current geometry
+  // space, so it tracks pan/zoom). A double ring stands out over either layer.
+  if (gridHighlight && isFinite(gridHighlight.x) && isFinite(gridHighlight.y)) {
+    const hx = X(gridHighlight.x), hy = Yf(gridHighlight.y);
+    ctx.strokeStyle = '#ffe04a'; ctx.lineWidth = 2; ctx.shadowColor = '#ffe04a'; ctx.shadowBlur = 8;
+    ctx.beginPath(); ctx.arc(hx, hy, 9, 0, Math.PI * 2); ctx.stroke();
+    ctx.shadowBlur = 0; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(hx, hy, 4, 0, Math.PI * 2); ctx.stroke();
+  }
+
   // legend
   ctx.font = '11px "Segoe UI", sans-serif';
   let lx = 52; const ly = 20;
@@ -1674,6 +1823,9 @@ function drawScaleBar(ctx: CanvasRenderingContext2D, W: number, H: number, scPxP
 function gridInteractions() {
   const cv = $('spsCanvas') as HTMLCanvasElement;
   let dragging = false, lx = 0, ly = 0;
+  // Track drag distance so a pan (press-move-release) doesn't open the inspector;
+  // only a near-stationary press counts as a station click.
+  let downX = 0, downY = 0, moved = 0;
   cv.addEventListener('wheel', (e) => {
     if (spsView !== 'grid' || !spsGeom) return;
     e.preventDefault();
@@ -1686,17 +1838,23 @@ function gridInteractions() {
     gridView.oy = py + ny * gridView.sc;
     drawSurveyGrid();
   }, { passive: false });
-  cv.addEventListener('mousedown', (e) => { if (spsView !== 'grid') return; dragging = true; lx = e.clientX; ly = e.clientY; });
+  cv.addEventListener('mousedown', (e) => { if (spsView !== 'grid') return; dragging = true; lx = e.clientX; ly = e.clientY; downX = e.clientX; downY = e.clientY; moved = 0; });
   window.addEventListener('mouseup', () => { dragging = false; });
   cv.addEventListener('mousemove', (e) => {
     if (spsView !== 'grid' || !spsGeom) return;
     if (dragging) {
+      moved += Math.abs(e.clientX - lx) + Math.abs(e.clientY - ly);
       gridView.ox += e.clientX - lx; gridView.oy += e.clientY - ly;
       lx = e.clientX; ly = e.clientY;
       drawSurveyGrid();
     } else {
       hoverGrid(e);
     }
+  });
+  // A click (press + release without a real drag) opens the station inspector.
+  cv.addEventListener('click', (e) => {
+    if (moved > 4 || Math.abs(e.clientX - downX) + Math.abs(e.clientY - downY) > 4) return;
+    clickGrid(e);
   });
   cv.addEventListener('dblclick', () => { if (spsView === 'grid' && spsGeom) { gridFit(); drawSurveyGrid(); } });
   // Keep the active SPS view correct after a window resize (the cached grid
@@ -1707,8 +1865,11 @@ function gridInteractions() {
   });
 }
 
-function hoverGrid(e: MouseEvent) {
-  if (!spsGeom || !gridView.init) return;
+/** Nearest survey point to a canvas pixel (squared-distance over the visible
+ *  S/R layers, 144 px² threshold). Returns the group + index, or null. Shared
+ *  by hover (label) and click (inspector). */
+function pickGridPoint(e: MouseEvent): { g: SpsLines; i: number } | null {
+  if (!spsGeom || !gridView.init) return null;
   const cv = $('spsCanvas') as HTMLCanvasElement;
   const r = cv.getBoundingClientRect();
   const px = e.clientX - r.left, py = e.clientY - r.top;
@@ -1724,13 +1885,32 @@ function hoverGrid(e: MouseEvent) {
   };
   scan(spsGeom.src, ($('spsShowS') as HTMLInputElement).checked);
   scan(spsGeom.rcv, ($('spsShowR') as HTMLInputElement).checked);
-  if (bg && bi >= 0) {
-    const g: SpsLines = bg;
+  return bg && bi >= 0 ? { g: bg, i: bi } : null;
+}
+
+function hoverGrid(e: MouseEvent) {
+  if (!spsGeom || !gridView.init) return;
+  const hit = pickGridPoint(e);
+  if (hit) {
+    const { g, i } = hit;
     const pr = spsGeom.geo ? 5 : 1;
-    $('spsLabel').textContent = `Line ${g.names[g.line[bi]]} · pt ${g.pt[bi]} · ${g.x[bi].toFixed(pr)}, ${g.y[bi].toFixed(pr)}`;
+    $('spsLabel').textContent = `Line ${g.names[g.line[i]]} · pt ${g.pt[i]} · ${g.x[i].toFixed(pr)}, ${g.y[i].toFixed(pr)}`;
   } else if (spsSummary) {
     $('spsLabel').textContent = spsLabel(spsSummary);
   }
+}
+
+/** Open the inspector for a clicked grid point (rtype inferred from which layer
+ *  the pick came from) + ring it. No-op when the click missed every station. */
+function clickGrid(e: MouseEvent) {
+  if (spsView !== 'grid' || !spsGeom) return;
+  const hit = pickGridPoint(e);
+  if (!hit) return;
+  const { g, i } = hit;
+  const rtype: 'S' | 'R' = g === spsGeom.src ? 'S' : 'R';
+  gridHighlight = { x: g.x[i], y: g.y[i] };
+  drawSurveyGrid();
+  void inspectPoint(rtype, g.names[g.line[i]], g.pt[i]);
 }
 
 // ── Real basemap (Leaflet, geographic) ──
@@ -1750,12 +1930,13 @@ function updateMap() {
   const map = leafletMap!;
   map.invalidateSize();
   if (leafletLayers) { map.removeLayer(leafletLayers.src); map.removeLayer(leafletLayers.rcv); leafletLayers = null; }
+  if (mapHighlight) { map.removeLayer(mapHighlight); mapHighlight = null; }
   const showS = ($('spsShowS') as HTMLInputElement).checked;
   const showR = ($('spsShowR') as HTMLInputElement).checked;
   // Lines always draw in full; station markers are decimated so a 50k-point
   // survey can't flood the map renderer (each marker is a canvas circle + popup).
   const MAX_MARKERS = 6000;
-  const build = (g: SpsLines, col: string) => {
+  const build = (g: SpsLines, col: string, rtype: 'S' | 'R') => {
     const grp = L.layerGroup();
     const stride = Math.max(1, Math.ceil(g.x.length / MAX_MARKERS));
     let cur = -1; let coords: [number, number][] = [];
@@ -1766,16 +1947,19 @@ function updateMap() {
       if (g.line[i] !== cur) { flush(); cur = g.line[i]; }
       coords.push([lat, lon]);
       if (i % stride === 0) {
+        const lineName = g.names[g.line[i]], point = g.pt[i];
         L.circleMarker([lat, lon], { radius: 2.5, color: col, weight: 1, fillColor: col, fillOpacity: 0.9 })
-          .bindPopup(`Line ${g.names[g.line[i]]} · pt ${g.pt[i]}<br>${lat.toFixed(5)}, ${lon.toFixed(5)}`)
+          .bindPopup(`Line ${lineName} · pt ${point}<br>${lat.toFixed(5)}, ${lon.toFixed(5)}`)
+          // Clicking a station marker opens the full-detail inspector + rings it.
+          .on('click', () => { jumpMapTo(lat, lon); void inspectPoint(rtype, lineName, point); })
           .addTo(grp);
       }
     }
     flush();
     return grp;
   };
-  const src = build(spsGeom.src, '#ff8c00');
-  const rcv = build(spsGeom.rcv, '#3aa0e0');
+  const src = build(spsGeom.src, '#ff8c00', 'S');
+  const rcv = build(spsGeom.rcv, '#3aa0e0', 'R');
   if (showR) rcv.addTo(map);
   if (showS) src.addTo(map);
   leafletLayers = { src, rcv };
@@ -1831,6 +2015,14 @@ function renderQC(rows: QCRow[]) {
     row.appendChild(sev);
     row.appendChild(cat);
     row.appendChild(msg);
+    // Findings that carry offending coords (7 of 10 types) become clickable —
+    // jump the survey grid / map to the FIRST offending point and ring it.
+    const first = r.pts && r.pts.length ? r.pts[0] : null;
+    if (first) {
+      row.classList.add('clickable');
+      row.title = 'Click to locate on the survey';
+      row.addEventListener('click', () => focusPoint(first));
+    }
     el.appendChild(row);
   }
 }
@@ -2082,6 +2274,7 @@ function init() {
   $('viewGrid').addEventListener('click', () => setView('grid'));
   $('viewMap').addEventListener('click', () => setView('map'));
   gridInteractions();
+  $opt('spsInspClose')?.addEventListener('click', clearInspector);
   $('spsQcBtn').addEventListener('click', () => void runQC());
   const epsgSel = $('epsgSelect') as HTMLSelectElement;
   for (const c of EPSG_DB) {
