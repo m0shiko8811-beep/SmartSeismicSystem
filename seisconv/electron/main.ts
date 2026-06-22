@@ -13,6 +13,14 @@ import JSZip from 'jszip';
 
 const WORKER_PATH = path.join(__dirname, 'parse.worker.js');
 
+// Native title-bar overlay height (DIPs). MUST equal the app-shell header row
+// (renderer grid-template-rows:54px) so the min/max/close controls sit exactly
+// inside the header. Single source of truth: every setTitleBarOverlay() call
+// forces it, because Electron RESETS the overlay height to the system default
+// whenever a setTitleBarOverlay() call OMITS `height` — that reset (triggered by
+// the renderer's per-theme recolor) is what detached the controls in packaged builds.
+const TITLEBAR_HEIGHT = 54;
+
 const SEISMIC_FILTERS = [
   { name: 'Seismic files', extensions: ['segy', 'sgy', 'segd', 'seg', 'su', 'seg2', 'dat', 'bat'] },
   { name: 'All files', extensions: ['*'] },
@@ -84,7 +92,7 @@ function createWindow(): void {
     titleBarOverlay: {
       color: '#f3f6fb',     // light header background (opaque equivalent)
       symbolColor: '#15212f', // --ink (dark/navy glyphs)
-      height: 54,            // matches the app shell header row (grid 54px)
+      height: TITLEBAR_HEIGHT, // matches the app-shell header row (renderer grid 54px)
     },
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -242,7 +250,9 @@ ipcMain.handle('seisconv:resetState', async () => {
 // Recolor the native window-controls overlay (min/max/close) so it always
 // matches the app header — called by the renderer's applyTheme() per theme.
 ipcMain.handle('seisconv:setTitleBarOverlay', (_e, opts: { color: string; symbolColor: string }) => {
-  win?.setTitleBarOverlay(opts);
+  // Force the height on every call: Electron resets it to the system default when
+  // omitted, which detaches the controls from the 54px header row (the packaged bug).
+  win?.setTitleBarOverlay({ ...opts, height: TITLEBAR_HEIGHT });
 });
 
 ipcMain.handle('seisconv:openSPS', async () => {
