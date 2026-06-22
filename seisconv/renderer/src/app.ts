@@ -31,6 +31,7 @@ type SectionData = { numTraces: number; colLen: number; norm: number; sampleInt:
 type SpsSummary = { sources: number; receivers: number; xrefs: number; layout: string | null; projection: { type: string | null; subtype: string | null; desc?: string } | null; errors: string[] };
 type SpsLines = { x: Float32Array; y: Float32Array; line: Int32Array; pt: Float32Array; names: string[] };
 type SpsGeometry = { geo: boolean; src: SpsLines; rcv: SpsLines; bbox: { minX: number; maxX: number; minY: number; maxY: number } };
+type SpsXrefLines = { geo: boolean; sx: Float32Array; sy: Float32Array; rx: Float32Array; ry: Float32Array; shot: Int32Array; shotKeys: string[]; decimated: boolean; log: string };
 type QCParamsUI = { srcInt?: number; rcvInt?: number; tol?: number; maxOff?: number };
 type QCPoint = { rtype: 'S' | 'R'; lineName: string; point: number; easting: number; northing: number };
 type QCRow = { sev: string; cat: string; msg: string; pts?: QCPoint[] };
@@ -94,6 +95,7 @@ declare global {
       resetState(): Promise<void>;
       openSPS(): Promise<SpsSummary | null>;
       spsGeometry(geo: boolean): Promise<SpsGeometry>;
+      spsXrefLines(geo: boolean): Promise<SpsXrefLines>;
       spsQC(qc?: QCParamsUI): Promise<QCRow[]>;
       spsPointDetail(args: { rtype: 'S' | 'R'; lineName: string; point: number; idx?: string }): Promise<SPSPointDetail | null>;
       spsReproject(code: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
@@ -226,6 +228,11 @@ const secView = { t0: 0, t1: 0, s0: 0, s1: 0, fullT: 0, fullS: 0, init: false };
 let secFetchPending = false; // coalesce rapid wheel/drag re-fetches
 let spsSummary: SpsSummary | null = null;
 let spsGeom: SpsGeometry | null = null;
+// X-ref spider (shot→receiver segments). Cached like spsGeom; cleared when the
+// geometry space (grid E/N vs map lon/lat) changes so endpoints stay valid.
+let spsSpider: SpsXrefLines | null = null;
+// 'srcLine|srcPt' of the shot whose fan is currently emphasized (null = none).
+let highlightedShot: string | null = null;
 let spsView: 'grid' | 'map' = 'grid';
 const gridView = { sc: 1, ox: 0, oy: 0, init: false }; // canvas pan/zoom: x_px = ox + e*sc, y_px = oy - n*sc
 let leafletMap: L.Map | null = null;
@@ -1625,6 +1632,8 @@ async function loadSPS() {
     }
     spsSummary = s;
     spsGeom = null;
+    spsSpider = null;
+    highlightedShot = null;
     gridView.init = false;
     gridHighlight = null;
     clearInspector();
@@ -1659,14 +1668,38 @@ async function refreshSps() {
       gridView.init = false;
       // Geometry space (E/N vs lon/lat) changed → any stale highlight is invalid.
       gridHighlight = null;
+      spsSpider = null; // spider endpoints are in the old geometry space; refetch on demand
       updateSpsStats(); // line counts come from geometry
     } catch (e) {
       $('spsLabel').textContent = 'SPS geometry failed: ' + errMsg(e);
       return;
     }
   }
+  // Keep the spider in sync with the active geometry space when it's enabled.
+  if (spsView === 'grid' && spsShowXrefs() && (!spsSpider || spsSpider.geo !== wantGeo)) {
+    await ensureSpider();
+  }
   if (spsView === 'grid') drawSurveyGrid();
   else updateMap();
+}
+
+/** Whether the X-ref spider toggle is on (absent checkbox ⇒ off). */
+function spsShowXrefs(): boolean {
+  return !!($opt('spsShowXrefs') as HTMLInputElement | null)?.checked;
+}
+
+/** Fetch + cache the spider for the active geometry space (no-op if current).
+ *  Best-effort: a failure just leaves spsSpider null so the grid draws as before. */
+async function ensureSpider(): Promise<void> {
+  const wantGeo = spsView === 'map';
+  if (spsSpider && spsSpider.geo === wantGeo) return;
+  try {
+    spsSpider = await api.spsXrefLines(wantGeo);
+    if (spsSpider.decimated && spsSpider.log) $('spsLabel').textContent = spsSpider.log;
+  } catch (e) {
+    spsSpider = null;
+    $('spsLabel').textContent = 'X-ref spider failed: ' + errMsg(e);
+  }
 }
 
 function setView(v: 'grid' | 'map') {
@@ -1743,6 +1776,29 @@ function drawSurveyGrid() {
     ctx.strokeStyle = 'rgba(33,69,100,0.45)';
     ctx.beginPath(); ctx.moveTo(42, y); ctx.lineTo(W, y); ctx.stroke();
     ctx.fillStyle = '#5e7186'; ctx.fillText(n.toFixed(pr), 3, y - 2);
+  }
+
+  // X-ref "spider": shot→receiver segments, drawn UNDER the points. Thin + low
+  // opacity for the full set; if a shot is highlighted, dim the rest and over-
+  // draw that shot's fan bright. Off-screen segments are cheaply skipped.
+  if (spsShowXrefs() && spsSpider && spsSpider.geo === geo) {
+    const sp = spsSpider;
+    const hiGid = highlightedShot != null ? sp.shotKeys.indexOf(highlightedShot) : -1;
+    const inView = (x: number, y: number) => x >= -50 && x <= W + 50 && y >= -50 && y <= H + 50;
+    const drawSegs = (only: number, col: string, lw: number) => {
+      ctx.strokeStyle = col; ctx.lineWidth = lw; ctx.beginPath();
+      for (let i = 0; i < sp.sx.length; i++) {
+        if (only >= 0 ? sp.shot[i] !== only : (hiGid >= 0 && sp.shot[i] === hiGid)) continue;
+        const ax = X(sp.sx[i]), ay = Yf(sp.sy[i]), bx = X(sp.rx[i]), by = Yf(sp.ry[i]);
+        if (!inView(ax, ay) && !inView(bx, by)) continue;
+        ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
+      }
+      ctx.stroke();
+    };
+    // Base layer: all segments (dimmer when a shot is singled out).
+    drawSegs(-1, hiGid >= 0 ? 'rgba(45,212,191,0.05)' : 'rgba(45,212,191,0.12)', 0.5);
+    // Emphasized shot on top.
+    if (hiGid >= 0) drawSegs(hiGid, 'rgba(45,212,191,0.85)', 1.2);
   }
 
   // survey lines (polyline per contiguous same-line run) + glowing points
@@ -1905,10 +1961,17 @@ function hoverGrid(e: MouseEvent) {
 function clickGrid(e: MouseEvent) {
   if (spsView !== 'grid' || !spsGeom) return;
   const hit = pickGridPoint(e);
-  if (!hit) return;
+  if (!hit) {
+    // Empty space → drop any shot emphasis (and ring) and redraw.
+    if (highlightedShot != null) { highlightedShot = null; drawSurveyGrid(); }
+    return;
+  }
   const { g, i } = hit;
   const rtype: 'S' | 'R' = g === spsGeom.src ? 'S' : 'R';
   gridHighlight = { x: g.x[i], y: g.y[i] };
+  // Clicking a SOURCE emphasizes its spider fan; clicking a receiver clears it.
+  // The key matches the worker's shotKeys ('trimmed(srcLine)|point').
+  highlightedShot = rtype === 'S' ? `${(g.names[g.line[i]] || '').trim()}|${g.pt[i]}` : null;
   drawSurveyGrid();
   void inspectPoint(rtype, g.names[g.line[i]], g.pt[i]);
 }
@@ -2271,6 +2334,11 @@ function init() {
   $('spsLoadBtn').addEventListener('click', () => void loadSPS());
   ($('spsShowS') as HTMLInputElement).addEventListener('change', () => void refreshSps());
   ($('spsShowR') as HTMLInputElement).addEventListener('change', () => void refreshSps());
+  $opt('spsShowXrefs')?.addEventListener('change', () => {
+    // Toggling off drops any shot emphasis; on triggers a lazy first fetch via refreshSps.
+    if (!spsShowXrefs()) highlightedShot = null;
+    void refreshSps();
+  });
   $('viewGrid').addEventListener('click', () => setView('grid'));
   $('viewMap').addEventListener('click', () => setView('map'));
   gridInteractions();

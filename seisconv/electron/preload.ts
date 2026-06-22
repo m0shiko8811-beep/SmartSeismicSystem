@@ -133,6 +133,22 @@ export interface SpsGeometry {
   bbox: { minX: number; maxX: number; minY: number; maxY: number };
 }
 
+/** Shot → live-receiver connection segments ("spider"). Parallel typed arrays:
+ *  segment i runs (sx[i],sy[i]) → (rx[i],ry[i]); shot[i] is its per-shot group id
+ *  (index into shotKeys, each 'srcLine|srcPt'). Coords are projected E/N, or
+ *  WGS84 lon/lat when geo=true. `decimated` flags a capped/sampled survey. */
+export interface SpsXrefLines {
+  geo: boolean;
+  sx: Float32Array;
+  sy: Float32Array;
+  rx: Float32Array;
+  ry: Float32Array;
+  shot: Int32Array;
+  shotKeys: string[];
+  decimated: boolean;
+  log: string;
+}
+
 /** Lightweight coords for one offending point in a QC finding (no full SPSPoint). */
 export interface QCPoint {
   rtype: 'S' | 'R';
@@ -214,6 +230,8 @@ const api = {
   openSPS: (): Promise<SPSSummary | null> => ipcRenderer.invoke('seisconv:openSPS'),
   /** Get line-grouped survey geometry (projected E/N, or WGS84 lon/lat when geo=true). */
   spsGeometry: (geo: boolean): Promise<SpsGeometry> => ipcRenderer.invoke('seisconv:spsGeometry', geo),
+  /** Get shot→receiver "spider" segments (projected E/N, or WGS84 lon/lat when geo=true). */
+  spsXrefLines: (geo: boolean): Promise<SpsXrefLines> => ipcRenderer.invoke('seisconv:spsXrefLines', geo),
   /** Run survey QC on the loaded SPS data. */
   spsQC: (qc?: { srcInt?: number; rcvInt?: number; tol?: number; maxOff?: number; maxSrc?: number; maxRcv?: number }): Promise<QCRow[]> =>
     ipcRenderer.invoke('seisconv:spsQC', qc ?? {}),

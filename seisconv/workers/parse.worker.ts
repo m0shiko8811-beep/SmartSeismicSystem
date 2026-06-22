@@ -21,7 +21,7 @@ let currentSPSFiles: { name: string; text: string; type: 'S' | 'R' | 'X' | 'mixe
 
 interface Req {
   id: number;
-  type: 'open' | 'trace' | 'section' | 'convert' | 'convertPath' | 'reset' | 'openSPS' | 'spsGeometry' | 'spsQC' | 'spsPointDetail' | 'spsReproject' | 'semblance';
+  type: 'open' | 'trace' | 'section' | 'convert' | 'convertPath' | 'reset' | 'openSPS' | 'spsGeometry' | 'spsXrefLines' | 'spsQC' | 'spsPointDetail' | 'spsReproject' | 'semblance';
   path?: string;
   paths?: string[];
   qc?: QCParams;
@@ -171,6 +171,92 @@ port.on('message', (req: Req) => {
       }
       const transfer = [src.x.buffer, src.y.buffer, src.line.buffer, src.pt.buffer, rcv.x.buffer, rcv.y.buffer, rcv.line.buffer, rcv.pt.buffer] as ArrayBuffer[];
       port.postMessage({ id, ok: true, geo, src, rcv, bbox: { minX, maxX, minY, maxY } }, transfer);
+      return;
+    }
+
+    // X-ref "spider": one segment per (shot → live receiver) connection. Returns
+    // parallel typed arrays of endpoint coords + a per-shot group id so the
+    // renderer can emphasize a single clicked shot. Mirrors spsGeometry's geo
+    // reprojection + transferable buffers.
+    if (type === 'spsXrefLines') {
+      if (!currentSPS) {
+        port.postMessage({ id, ok: false, error: 'no SPS loaded' });
+        return;
+      }
+      const proj = currentSPS.projection as unknown as Parameters<typeof projToLatLon>[2];
+      const geo = !!req.geo && !!currentSPS.projection;
+      const num = (v: unknown): number => (typeof v === 'number' ? v : parseFloat(String(v)));
+
+      // Lookup maps: trimmed(line)|point → point. Sources keyed for shot resolve,
+      // receivers keyed for range expansion.
+      const srcMap = new Map<string, SPSPoint>();
+      for (const s of currentSPS.sources) srcMap.set(`${(s.lineName || '').trim()}|${s.point}`, s);
+      const rcvMap = new Map<string, SPSPoint>();
+      for (const r of currentSPS.receivers) rcvMap.set(`${(r.lineName || '').trim()}|${r.point}`, r);
+
+      // Cap total segments; if the survey would blow past it, decimate the xref
+      // LIST (keep every Nth xref) so a representative spider still renders.
+      const MAX_SEG = 50000;
+      const xrefs = currentSPS.xrefs;
+      // First count how many segments a full pass would emit, to pick a stride.
+      let wouldEmit = 0;
+      for (const x of xrefs) {
+        const from = num(x.rcvPtFrom), to = num(x.rcvPtTo);
+        if (!isFinite(from) || !isFinite(to)) continue;
+        const incr = x.layout === 'SPS2.1' ? 1 : Math.max(1, num(x.rcvPtIncr) || 1);
+        if (to >= from) wouldEmit += Math.floor((to - from) / incr) + 1;
+      }
+      const xrefStride = wouldEmit > MAX_SEG ? Math.ceil(wouldEmit / MAX_SEG) : 1;
+      const decimated = xrefStride > 1;
+
+      // Per-shot grouping: every distinct (srcLine|srcPt) becomes one group id so
+      // the renderer can light up a clicked source's whole fan.
+      const shotIndex = new Map<string, number>();
+      const shotKeys: string[] = [];
+      const sxA: number[] = [], syA: number[] = [], rxA: number[] = [], ryA: number[] = [], shotA: number[] = [];
+
+      for (let xi = 0; xi < xrefs.length; xi++) {
+        if (decimated && xi % xrefStride !== 0) continue;
+        if (sxA.length >= MAX_SEG) break;
+        const x = xrefs[xi];
+        const srcKey = `${String(x.srcLine).trim()}|${num(x.srcPt)}`;
+        const shot = srcMap.get(srcKey);
+        if (!shot) continue;
+        let sx = shot.easting, sy = shot.northing;
+        if (!isFinite(sx) || !isFinite(sy)) continue;
+        if (geo) { const ll = projToLatLon(sx, sy, proj, 0); sx = ll.lon; sy = ll.lat; }
+
+        // Stable per-shot group id (first time we see this shot → new id).
+        let gid = shotIndex.get(srcKey);
+        if (gid === undefined) { gid = shotKeys.length; shotIndex.set(srcKey, gid); shotKeys.push(srcKey); }
+
+        const rcvLine = String(x.rcvLineFrom).trim();
+        const from = num(x.rcvPtFrom), to = num(x.rcvPtTo);
+        if (!isFinite(from) || !isFinite(to) || to < from) continue;
+        const incr = x.layout === 'SPS2.1' ? 1 : Math.max(1, num(x.rcvPtIncr) || 1);
+        for (let rp = from; rp <= to; rp += incr) {
+          if (sxA.length >= MAX_SEG) break;
+          const rcv = rcvMap.get(`${rcvLine}|${rp}`);
+          if (!rcv) continue;
+          let rx = rcv.easting, ry = rcv.northing;
+          if (!isFinite(rx) || !isFinite(ry)) continue;
+          if (geo) { const ll = projToLatLon(rx, ry, proj, 0); rx = ll.lon; ry = ll.lat; }
+          sxA.push(sx); syA.push(sy); rxA.push(rx); ryA.push(ry); shotA.push(gid);
+        }
+      }
+
+      const sx = Float32Array.from(sxA);
+      const sy = Float32Array.from(syA);
+      const rx = Float32Array.from(rxA);
+      const ry = Float32Array.from(ryA);
+      const shot = Int32Array.from(shotA);
+      const log = decimated
+        ? `X-ref spider decimated: ~${wouldEmit} segments > ${MAX_SEG} cap; kept every ${xrefStride}${xrefStride === 2 ? 'nd' : xrefStride === 3 ? 'rd' : 'th'} xref → ${sx.length} segments.`
+        : '';
+      port.postMessage(
+        { id, ok: true, geo, sx, sy, rx, ry, shot, shotKeys, decimated, log },
+        [sx.buffer, sy.buffer, rx.buffer, ry.buffer, shot.buffer] as ArrayBuffer[],
+      );
       return;
     }
 

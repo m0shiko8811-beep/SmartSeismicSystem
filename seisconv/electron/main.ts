@@ -349,6 +349,14 @@ ipcMain.handle('seisconv:spsGeometry', async (_e, geo: boolean) => {
   return { geo: r.geo, src: r.src, rcv: r.rcv, bbox: r.bbox };
 });
 
+// X-ref "spider": shot → live-receiver connection segments as parallel typed
+// arrays (sx/sy/rx/ry) + a per-shot group id (shot) and shotKeys mapping.
+ipcMain.handle('seisconv:spsXrefLines', async (_e, geo: boolean) => {
+  const r = await callWorker<{ ok: boolean; error?: string } & Record<string, any>>({ type: 'spsXrefLines', geo });
+  if (!r.ok) throw new Error(r.error || 'sps xref lines failed');
+  return { geo: r.geo, sx: r.sx, sy: r.sy, rx: r.rx, ry: r.ry, shot: r.shot, shotKeys: r.shotKeys, decimated: r.decimated, log: r.log };
+});
+
 ipcMain.handle('seisconv:spsQC', async (_e, qc: Record<string, number>) => {
   const r = await callWorker<{ ok: boolean; results?: unknown[]; error?: string }>({ type: 'spsQC', qc });
   if (!r.ok) throw new Error(r.error || 'QC failed');
