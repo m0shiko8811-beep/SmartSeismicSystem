@@ -39,6 +39,19 @@ export interface TraceData {
   samples: Float32Array;
 }
 
+/** One trace pulled from an arbitrary file by the Trace Workbench (extractTrace).
+ *  Same shape as TraceData plus the source file name + total trace count, so the
+ *  workbench can label the entry and clamp the trace-index input. */
+export interface ExtractedTrace {
+  name: string;
+  index: number;
+  traceCount: number;
+  nSamples: number;
+  sampleInt: number;
+  hdr: Record<string, number | string>;
+  samples: Float32Array;
+}
+
 export interface SectionOpts {
   maxTraces?: number;
   maxSamples?: number;
@@ -222,6 +235,10 @@ const api = {
   openSiblingFile: (delta: number): Promise<ParseSummary | null> => ipcRenderer.invoke('seisconv:openSiblingFile', delta),
   /** Get one trace's samples + header from the currently-open file. */
   getTrace: (index: number): Promise<TraceData> => ipcRenderer.invoke('seisconv:getTrace', index),
+  /** Trace Workbench: open a single-file picker; returns the chosen path (no parse) or null. */
+  pickTraceFile: (): Promise<string | null> => ipcRenderer.invoke('seisconv:pickTraceFile'),
+  /** Trace Workbench: parse `path` locally and pull ONE trace (samples + header + source meta). */
+  extractTrace: (path: string, index: number): Promise<ExtractedTrace> => ipcRenderer.invoke('seisconv:extractTrace', path, index),
   /** Get a decimated section matrix (for variable-density / wiggle display). */
   getSection: (opts?: SectionOpts): Promise<SectionData> => ipcRenderer.invoke('seisconv:getSection', opts ?? {}),
   /** Pick an input folder; returns its seismic files (sorted by name) or null. */

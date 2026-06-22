@@ -21,7 +21,7 @@ let currentSPSFiles: { name: string; text: string; type: 'S' | 'R' | 'X' | 'mixe
 
 interface Req {
   id: number;
-  type: 'open' | 'trace' | 'section' | 'convert' | 'convertPath' | 'reset' | 'openSPS' | 'spsGeometry' | 'spsXrefLines' | 'spsFold' | 'spsQC' | 'spsPointDetail' | 'spsReproject' | 'spsExport' | 'semblance';
+  type: 'open' | 'trace' | 'extractTrace' | 'section' | 'convert' | 'convertPath' | 'reset' | 'openSPS' | 'spsGeometry' | 'spsXrefLines' | 'spsFold' | 'spsQC' | 'spsPointDetail' | 'spsReproject' | 'spsExport' | 'semblance';
   path?: string;
   paths?: string[];
   qc?: QCParams;
@@ -646,6 +646,33 @@ port.on('message', (req: Req) => {
       }
       const out = buildSPSExport(currentSPS, req.kind ?? 'csv', req.qcParams ?? {});
       port.postMessage({ id, ok: out.ok, files: out.files, error: out.error });
+      return;
+    }
+
+    // Trace Workbench: parse a file LOCALLY (never touching `current`) and pull
+    // ONE trace out of it. Mirrors convertPath's local-parse pattern so the
+    // workbench can collect traces from arbitrary files without disturbing — or
+    // requiring — the persistently-open file. Placed above the `!current` guard
+    // because it needs no open file of its own.
+    if (type === 'extractTrace') {
+      const local = parseAny(new Uint8Array(readFileSync(req.path!)), basename(req.path!));
+      const i = Math.max(0, Math.min(local.traceCount - 1, (req.index ?? 0) | 0));
+      const tr = local.traces[i];
+      const samples = tr?.samples ? tr.samples.slice() : new Float32Array(0);
+      port.postMessage(
+        {
+          id,
+          ok: true,
+          name: basename(req.path!),
+          index: i,
+          traceCount: local.traceCount,
+          nSamples: tr?.nSamples ?? 0,
+          sampleInt: local.bh.sampleInt ?? 0,
+          hdr: tr?.hdr ?? {},
+          samples,
+        },
+        [samples.buffer],
+      );
       return;
     }
 

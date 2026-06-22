@@ -26,6 +26,9 @@ type Summary = {
   hasNext: boolean;
 };
 type TraceData = { index: number; nSamples: number; sampleInt: number; hdr: Record<string, number | string>; samples: Float32Array };
+// One trace pulled from an arbitrary file by the Trace Workbench (extractTrace):
+// TraceData plus the source file name + total trace count, for labelling/clamping.
+type ExtractedTrace = { name: string; index: number; traceCount: number; nSamples: number; sampleInt: number; hdr: Record<string, number | string>; samples: Float32Array };
 type SectionOpts = { maxTraces?: number; maxSamples?: number; traceStart?: number; traceEnd?: number; sampStart?: number; sampEnd?: number; agc?: boolean; agcType?: 'rms' | 'median' | 'mean'; agcWindowMs?: number };
 type SectionData = { numTraces: number; colLen: number; norm: number; sampleInt: number; traceStep: number; data: Float32Array; traceStart: number; traceEnd: number; sampStart: number; sampEnd: number; fullTraces: number; fullSamples: number };
 type SpsSummary = { sources: number; receivers: number; xrefs: number; layout: string | null; projection: { type: string | null; subtype: string | null; desc?: string } | null; errors: string[] };
@@ -77,6 +80,10 @@ declare global {
       // Step ±delta through the seismic files in the open file's folder; null on a no-op.
       openSiblingFile(delta: number): Promise<Summary | null>;
       getTrace(i: number): Promise<TraceData>;
+      // Trace Workbench: single-file picker (no parse) → chosen path or null.
+      pickTraceFile(): Promise<string | null>;
+      // Trace Workbench: parse `path` locally and pull ONE trace + source meta.
+      extractTrace(path: string, index: number): Promise<ExtractedTrace>;
       getSection(o?: SectionOpts): Promise<SectionData>;
       // Single-file conversion of the currently-open file (save dialog).
       // `outBaseName` (no extension) becomes the dialog's default file name.
@@ -191,11 +198,11 @@ function applyKeyHints() {
     tip.innerHTML =
       `Tip — <span class="kbd">${KEY_OPEN}</span> open · ` +
       `<span class="kbd">${KEY_BATCH}</span> batch · ` +
-      `<span class="kbd">1–5</span> switch tabs · ` +
+      `<span class="kbd">1–6</span> switch tabs · ` +
       `<span class="kbd">?</span> help.`;
   }
   // rail + header tooltips
-  $opt('railHelp')?.setAttribute('title', `Help / Manual — keys: ${KEY_OPEN} open · ${KEY_BATCH} batch · 1–5 tabs · ? help`);
+  $opt('railHelp')?.setAttribute('title', `Help / Manual — keys: ${KEY_OPEN} open · ${KEY_BATCH} batch · 1–6 tabs · ? help`);
   $opt('helpBtn')?.setAttribute('title', `Help / Manual (?)`);
   $opt('openBtn')?.setAttribute('title', `Open a seismic file (${KEY_OPEN})`);
   // in-manual key chips that carry a data-key marker
@@ -203,7 +210,7 @@ function applyKeyHints() {
     const k = el.getAttribute('data-key');
     if (k === 'open') el.textContent = KEY_OPEN;
     else if (k === 'batch') el.textContent = KEY_BATCH;
-    else if (k === 'tabs') el.textContent = '1–5';
+    else if (k === 'tabs') el.textContent = '1–6';
     else if (k === 'help') el.textContent = '?';
   });
 }
@@ -215,12 +222,18 @@ const TAB_META: Record<string, { title: string; desc: string }> = {
   section: { title: 'File Viewer', desc: 'Render the full record as a variable-density / wiggle section with gain and AGC.' },
   sps: { title: 'SPS 2.1', desc: 'Plot source/receiver geometry on a survey grid or real basemap; QC and reproject.' },
   vel: { title: 'Velocity', desc: 'Compute an NMO semblance panel and pick a stacking-velocity function.' },
+  workbench: { title: 'Trace Workbench', desc: 'Collect individual traces from any file and compare them side-by-side or overlaid, zoomed in lock-step.' },
 };
 
 let summary: Summary | null = null;
 let traceIndex = 0;
 let lastTrace: TraceData | null = null;
 let traceMode: 'wave' | 'spectrum' = 'wave';
+// Trace Inspector time-axis zoom: the visible sample window [s0,s1) (end
+// exclusive) within the FULL trace, which is already in lastTrace.samples — so
+// zoom/pan is renderer-only (no worker fetch). `fullS` caches the trace length
+// for clamping; init=false ⇒ "fit whole trace" (reset on every new trace).
+const traceView = { s0: 0, s1: 0, fullS: 0, init: false };
 let outFormat = 'segy1';
 let lastSection: SectionData | null = null;
 // Section data-zoom view-state: the visible window in FULL-data indices
@@ -252,6 +265,28 @@ let mapHighlight: L.CircleMarker | null = null;
 let velResult: SemblanceData | null = null;
 let velPicks: VelPick[] = [];
 
+// ── Trace Workbench state ──
+// A collection of traces pulled from arbitrary files (or the open file), drawn
+// side-by-side or overlaid and zoomed/panned together. Each entry owns its full
+// sample buffer + a distinct colour; `wbView` is the shared time window (sample
+// indices, end exclusive) spanning the longest trace, mirroring the inspector's
+// traceView so all traces zoom/pan in lock-step and stay aligned.
+type WbTrace = {
+  id: number;
+  sourceName: string;
+  traceIndex: number;
+  samples: Float32Array;
+  sampleInt: number;
+  nSamples: number;
+  color: string;
+};
+let wbTraces: WbTrace[] = [];
+let wbNextId = 1;
+let wbMode: 'side' | 'overlay' = 'side';
+const wbView = { s0: 0, s1: 0, fullS: 0, init: false };
+// Distinct, theme-friendly colours cycled across collected traces.
+const WB_COLORS = ['#34dbd0', '#ffb454', '#7aa2ff', '#ff6e9c', '#9be564', '#c792ea', '#f78c6c', '#56d4ff'];
+
 // ── Converter (single / folder-batch) state ──
 type ConvMode = 'single' | 'batch';
 let convMode: ConvMode = 'single';
@@ -267,7 +302,7 @@ const MOD = IS_MAC ? 'Cmd' : 'Ctrl';      // primary modifier label
 const KEY_OPEN = `${MOD}+O`;
 const KEY_BATCH = `${MOD}+B`;
 
-const TABS = ['conv', 'trace', 'section', 'sps', 'vel'] as const;
+const TABS = ['conv', 'trace', 'section', 'sps', 'vel', 'workbench'] as const;
 type Tab = (typeof TABS)[number];
 
 function switchTab(tab: Tab) {
@@ -287,6 +322,7 @@ function switchTab(tab: Tab) {
   if (tab === 'section' && summary) void refreshSection();
   if (tab === 'sps' && spsSummary) void refreshSps();
   if (tab === 'vel' && velResult) drawVelocity();
+  if (tab === 'workbench') drawWorkbench();
 }
 
 function fmtRate(si: number | null) {
@@ -924,6 +960,7 @@ async function refreshTrace() {
   traceIndex = Math.max(0, Math.min(summary.traceCount - 1, traceIndex));
   try {
     lastTrace = await api.getTrace(traceIndex);
+    traceFit(lastTrace); // reset the time-axis zoom window to the whole trace
     ($('traceSlider') as HTMLInputElement).max = String(summary.traceCount - 1);
     ($('traceSlider') as HTMLInputElement).value = String(traceIndex);
     renderTrace();
@@ -1132,10 +1169,17 @@ function drawTrace(cv: HTMLCanvasElement, t: TraceData) {
   const n = t.nSamples;
   if (!n || !t.samples.length) return;
 
+  // Visible sample window [s0,s1) within the full trace (clamped to the data).
+  if (!traceView.init || traceView.fullS !== n) traceFit(t);
+  const s0 = traceView.s0, s1 = traceView.s1;
+  const span = s1 - s0;
+  if (span < 1) return;
+
   const ML = 60, MR = 14, MT = 14, MB = 26;
   const pw = W - ML - MR, ph = H - MT - MB;
   const cx = ML + pw / 2;
-  const nf = normFactorPercentile(t.samples, 0.95) || 1;
+  // Renormalize over the VISIBLE window so zoom shows local detail at full swing.
+  const nf = normFactorPercentile(t.samples.subarray(s0, s1), 0.95) || 1;
 
   ctx.strokeStyle = '#214564';
   ctx.lineWidth = 1;
@@ -1149,22 +1193,24 @@ function drawTrace(cv: HTMLCanvasElement, t: TraceData) {
   ctx.beginPath();
   ctx.strokeStyle = '#34dbd0';
   ctx.lineWidth = 1;
-  for (let i = 0; i < n; i++) {
+  const denom = span > 1 ? span - 1 : 1; // map sample i∈[s0,s1) → y over the plot height
+  for (let i = s0; i < s1; i++) {
     const v = Math.max(-1, Math.min(1, t.samples[i] / nf));
     const x = cx + v * (pw / 2 - 2);
-    const y = MT + (i / (n - 1)) * ph;
-    if (i === 0) ctx.moveTo(x, y);
+    const y = MT + ((i - s0) / denom) * ph;
+    if (i === s0) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);
   }
   ctx.stroke();
 
-  // time axis (ms down)
+  // time axis (ms down) — labels reflect the visible window [s0,s1)
   ctx.fillStyle = '#7e93ac';
   ctx.font = '10px Consolas, monospace';
-  const totalMs = (n * t.sampleInt) / 1000;
+  const msPerSample = t.sampleInt / 1000;
   for (let k = 0; k <= 5; k++) {
     const y = MT + (ph * k) / 5;
-    ctx.fillText(((totalMs * k) / 5).toFixed(0) + ' ms', 6, y + 3);
+    const sampleAt = s0 + (denom * k) / 5;
+    ctx.fillText((sampleAt * msPerSample).toFixed(0) + ' ms', 6, y + 3);
     ctx.strokeStyle = '#173049';
     ctx.beginPath();
     ctx.moveTo(ML, y);
@@ -1500,6 +1546,439 @@ function sectionInteractions() {
   $opt('secZoomIn')?.addEventListener('click', () => secZoomButton(1 / 1.4));
   $opt('secZoomOut')?.addEventListener('click', () => secZoomButton(1.4));
   $opt('secZoomFit')?.addEventListener('click', () => { secFit(); void fetchSectionWindow(); });
+}
+
+// ── Trace Inspector time-axis zoom / pan (renderer-only) ──
+// The full trace is already in lastTrace.samples, so zoom/pan just re-windows
+// [s0,s1) and repaints — no worker round-trip. Mirrors the section interactions.
+
+/** Reset the visible window to the whole trace ("fit"). */
+function traceFit(t: TraceData) {
+  traceView.fullS = t.nSamples;
+  traceView.s0 = 0;
+  traceView.s1 = t.nSamples;
+  traceView.init = true;
+}
+
+/** Keep the visible window inside the trace (never pan/zoom off the data). */
+function traceClamp() {
+  const fS = traceView.fullS;
+  const minS = Math.min(fS, 4); // can't zoom into fewer than a few samples
+  let { s0, s1 } = traceView;
+  if (s1 - s0 < minS) s1 = s0 + minS;
+  if (s1 - s0 > fS) { s0 = 0; s1 = fS; }
+  if (s0 < 0) { s1 -= s0; s0 = 0; }
+  if (s1 > fS) { s0 -= s1 - fS; s1 = fS; }
+  traceView.s0 = Math.max(0, Math.round(s0));
+  traceView.s1 = Math.min(fS, Math.round(s1));
+}
+
+/** Map a cursor pixel inside the trace canvas to a fractional position (0..1)
+ *  down the plot rectangle (the time axis), clamped to the data area. */
+function tracePlotFrac(cv: HTMLCanvasElement, e: MouseEvent): number {
+  const r = cv.getBoundingClientRect();
+  const H = cv.clientHeight || 460;
+  const MT = 14, MB = 26, ph = H - MT - MB;
+  const py = e.clientY - r.top - MT;
+  return ph > 0 ? Math.max(0, Math.min(1, py / ph)) : 0;
+}
+
+/** Zoom the visible sample window toward a fractional anchor `fy` by `factor`
+ *  (<1 zooms in). The sample under the cursor stays put. */
+function traceZoomAt(fy: number, factor: number) {
+  if (!lastTrace) return;
+  if (!traceView.init || traceView.fullS !== lastTrace.nSamples) traceFit(lastTrace);
+  const as = traceView.s0 + fy * (traceView.s1 - traceView.s0); // anchor sample
+  const ws = (traceView.s1 - traceView.s0) * factor;
+  traceView.s0 = as - fy * ws;
+  traceView.s1 = as + (1 - fy) * ws;
+  traceClamp();
+}
+
+/** Zoom toward the canvas centre (toolbar +/- buttons), then repaint. */
+function traceZoomButton(factor: number) {
+  if (!lastTrace || traceMode !== 'wave') return;
+  traceZoomAt(0.5, factor);
+  renderTrace();
+}
+
+/** Attach wheel-zoom / drag-pan / double-click-fit to the trace canvas (once).
+ *  Guarded on the trace panel being visible and a waveform being shown. */
+function traceInteractions() {
+  const cv = $('traceCanvas') as HTMLCanvasElement;
+  const active = () =>
+    $('panel-trace').style.display !== 'none' && !!lastTrace && traceMode === 'wave';
+  let dragging = false, ly = 0;
+  cv.addEventListener('wheel', (e) => {
+    if (!active()) return;
+    e.preventDefault();
+    const fy = tracePlotFrac(cv, e);
+    traceZoomAt(fy, e.deltaY < 0 ? 1 / 1.15 : 1.15); // wheel up ⇒ zoom in
+    renderTrace();
+  }, { passive: false });
+  cv.addEventListener('mousedown', (e) => {
+    if (!active()) return;
+    dragging = true; ly = e.clientY; cv.style.cursor = 'grabbing';
+  });
+  window.addEventListener('mouseup', () => { dragging = false; cv.style.cursor = ''; });
+  cv.addEventListener('mousemove', (e) => {
+    if (!dragging || !traceView.init || !active()) return;
+    const H = cv.clientHeight || 460;
+    const MT = 14, MB = 26, ph = H - MT - MB;
+    if (ph <= 0) return;
+    // Pixel drag → sample drag (drag down ⇒ window moves up, like grabbing the trace).
+    const ds = ((e.clientY - ly) / ph) * (traceView.s1 - traceView.s0);
+    traceView.s0 -= ds; traceView.s1 -= ds;
+    traceClamp();
+    ly = e.clientY;
+    renderTrace();
+  });
+  cv.addEventListener('dblclick', () => {
+    if (!active()) return;
+    traceFit(lastTrace!); renderTrace();
+  });
+  // Toolbar buttons (added in index.html alongside the Waveform/Spectrum toggle).
+  $opt('traceZoomIn')?.addEventListener('click', () => traceZoomButton(1 / 1.4));
+  $opt('traceZoomOut')?.addEventListener('click', () => traceZoomButton(1.4));
+  $opt('traceZoomFit')?.addEventListener('click', () => {
+    if (lastTrace) { traceFit(lastTrace); renderTrace(); }
+  });
+}
+
+// ── Trace Workbench ──
+// Collect individual traces from arbitrary files (or the currently-open file)
+// and compare them side-by-side or overlaid, all zoomed/panned together on one
+// shared time axis. Wiggle drawing reuses drawTrace's centre-axis mapping; the
+// shared wbView mirrors the inspector's traceView so the interactions match.
+
+/** Longest trace in the collection (samples), or 0 when empty — the time extent. */
+function wbMaxSamples(): number {
+  let m = 0;
+  for (const t of wbTraces) if (t.nSamples > m) m = t.nSamples;
+  return m;
+}
+
+/** Reset the shared time window to the full extent ("fit"). */
+function wbFit() {
+  const full = wbMaxSamples();
+  wbView.fullS = full;
+  wbView.s0 = 0;
+  wbView.s1 = full;
+  wbView.init = true;
+}
+
+/** Keep the shared window inside the data (never pan/zoom off the longest trace). */
+function wbClamp() {
+  const fS = wbView.fullS;
+  const minS = Math.min(fS, 4);
+  let { s0, s1 } = wbView;
+  if (s1 - s0 < minS) s1 = s0 + minS;
+  if (s1 - s0 > fS) { s0 = 0; s1 = fS; }
+  if (s0 < 0) { s1 -= s0; s0 = 0; }
+  if (s1 > fS) { s0 -= s1 - fS; s1 = fS; }
+  wbView.s0 = Math.max(0, Math.round(s0));
+  wbView.s1 = Math.min(fS, Math.round(s1));
+}
+
+/** Cursor pixel → fractional position (0..1) down the plot's time axis. */
+function wbPlotFrac(cv: HTMLCanvasElement, e: MouseEvent): number {
+  const r = cv.getBoundingClientRect();
+  const H = cv.clientHeight || 460;
+  const MT = 14, MB = 26, ph = H - MT - MB;
+  const py = e.clientY - r.top - MT;
+  return ph > 0 ? Math.max(0, Math.min(1, py / ph)) : 0;
+}
+
+/** Zoom the shared window toward fractional anchor `fy` by `factor` (<1 zooms in). */
+function wbZoomAt(fy: number, factor: number) {
+  if (!wbTraces.length) return;
+  if (!wbView.init || wbView.fullS !== wbMaxSamples()) wbFit();
+  const as = wbView.s0 + fy * (wbView.s1 - wbView.s0);
+  const ws = (wbView.s1 - wbView.s0) * factor;
+  wbView.s0 = as - fy * ws;
+  wbView.s1 = as + (1 - fy) * ws;
+  wbClamp();
+}
+
+/** Zoom toward the canvas centre (toolbar +/- buttons), then repaint. */
+function wbZoomButton(factor: number) {
+  if (!wbTraces.length) return;
+  wbZoomAt(0.5, factor);
+  drawWorkbench();
+}
+
+/** Pick a file (no parse), then add the chosen trace # to the collection. */
+async function wbPickAndAdd() {
+  try {
+    const path = await api.pickTraceFile();
+    if (!path) return;
+    const idxIn = $opt('wbIndex') as HTMLInputElement | null;
+    const index = Math.max(0, (parseInt(idxIn?.value || '0', 10) || 0));
+    setStatus('wbStatus', 'Reading trace…');
+    const tr = await api.extractTrace(path, index);
+    wbAddTrace(tr.name, tr.index, tr.samples, tr.sampleInt, tr.nSamples);
+    setStatus('wbStatus', `Added ${tr.name} · trace ${tr.index + 1} (of ${tr.traceCount})`, 'ok');
+  } catch (e) {
+    setStatus('wbStatus', 'Add failed: ' + errMsg(e), 'err');
+  }
+}
+
+/** Add the currently-open file's current trace (Trace Inspector selection). */
+function wbAddOpenTrace() {
+  if (!summary || !lastTrace) {
+    setStatus('wbStatus', 'Open a file and pick a trace first.', 'err');
+    return;
+  }
+  wbAddTrace(summary.name, lastTrace.index, lastTrace.samples.slice(), lastTrace.sampleInt, lastTrace.nSamples);
+  setStatus('wbStatus', `Added open file · trace ${lastTrace.index + 1}`, 'ok');
+}
+
+/** Push one trace into the collection (distinct colour), refit + redraw. */
+function wbAddTrace(sourceName: string, traceIndex: number, samples: Float32Array, sampleInt: number, nSamples: number) {
+  const color = WB_COLORS[(wbNextId - 1) % WB_COLORS.length];
+  wbTraces.push({ id: wbNextId++, sourceName, traceIndex, samples, sampleInt, nSamples, color });
+  wbFit(); // new extent ⇒ refit the shared window so the addition is visible
+  renderWorkbenchList();
+  drawWorkbench();
+}
+
+/** Remove one trace by id; refit + redraw (clears the view when empty). */
+function wbRemove(id: number) {
+  wbTraces = wbTraces.filter((t) => t.id !== id);
+  wbFit();
+  renderWorkbenchList();
+  drawWorkbench();
+}
+
+/** Drop the whole collection. */
+function wbClear() {
+  wbTraces = [];
+  wbView.init = false;
+  renderWorkbenchList();
+  drawWorkbench();
+  setStatus('wbStatus', '');
+}
+
+/** Switch the display mode (side-by-side vs overlay) + repaint. */
+function wbSetMode(m: 'side' | 'overlay') {
+  if (wbMode === m) return;
+  wbMode = m;
+  $opt('wbModeSide')?.classList.toggle('on', m === 'side');
+  $opt('wbModeOverlay')?.classList.toggle('on', m === 'overlay');
+  drawWorkbench();
+}
+
+/** Render the collected-trace list (source · trace # · colour swatch + remove). */
+function renderWorkbenchList() {
+  const list = $opt('wbList');
+  if (!list) return;
+  if (!wbTraces.length) {
+    list.innerHTML = '<div class="hdr-empty">No traces collected yet.</div>';
+    return;
+  }
+  list.innerHTML = '';
+  for (const t of wbTraces) {
+    const row = document.createElement('div');
+    row.className = 'wb-item';
+    const sw = document.createElement('span');
+    sw.className = 'wb-swatch';
+    sw.style.background = t.color;
+    const lbl = document.createElement('span');
+    lbl.className = 'wb-item-lbl';
+    lbl.textContent = `${t.sourceName} · trace ${t.traceIndex + 1}`;
+    const rm = document.createElement('button');
+    rm.className = 'wb-rm';
+    rm.title = 'Remove';
+    rm.textContent = '✕';
+    rm.addEventListener('click', () => wbRemove(t.id));
+    row.append(sw, lbl, rm);
+    list.appendChild(row);
+  }
+}
+
+/** Draw one trace's wiggle in a vertical band centred at `cx`, half-width `hw`,
+ *  over the shared time window [s0,s1) — reuses drawTrace's centre-axis mapping.
+ *  `nf` is the normalization factor (per-trace in side mode, shared in overlay). */
+function wbDrawWiggle(ctx: CanvasRenderingContext2D, t: WbTrace, cx: number, hw: number, MT: number, ph: number, s0: number, s1: number, nf: number, color: string) {
+  const span = s1 - s0;
+  if (span < 1) return;
+  const denom = span > 1 ? span - 1 : 1;
+  const lo = Math.max(0, s0), hi = Math.min(t.nSamples, s1);
+  ctx.beginPath();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1;
+  let started = false;
+  for (let i = lo; i < hi; i++) {
+    const v = Math.max(-1, Math.min(1, t.samples[i] / nf));
+    const x = cx + v * (hw - 2);
+    const y = MT + ((i - s0) / denom) * ph;
+    if (!started) { ctx.moveTo(x, y); started = true; }
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+}
+
+/** Paint the workbench canvas: empty placeholder, side-by-side columns, or a
+ *  shared-axis overlay. Time mapping + zoom window are shared across all traces
+ *  so they stay aligned; a small legend labels each colour. */
+function drawWorkbench() {
+  const cv = $opt('wbCanvas') as HTMLCanvasElement | null;
+  if (!cv) return;
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth || 800;
+  const H = cv.clientHeight || 460;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  const ctx = cv.getContext('2d')!;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#0d1f33';
+  ctx.fillRect(0, 0, W, H);
+
+  if (!wbTraces.length) {
+    ctx.fillStyle = '#5e7186';
+    ctx.font = '13px Consolas, monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('Pick traces to compare', W / 2, H / 2);
+    ctx.textAlign = 'left';
+    return;
+  }
+
+  if (!wbView.init || wbView.fullS !== wbMaxSamples()) wbFit();
+  const s0 = wbView.s0, s1 = wbView.s1;
+  if (s1 - s0 < 1) return;
+
+  const ML = 60, MR = 14, MT = 14, MB = 26;
+  const pw = W - ML - MR, ph = H - MT - MB;
+
+  ctx.strokeStyle = '#214564';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(ML, MT, pw, ph);
+
+  // Time axis (ms down) — labelled from the longest trace's sample interval, or
+  // the first trace's if they differ. Mapping is the SAME for every trace so the
+  // side-by-side columns and the overlay all line up in time.
+  const si = wbTraces[0].sampleInt || 0;
+  const denom = s1 - s0 > 1 ? s1 - s0 - 1 : 1;
+  ctx.fillStyle = '#7e93ac';
+  ctx.font = '10px Consolas, monospace';
+  const msPerSample = si / 1000;
+  for (let k = 0; k <= 5; k++) {
+    const y = MT + (ph * k) / 5;
+    const sampleAt = s0 + (denom * k) / 5;
+    ctx.fillText((sampleAt * msPerSample).toFixed(0) + ' ms', 6, y + 3);
+    ctx.strokeStyle = '#173049';
+    ctx.beginPath();
+    ctx.moveTo(ML, y);
+    ctx.lineTo(ML + pw, y);
+    ctx.stroke();
+  }
+
+  if (wbMode === 'side') {
+    // Split the plot width into N equal columns; each trace's wiggle is centred
+    // in its column and normalized over its OWN visible window (independent gain).
+    const n = wbTraces.length;
+    const colW = pw / n;
+    for (let j = 0; j < n; j++) {
+      const t = wbTraces[j];
+      const cx = ML + colW * (j + 0.5);
+      const hw = colW / 2;
+      // column divider + faint centre axis
+      if (j > 0) {
+        ctx.strokeStyle = '#173049';
+        ctx.beginPath(); ctx.moveTo(ML + colW * j, MT); ctx.lineTo(ML + colW * j, MT + ph); ctx.stroke();
+      }
+      ctx.strokeStyle = '#264a68';
+      ctx.beginPath(); ctx.moveTo(cx, MT); ctx.lineTo(cx, MT + ph); ctx.stroke();
+      const lo = Math.max(0, s0), hi = Math.min(t.nSamples, s1);
+      const nf = (hi > lo ? normFactorPercentile(t.samples.subarray(lo, hi), 0.95) : 0) || 1;
+      wbDrawWiggle(ctx, t, cx, hw, MT, ph, s0, s1, nf, t.color);
+      // per-column label
+      ctx.fillStyle = t.color;
+      ctx.font = '10px Consolas, monospace';
+      ctx.textAlign = 'center';
+      const lbl = `${t.sourceName} · ${t.traceIndex + 1}`;
+      ctx.fillText(lbl.length > 22 ? lbl.slice(0, 21) + '…' : lbl, cx, MT + ph + 16);
+      ctx.textAlign = 'left';
+    }
+  } else {
+    // Overlay: all traces on ONE shared centre axis with a SHARED normalization
+    // (max percentile over the visible window across the collection) so relative
+    // amplitudes are comparable and aligned in time.
+    const cx = ML + pw / 2;
+    ctx.strokeStyle = '#264a68';
+    ctx.beginPath(); ctx.moveTo(cx, MT); ctx.lineTo(cx, MT + ph); ctx.stroke();
+    let nf = 0;
+    for (const t of wbTraces) {
+      const lo = Math.max(0, s0), hi = Math.min(t.nSamples, s1);
+      if (hi <= lo) continue;
+      const f = normFactorPercentile(t.samples.subarray(lo, hi), 0.95);
+      if (f > nf) nf = f;
+    }
+    if (nf <= 0) nf = 1;
+    for (const t of wbTraces) wbDrawWiggle(ctx, t, cx, pw / 2, MT, ph, s0, s1, nf, t.color);
+  }
+
+  // Legend (source · trace #) top-right, one row per colour.
+  ctx.font = '10px Consolas, monospace';
+  ctx.textAlign = 'left';
+  let ly = MT + 4;
+  for (const t of wbTraces) {
+    ctx.fillStyle = t.color;
+    ctx.fillRect(ML + pw - 150, ly, 9, 9);
+    ctx.fillStyle = '#aab8c8';
+    const lbl = `${t.sourceName} · ${t.traceIndex + 1}`;
+    ctx.fillText(lbl.length > 20 ? lbl.slice(0, 19) + '…' : lbl, ML + pw - 137, ly + 8);
+    ly += 13;
+    if (ly > MT + ph - 12) break; // don't overflow the plot
+  }
+
+  // status label
+  const lab = $opt('wbLabel');
+  if (lab) lab.textContent = `${wbTraces.length} trace${wbTraces.length === 1 ? '' : 's'} · ${wbMode === 'side' ? 'side-by-side' : 'overlay'} · ${s0}–${s1} samples`;
+}
+
+/** Attach wheel-zoom / drag-pan / dblclick-fit to the workbench canvas (once). */
+function workbenchInteractions() {
+  const cv = $opt('wbCanvas') as HTMLCanvasElement | null;
+  if (!cv) return;
+  const active = () => $('panel-workbench').style.display !== 'none' && !!wbTraces.length;
+  let dragging = false, ly = 0;
+  cv.addEventListener('wheel', (e) => {
+    if (!active()) return;
+    e.preventDefault();
+    const fy = wbPlotFrac(cv, e);
+    wbZoomAt(fy, e.deltaY < 0 ? 1 / 1.15 : 1.15);
+    drawWorkbench();
+  }, { passive: false });
+  cv.addEventListener('mousedown', (e) => {
+    if (!active()) return;
+    dragging = true; ly = e.clientY; cv.style.cursor = 'grabbing';
+  });
+  window.addEventListener('mouseup', () => { dragging = false; cv.style.cursor = ''; });
+  cv.addEventListener('mousemove', (e) => {
+    if (!dragging || !wbView.init || !active()) return;
+    const H = cv.clientHeight || 460;
+    const MT = 14, MB = 26, ph = H - MT - MB;
+    if (ph <= 0) return;
+    const ds = ((e.clientY - ly) / ph) * (wbView.s1 - wbView.s0);
+    wbView.s0 -= ds; wbView.s1 -= ds;
+    wbClamp();
+    ly = e.clientY;
+    drawWorkbench();
+  });
+  cv.addEventListener('dblclick', () => {
+    if (!active()) return;
+    wbFit(); drawWorkbench();
+  });
+  $opt('wbPickBtn')?.addEventListener('click', () => void wbPickAndAdd());
+  $opt('wbAddOpenBtn')?.addEventListener('click', wbAddOpenTrace);
+  $opt('wbClearBtn')?.addEventListener('click', wbClear);
+  $opt('wbModeSide')?.addEventListener('click', () => wbSetMode('side'));
+  $opt('wbModeOverlay')?.addEventListener('click', () => wbSetMode('overlay'));
+  $opt('wbZoomIn')?.addEventListener('click', () => wbZoomButton(1 / 1.4));
+  $opt('wbZoomOut')?.addEventListener('click', () => wbZoomButton(1.4));
+  $opt('wbZoomFit')?.addEventListener('click', () => { wbFit(); drawWorkbench(); });
+  renderWorkbenchList();
 }
 
 // ── SPS 2.1 (survey geometry) ──
@@ -2464,6 +2943,7 @@ function init() {
   });
   $('traceWave').addEventListener('click', () => setTraceMode('wave'));
   $('traceSpec').addEventListener('click', () => setTraceMode('spectrum'));
+  traceInteractions(); // wheel-zoom / drag-pan / dblclick-fit + toolbar on the trace TIME axis
   for (const id of ['secMode', 'secColor']) ($(id) as HTMLSelectElement).addEventListener('change', redrawSection);
   ($('secGain') as HTMLInputElement).addEventListener('input', redrawSection);
   ($('secAgc') as HTMLInputElement).addEventListener('change', () => void refreshSection());
@@ -2507,6 +2987,7 @@ function init() {
   $('velComputeBtn').addEventListener('click', () => void computeVelocity());
   $('velExportBtn').addEventListener('click', () => void exportPicks());
   ($('velCanvas') as HTMLCanvasElement).addEventListener('click', onVelClick);
+  workbenchInteractions(); // Trace Workbench: add/remove/clear + shared zoom/pan
   // OS-aware key hints (replaces the hard-coded ⌘ glyphs everywhere).
   applyKeyHints();
 
@@ -2557,7 +3038,7 @@ function onKeyDown(e: KeyboardEvent) {
   // '[' / ']' step to the previous / next seismic file in the open file's folder.
   if (!mod && e.key === '[') { e.preventDefault(); void navFile(-1); return; }
   if (!mod && e.key === ']') { e.preventDefault(); void navFile(1); return; }
-  if (!mod && e.key >= '1' && e.key <= '5') {
+  if (!mod && e.key >= '1' && e.key <= '6') {
     const idx = parseInt(e.key, 10) - 1;
     if (idx >= 0 && idx < TABS.length) { e.preventDefault(); switchTab(TABS[idx]); }
   }

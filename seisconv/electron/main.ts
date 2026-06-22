@@ -201,6 +201,24 @@ ipcMain.handle('seisconv:getTrace', async (_e, index: number) => {
   return { index: r.index, nSamples: r.nSamples, sampleInt: r.sampleInt, hdr: r.hdr, samples: r.samples };
 });
 
+// Trace Workbench: open a single-file picker and return the chosen path WITHOUT
+// parsing (the workbench parses lazily via extractTrace). Null when cancelled.
+ipcMain.handle('seisconv:pickTraceFile', async () => {
+  if (!win) return null;
+  const res = await dialog.showOpenDialog(win, { properties: ['openFile'], filters: SEISMIC_FILTERS });
+  if (res.canceled || !res.filePaths.length) return null;
+  return res.filePaths[0];
+});
+
+// Trace Workbench: parse `path` locally (off the persistently-open file) and
+// return ONE trace's samples + header. Mirrors getTrace's return shape, plus the
+// source name + total trace count so the workbench can label + clamp the entry.
+ipcMain.handle('seisconv:extractTrace', async (_e, filePath: string, index: number) => {
+  const r = await callWorker<{ ok: boolean; error?: string } & Record<string, any>>({ type: 'extractTrace', path: filePath, index });
+  if (!r.ok) throw new Error(r.error || 'extract trace failed');
+  return { name: r.name, index: r.index, traceCount: r.traceCount, nSamples: r.nSamples, sampleInt: r.sampleInt, hdr: r.hdr, samples: r.samples };
+});
+
 ipcMain.handle('seisconv:getSection', async (_e, opts: Record<string, unknown>) => {
   const r = await callWorker<{ ok: boolean; error?: string } & Record<string, any>>({ type: 'section', ...(opts || {}) });
   if (!r.ok) throw new Error(r.error || 'section failed');

@@ -494,6 +494,14 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
 .hdr-grp .kv .v{font-family:var(--mono);font-weight:500;}
 .hdr-empty{color:var(--ink-3);font-size:12.5px;padding:8px 0;}
 
+/* Trace Workbench — collected-trace list (colour swatch · label · remove) */
+.wb-list{display:flex;flex-direction:column;gap:6px;}
+.wb-item{display:flex;align-items:center;gap:9px;padding:5px 8px;background:var(--surface);border:1px solid var(--hair);border-radius:8px;}
+.wb-swatch{width:12px;height:12px;border-radius:3px;flex:none;box-shadow:inset 0 0 0 1px rgba(0,0,0,.25);}
+.wb-item-lbl{flex:1;font-size:12px;font-family:var(--mono);color:var(--ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.wb-rm{border:none;background:transparent;color:var(--ink-3);cursor:pointer;font-size:13px;line-height:1;padding:2px 5px;border-radius:6px;}
+.wb-rm:hover{color:var(--red);background:rgba(255,110,156,.12);}
+
 /* status line (#convStatus / labels) */
 .status{margin-top:14px;font-size:13px;min-height:18px;color:var(--ink-2);}
 .status.ok{color:var(--green);} .status.err{color:var(--red);}
@@ -678,6 +686,11 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
         <path d="M4 4l8 16 8-16"/><path d="M7 4l5 10 5-10" opacity=".5"/></svg>
       <span class="lbl">Velocity</span>
+    </button>
+    <button class="nav-item" id="tab-workbench" title="Trace Workbench">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 12h2l2-5 3 10 2.5-7 1.8 4H17"/><path d="M19 6v12M22 6v12" opacity=".5"/></svg>
+      <span class="lbl">Trace Workbench</span>
     </button>
 
     <div class="spacer"></div>
@@ -1006,6 +1019,11 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
           <input type="range" id="traceSlider" class="slider" min="0" max="0" value="0">
           <button class="btn sm" id="traceNext">Next ›</button>
           <span class="seg"><button class="segbtn on" id="traceWave">Waveform</button><button class="segbtn" id="traceSpec">Spectrum</button></span>
+          <span class="seg" title="Zoom the time axis (wheel over the trace, drag to pan, double-click to fit)">
+            <button class="segbtn" id="traceZoomOut" title="Zoom out (time)">&minus;</button>
+            <button class="segbtn" id="traceZoomFit" title="Fit / reset time zoom">Fit</button>
+            <button class="segbtn" id="traceZoomIn" title="Zoom in (time)">+</button>
+          </span>
           <span class="trace-label" id="traceLabel">Open a file to inspect traces</span>
         </div>
         <canvas id="traceCanvas" class="canvas"></canvas>
@@ -1123,6 +1141,42 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
         </div>
         <canvas id="velCanvas" class="canvas"></canvas>
         <div id="velPicks" class="qc-results"></div>
+      </section>
+
+      <!-- ===================== TRACE WORKBENCH ===================== -->
+      <section id="panel-workbench" style="display:none;">
+        <div class="sec-bar">
+          <button class="btn sm" id="wbPickBtn">Pick file…</button>
+          <label class="ctl-lbl">Trace # <input type="number" id="wbIndex" class="numin" value="0" min="0" step="1"></label>
+          <button class="btn sm" id="wbAddOpenBtn" title="Add the current trace from the open file">Add open trace</button>
+          <span style="flex:1"></span>
+          <span class="seg" title="Compare traces side-by-side or overlaid on one axis">
+            <button class="segbtn on" id="wbModeSide">Side-by-side</button>
+            <button class="segbtn" id="wbModeOverlay">Overlay</button>
+          </span>
+          <span class="seg" title="Zoom the shared time axis (wheel over the canvas, drag to pan, double-click to fit)">
+            <button class="segbtn" id="wbZoomOut" title="Zoom out (time)">&minus;</button>
+            <button class="segbtn" id="wbZoomFit" title="Fit / reset time zoom">Fit</button>
+            <button class="segbtn" id="wbZoomIn" title="Zoom in (time)">+</button>
+          </span>
+          <span class="trace-label" id="wbLabel">Pick traces to compare</span>
+        </div>
+        <div class="status" id="wbStatus" style="margin:2px 0 8px;"></div>
+        <canvas id="wbCanvas" class="canvas"></canvas>
+
+        <!-- Collected-trace list + clear-all -->
+        <div class="card" id="wbListCard" style="margin-top:16px;">
+          <div class="ch">
+            <h2>Collected traces</h2>
+            <span class="hint">Traces pulled from any file, drawn together</span>
+            <div class="right"><button class="btn sm" id="wbClearBtn">Clear all</button></div>
+          </div>
+          <div class="cb" style="padding-top:6px;padding-bottom:8px;">
+            <div class="wb-list" id="wbList">
+              <div class="hdr-empty">No traces collected yet.</div>
+            </div>
+          </div>
+        </div>
       </section>
 
     </div>
