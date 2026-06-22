@@ -31,6 +31,8 @@ export * from './render/model';
 export * from './sps/parse';
 export * from './sps/qc';
 export * from './sps/reproject';
+export * from './export/xlsx';
+export * from './export/ods';
 
 /**
  * Detect and parse any supported seismic file. Dispatches through the format

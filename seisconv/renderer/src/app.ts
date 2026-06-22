@@ -8,6 +8,9 @@ import { EPSG_DB } from '../../core/sps/reproject';
 import { amplitudeSpectrum } from '../../core/dsp/fft';
 import { crossCorrelate, difference } from '../../core/dsp/correlate';
 import { resampleLinear } from '../../core/dsp/interpolate';
+import { buildXlsx, type SheetTable } from '../../core/export/xlsx';
+import { buildOds } from '../../core/export/ods';
+import JSZip from 'jszip';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 
@@ -53,6 +56,10 @@ type VelPick = { v: number; tMs: number };
 type ConvResult = { ok: boolean; path?: string; canceled?: boolean; error?: string };
 type FolderFile = { name: string; path: string };
 type PickFolderResult = { dir: string; files: FolderFile[] } | null;
+// Observer Log payload restored from a saved .json (shape matches what the
+// renderer writes). LogColumn / LogMeta / LogRow are defined with the rest of
+// the Observer-Log state further down; type aliases are hoisted so this is fine.
+type LogJson = { meta: LogMeta; columns: LogColumn[]; rows: LogRow[] };
 type BatchSummary = {
   ok: boolean;
   total: number;
@@ -119,6 +126,10 @@ declare global {
       spsExport(args: { kind: 'kml' | 'geojson' | 'csv' | 'qcreport'; qcParams?: QCParamsUI }): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
       semblance(opts: { velMin: number; velMax: number; velStep: number }): Promise<SemblanceData>;
       exportText(name: string, text: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
+      // Save arbitrary binary bytes (renderer-built .xlsx / .ods) via a save dialog.
+      exportBinary(name: string, bytes: Uint8Array): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
+      // Observer Log RELOAD: open a .json picker → {meta,columns,rows}, or null if cancelled.
+      openLogJson(): Promise<LogJson | null>;
       // App-wide UI zoom (whole interface), backed by Electron's webFrame.
       getZoom(): number;
       setZoom(factor: number): void;
@@ -206,11 +217,11 @@ function applyKeyHints() {
     tip.innerHTML =
       `Tip — <span class="kbd">${KEY_OPEN}</span> open · ` +
       `<span class="kbd">${KEY_BATCH}</span> batch · ` +
-      `<span class="kbd">1–6</span> switch tabs · ` +
+      `<span class="kbd">1–7</span> switch tabs · ` +
       `<span class="kbd">?</span> help.`;
   }
   // rail + header tooltips
-  $opt('railHelp')?.setAttribute('title', `Help / Manual — keys: ${KEY_OPEN} open · ${KEY_BATCH} batch · 1–6 tabs · ? help`);
+  $opt('railHelp')?.setAttribute('title', `Help / Manual — keys: ${KEY_OPEN} open · ${KEY_BATCH} batch · 1–7 tabs · ? help`);
   $opt('helpBtn')?.setAttribute('title', `Help / Manual (?)`);
   $opt('openBtn')?.setAttribute('title', `Open a seismic file (${KEY_OPEN})`);
   // in-manual key chips that carry a data-key marker
@@ -218,7 +229,7 @@ function applyKeyHints() {
     const k = el.getAttribute('data-key');
     if (k === 'open') el.textContent = KEY_OPEN;
     else if (k === 'batch') el.textContent = KEY_BATCH;
-    else if (k === 'tabs') el.textContent = '1–6';
+    else if (k === 'tabs') el.textContent = '1–7';
     else if (k === 'help') el.textContent = '?';
   });
 }
@@ -231,6 +242,7 @@ const TAB_META: Record<string, { title: string; desc: string }> = {
   sps: { title: 'SPS 2.1', desc: 'Plot source/receiver geometry on a survey grid or real basemap; QC and reproject.' },
   vel: { title: 'Velocity', desc: 'Compute an NMO semblance panel and pick a stacking-velocity function.' },
   workbench: { title: 'Trace Workbench', desc: 'Collect individual traces from any file and compare them side-by-side or overlaid, zoomed in lock-step.' },
+  obslog: { title: 'Observer Log', desc: 'Per-shot field log; wizard-configured, exportable to Excel.' },
 };
 
 let summary: Summary | null = null;
@@ -298,6 +310,26 @@ const wbView = { s0: 0, s1: 0, fullS: 0, init: false };
 // Distinct, theme-friendly colours cycled across collected traces.
 const WB_COLORS = ['#34dbd0', '#ffb454', '#7aa2ff', '#ff6e9c', '#9be564', '#c792ea', '#f78c6c', '#56d4ff'];
 
+// ── Observer Log state ──
+// A wizard-configured, per-shot field log. `logColumns` is the live column set
+// (built from the chosen groups + source type + any custom columns); `logRows`
+// is one record per row keyed by column key; `logMeta` is the project header.
+// All three persist to localStorage so they survive tab switches / reloads.
+type LogColType = 'text' | 'number' | 'date' | 'time' | 'select';
+type LogSrcType = 'explosive' | 'vibroseis' | 'nodal';
+type LogColumn = { key: string; label: string; group: string; type: LogColType; unit?: string; options?: string[] };
+type LogMeta = Record<string, string>;
+type LogRow = Record<string, string | number>;
+
+let logMeta: LogMeta = {};
+let logColumns: LogColumn[] = [];
+let logRows: LogRow[] = [];
+// Wizard scratch state (the in-progress configuration; committed on "Build log").
+let logSrcType: LogSrcType = 'explosive';
+let logCustomCols: LogColumn[] = [];           // user-defined extra columns
+let logEnabledGroups: Set<string> | null = null; // which default groups are checked (null = wizard not yet primed)
+const LOG_KEY = 'seisconv.obslog';
+
 // ── Converter (single / folder-batch) state ──
 type ConvMode = 'single' | 'batch';
 let convMode: ConvMode = 'single';
@@ -313,7 +345,7 @@ const MOD = IS_MAC ? 'Cmd' : 'Ctrl';      // primary modifier label
 const KEY_OPEN = `${MOD}+O`;
 const KEY_BATCH = `${MOD}+B`;
 
-const TABS = ['conv', 'trace', 'section', 'sps', 'vel', 'workbench'] as const;
+const TABS = ['conv', 'trace', 'section', 'sps', 'vel', 'workbench', 'obslog'] as const;
 type Tab = (typeof TABS)[number];
 
 // Which tab is showing — drives the universal header "Clear" button (see
@@ -342,6 +374,7 @@ function switchTab(tab: Tab) {
   if (tab === 'sps' && spsSummary) void refreshSps();
   if (tab === 'vel' && velResult) drawVelocity();
   if (tab === 'workbench') { drawWorkbench(); wbUpdateAnalysis(); }
+  if (tab === 'obslog') renderLog();
 }
 
 function fmtRate(si: number | null) {
@@ -995,7 +1028,7 @@ const CLEAR_TIP: Record<Tab, string> = {
   sps: 'Clear SPS',
   vel: 'Clear picks',
   workbench: 'Clear workbench',
-  // Future tabs (e.g. 'obslog') add a label here + a case in clearActiveTab().
+  obslog: 'Clear log',
 };
 
 /** Whether the active tab currently holds anything worth clearing — drives the
@@ -1012,6 +1045,8 @@ function activeTabHasData(tab: Tab): boolean {
       return !!velResult || velPicks.length > 0;
     case 'workbench':
       return wbTraces.length > 0;
+    case 'obslog':
+      return logRows.length > 0;
     default:
       return false;
   }
@@ -1034,7 +1069,9 @@ function clearActiveTab() {
     case 'workbench':
       wbClear();
       break;
-    // Future: case 'obslog': clearObsLog(); break;
+    case 'obslog':
+      clearLogRows();
+      break;
   }
   updateHeaderClear();
 }
@@ -3371,6 +3408,843 @@ function errMsg(e: unknown): string {
   return e && typeof e === 'object' && 'message' in e ? String((e as { message: unknown }).message) : String(e);
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+//  OBSERVER LOG
+//  A wizard-configured, per-shot field log. The wizard (steps: project header,
+//  columns, source type, rows) builds `logColumns` + optionally seeds `logRows`;
+//  the hand-built editable grid then edits those rows in place. State persists to
+//  localStorage so it survives tab switches. (Export to Excel arrives in part 2.)
+// ════════════════════════════════════════════════════════════════════════════
+
+// ── Default column schema (grouped). The wizard pre-checks these groups; the
+//    user toggles whole groups and adds custom columns on top. SOURCE carries a
+//    `base` set plus per-source-type extras swapped in by the source-type step. ──
+const STATUS_OPTIONS = ['Good', 'Noisy', 'Dead', 'Misfire', 'No-data', 'Test', 'Re-shoot', 'Skip', 'DNP'];
+
+type SchemaField = { key: string; label: string; type: LogColType; unit?: string; options?: string[] };
+const LOG_SCHEMA: { group: string; fields: SchemaField[] }[] = [
+  { group: 'Identity/Time', fields: [
+    { key: 'ffid', label: 'FFID', type: 'number' },
+    { key: 'fileTape', label: 'File/Tape #', type: 'text' },
+    { key: 'date', label: 'Date', type: 'date' },
+    { key: 'time', label: 'Time', type: 'time' },
+    { key: 'doy', label: 'Day-of-year', type: 'number' },
+  ] },
+  // SOURCE base — per-type extras (explosive/vibroseis) are appended dynamically.
+  { group: 'Source', fields: [
+    { key: 'shotPoint', label: 'Shot point', type: 'number' },
+    { key: 'srcLine', label: 'Source line', type: 'text' },
+    { key: 'srcIndex', label: 'Source index', type: 'number' },
+    { key: 'srcType', label: 'Source type', type: 'text' },
+    { key: 'srcEasting', label: 'Easting', type: 'number', unit: 'm' },
+    { key: 'srcNorthing', label: 'Northing', type: 'number', unit: 'm' },
+    { key: 'srcElev', label: 'Elevation', type: 'number', unit: 'm' },
+  ] },
+  { group: 'Receiver spread', fields: [
+    { key: 'firstStation', label: 'First station', type: 'number' },
+    { key: 'lastStation', label: 'Last station', type: 'number' },
+    { key: 'firstChannel', label: 'First channel', type: 'number' },
+    { key: 'lastChannel', label: 'Last channel', type: 'number' },
+    { key: 'liveChannels', label: '# live channels', type: 'number' },
+    { key: 'deadChannels', label: 'Dead/bad channels', type: 'text' },
+    { key: 'rcvLines', label: 'Receiver line(s)', type: 'text' },
+  ] },
+  { group: 'Statics/Elev', fields: [
+    { key: 'staticMs', label: 'Static', type: 'number', unit: 'ms' },
+    { key: 'replVel', label: 'Replacement velocity', type: 'number', unit: 'm/s' },
+    { key: 'weathering', label: 'Weathering', type: 'number', unit: 'm' },
+  ] },
+  { group: 'Instrument', fields: [
+    { key: 'sampleInt', label: 'Sample interval', type: 'number', unit: 'ms' },
+    { key: 'recordLen', label: 'Record length', type: 'number', unit: 's' },
+    { key: 'lowCut', label: 'Low-cut', type: 'number', unit: 'Hz' },
+    { key: 'highCut', label: 'High-cut', type: 'number', unit: 'Hz' },
+    { key: 'notch', label: 'Notch', type: 'number', unit: 'Hz' },
+    { key: 'gain', label: 'Gain', type: 'text' },
+  ] },
+  { group: 'Environment', fields: [
+    { key: 'weather', label: 'Weather', type: 'text' },
+    { key: 'noiseLevel', label: 'Noise level', type: 'text' },
+    { key: 'notes', label: 'Notes', type: 'text' },
+  ] },
+  { group: 'QC/Status', fields: [
+    { key: 'status', label: 'Status', type: 'select', options: STATUS_OPTIONS },
+    { key: 'comments', label: 'Comments', type: 'text' },
+  ] },
+];
+// Groups pre-checked when the wizard first opens (sensible default working set).
+const LOG_DEFAULT_GROUPS = ['Identity/Time', 'Source', 'Receiver spread', 'QC/Status'];
+
+// Per-source-type extra SOURCE sub-columns (appended after the SOURCE base set).
+const LOG_SRC_EXTRAS: Record<LogSrcType, SchemaField[]> = {
+  explosive: [
+    { key: 'holeDepth', label: 'Hole depth', type: 'number', unit: 'm' },
+    { key: 'charge', label: 'Charge', type: 'number', unit: 'kg' },
+    { key: 'numHoles', label: '# holes', type: 'number' },
+    { key: 'uphole', label: 'Uphole', type: 'number', unit: 'ms' },
+    { key: 'detonator', label: 'Detonator', type: 'text' },
+  ],
+  vibroseis: [
+    { key: 'numVibes', label: '# vibes', type: 'number' },
+    { key: 'numSweeps', label: '# sweeps', type: 'number' },
+    { key: 'sweepLen', label: 'Sweep length', type: 'number', unit: 's' },
+    { key: 'startHz', label: 'Start Hz', type: 'number', unit: 'Hz' },
+    { key: 'endHz', label: 'End Hz', type: 'number', unit: 'Hz' },
+    { key: 'drivePct', label: 'Drive', type: 'number', unit: '%' },
+  ],
+  nodal: [],
+};
+
+// Project-header (logMeta) fields shown in wizard step 1.
+const LOG_META_FIELDS: { key: string; label: string; wide?: boolean }[] = [
+  { key: 'project', label: 'Project' },
+  { key: 'area', label: 'Area' },
+  { key: 'client', label: 'Client' },
+  { key: 'contractor', label: 'Geophysical contractor' },
+  { key: 'crew', label: 'Crew' },
+  { key: 'observer', label: 'Observer' },
+  { key: 'instrument', label: 'Instrument' },
+  { key: 'dateRange', label: 'Date range' },
+  { key: 'crs', label: 'CRS / datum' },
+  { key: 'units', label: 'Units' },
+  { key: 'numbering', label: 'Numbering schemes (line / SP / station / FFID)', wide: true },
+];
+
+/** Build the live `logColumns` from the wizard's chosen groups + source type +
+ *  custom columns. SOURCE injects the per-type extras right after its base set. */
+function buildLogColumns(): LogColumn[] {
+  const groups = logEnabledGroups ?? new Set(LOG_DEFAULT_GROUPS);
+  const cols: LogColumn[] = [];
+  for (const g of LOG_SCHEMA) {
+    if (!groups.has(g.group)) continue;
+    for (const f of g.fields) {
+      cols.push({ key: f.key, label: f.label, group: g.group, type: f.type, unit: f.unit, options: f.options });
+    }
+    // Append the per-source-type extras at the END of the SOURCE group so the
+    // base SOURCE columns always come first.
+    if (g.group === 'Source') {
+      for (const f of LOG_SRC_EXTRAS[logSrcType]) {
+        cols.push({ key: f.key, label: f.label, group: 'Source', type: f.type, unit: f.unit, options: f.options });
+      }
+    }
+  }
+  // Custom columns last, in their own group label.
+  for (const c of logCustomCols) cols.push({ ...c });
+  return cols;
+}
+
+/** A blank row: every column key present, '' for text/select-less, Status seeded. */
+function blankLogRow(): LogRow {
+  const r: LogRow = {};
+  for (const c of logColumns) r[c.key] = c.key === 'status' ? 'Good' : '';
+  return r;
+}
+
+// ── Seeding ──────────────────────────────────────────────────────────────────
+// "Seed from data" creates one row per shot. Priority: a loaded SPS survey's
+// SOURCE points (line/point/E/N), else the open seismic file's traces grouped by
+// unique FFID (bounded so huge files stay responsive).
+
+/** Whether any data source is available to seed rows from. */
+function logCanSeed(): boolean {
+  return !!spsSummary || !!(summary && summary.traceCount > 0);
+}
+
+/** Short description of what "Seed from data" will use, for the wizard note. */
+function logSeedNote(): string {
+  if (spsSummary) return `Seed one row per source point from the loaded SPS survey (${spsSummary.sources} sources).`;
+  if (summary && summary.traceCount > 0) return `Seed one row per FFID from “${summary.name}” (${summary.traceCount} traces).`;
+  return 'No SPS survey or seismic file loaded yet — load one, or start blank.';
+}
+
+/** Seed rows from the loaded SPS survey's source points (uses the already-fetched
+ *  grid geometry; lazily fetches projected E/N geometry if not cached). */
+async function seedFromSps(): Promise<LogRow[]> {
+  // Use projected E/N geometry (geo=false) so Easting/Northing are meaningful.
+  let g = spsGeom;
+  if (!g || g.geo) {
+    try { g = await api.spsGeometry(false); } catch { g = null; }
+  }
+  const rows: LogRow[] = [];
+  if (!g) return rows;
+  const src = g.src;
+  const n = src.pt.length; // x/y/line/pt are per-POINT; names is per-LINE (index = line[i])
+  for (let i = 0; i < n; i++) {
+    const r = blankLogRow();
+    if ('shotPoint' in r) r['shotPoint'] = src.pt[i];
+    if ('srcLine' in r) r['srcLine'] = src.names[src.line[i]] ?? String(src.line[i]);
+    if ('srcIndex' in r) r['srcIndex'] = i + 1;
+    if ('srcEasting' in r && isFinite(src.x[i])) r['srcEasting'] = round3(src.x[i]);
+    if ('srcNorthing' in r && isFinite(src.y[i])) r['srcNorthing'] = round3(src.y[i]);
+    rows.push(r);
+  }
+  return rows;
+}
+
+/** Seed rows from the open seismic file: one row per unique FFID (bounded scan). */
+async function seedFromTraces(): Promise<LogRow[]> {
+  const rows: LogRow[] = [];
+  if (!summary || summary.traceCount === 0) return rows;
+  const CAP = 2000;                                  // bound the per-trace scan
+  const limit = Math.min(summary.traceCount, CAP);
+  const seen = new Set<number>();
+  for (let i = 0; i < limit; i++) {
+    let t: TraceData;
+    try { t = await api.getTrace(i); } catch { continue; }
+    const ffid = num(t.hdr['fieldRec']);
+    const key = ffid ?? i;                            // fall back to trace index
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const r = blankLogRow();
+    if ('ffid' in r && ffid != null) r['ffid'] = ffid;
+    const sp = num(t.hdr['srcPt']);
+    if ('shotPoint' in r && sp != null) r['shotPoint'] = sp;
+    if ('sampleInt' in r) r['sampleInt'] = round3(t.sampleInt / 1000);
+    rows.push(r);
+  }
+  return rows;
+}
+
+function round3(v: number): number { return Math.round(v * 1000) / 1000; }
+function num(v: number | string | undefined): number | null {
+  if (typeof v === 'number' && isFinite(v)) return v;
+  if (typeof v === 'string' && v.trim() !== '' && isFinite(Number(v))) return Number(v);
+  return null;
+}
+
+// ── Persistence ──────────────────────────────────────────────────────────────
+function saveLog() {
+  try {
+    localStorage.setItem(LOG_KEY, JSON.stringify({
+      meta: logMeta, columns: logColumns, rows: logRows,
+      srcType: logSrcType, customCols: logCustomCols,
+      groups: logEnabledGroups ? Array.from(logEnabledGroups) : null,
+    }));
+  } catch { /* ignore quota / serialization errors */ }
+}
+function loadLogState() {
+  try {
+    const s = localStorage.getItem(LOG_KEY);
+    if (!s) return;
+    const o = JSON.parse(s) as Partial<{
+      meta: LogMeta; columns: LogColumn[]; rows: LogRow[];
+      srcType: LogSrcType; customCols: LogColumn[]; groups: string[] | null;
+    }>;
+    if (o.meta && typeof o.meta === 'object') logMeta = o.meta;
+    if (Array.isArray(o.columns)) logColumns = o.columns;
+    if (Array.isArray(o.rows)) logRows = o.rows;
+    if (o.srcType === 'explosive' || o.srcType === 'vibroseis' || o.srcType === 'nodal') logSrcType = o.srcType;
+    if (Array.isArray(o.customCols)) logCustomCols = o.customCols;
+    if (Array.isArray(o.groups)) logEnabledGroups = new Set(o.groups);
+  } catch { /* ignore corrupt state */ }
+}
+
+/** Clear only the log RECORDS (rows), keeping the configured columns + header. */
+function clearLogRows() {
+  if (logRows.length === 0) return;
+  if (!confirm('Clear all log records? The column configuration and project header are kept.')) return;
+  logRows = [];
+  saveLog();
+  renderLog();
+}
+
+// ── File persistence: save / reload the whole log as JSON ──────────────────────
+
+/** A short status line shown briefly under the toolbar after an export/save. */
+function setLogExportStatus(msg: string) {
+  setText('ologGridLabel', msg);
+  // Restore the normal record/column count after a moment.
+  window.setTimeout(() => {
+    setText('ologGridLabel', `${logRows.length} record${logRows.length === 1 ? '' : 's'} · ${logColumns.length} columns`);
+  }, 2600);
+}
+
+/** Save the whole log (header + columns + rows) to a JSON file via a save dialog.
+ *  Reuses the existing exportText IPC; the payload round-trips through openLogJson. */
+async function saveLogJson() {
+  const payload = JSON.stringify({ meta: logMeta, columns: logColumns, rows: logRows }, null, 2);
+  try {
+    const r = await api.exportText('observer-log.json', payload);
+    if (r?.ok) setLogExportStatus('Saved log JSON.');
+  } catch { /* ignore — dialog cancelled / write error */ }
+}
+
+/** Reload a previously saved log JSON: restore meta/columns/rows and show the
+ *  grid (skipping the wizard). Persists the restored state to localStorage too. */
+async function reloadLogJson() {
+  let data: LogJson | null = null;
+  try { data = await api.openLogJson(); } catch { return; }
+  if (!data) return;
+  if (!Array.isArray(data.columns) || data.columns.length === 0) {
+    setText('ologGridLabel', 'That file has no columns — not a valid Observer Log.');
+    return;
+  }
+  logMeta = (data.meta && typeof data.meta === 'object') ? data.meta : {};
+  logColumns = data.columns;
+  logRows = Array.isArray(data.rows) ? data.rows : [];
+  saveLog();        // mirror into localStorage so it survives a tab switch
+  renderLog();      // logConfigured() is now true → grid is shown, wizard skipped
+  updateHeaderClear();
+  setLogExportStatus('Reloaded log JSON.');
+}
+
+// ── Tabular exports (CSV / XLSX / ODS / Report) ────────────────────────────────
+
+/** The display label for a column header in an export (label + unit if present). */
+function logColHeader(c: LogColumn): string {
+  return c.unit ? `${c.label} (${c.unit})` : c.label;
+}
+
+/** One cell value for export: numbers stay numeric; everything else → string. */
+function logCellValue(row: LogRow, c: LogColumn): string | number {
+  const raw = row[c.key];
+  if (raw == null) return '';
+  if (typeof raw === 'number') return Number.isFinite(raw) ? raw : '';
+  // Numeric-typed columns whose stored value is a numeric string → emit a number
+  // so spreadsheets treat the cell as a number, not text.
+  if (c.type === 'number' && raw.trim() !== '' && Number.isFinite(Number(raw))) return Number(raw);
+  return raw;
+}
+
+/** Build the table model (header row + value matrix) shared by every exporter. */
+function buildLogTable(): { header: string[]; rows: (string | number)[][] } {
+  const header = logColumns.map(logColHeader);
+  const rows = logRows.map((row) => logColumns.map((c) => logCellValue(row, c)));
+  return { header, rows };
+}
+
+/** RFC-4180-escape one CSV field: quote when it contains a comma, quote, or
+ *  newline; double any embedded quotes. Numbers pass through as plain text. */
+function csvField(v: string | number): string {
+  const s = typeof v === 'number' ? String(v) : v;
+  if (/[",\r\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+  return s;
+}
+
+/** Build the CSV text (CRLF rows, BOM prepended by the caller) from the table. */
+function buildLogCsv(): string {
+  const { header, rows } = buildLogTable();
+  const lines: string[] = [];
+  lines.push(header.map(csvField).join(','));
+  for (const r of rows) lines.push(r.map(csvField).join(','));
+  return lines.join('\r\n');
+}
+
+/** Export the log as a CSV file. Prepends a UTF-8 BOM so Excel reads non-ASCII. */
+async function exportLogCsv() {
+  if (logRows.length === 0) return;
+  const text = '﻿' + buildLogCsv();
+  try {
+    const r = await api.exportText('observer-log.csv', text);
+    if (r?.ok) setLogExportStatus('Exported CSV.');
+  } catch { /* ignore */ }
+}
+
+/** Sheets fed to the xlsx / ods writers: a "Project" header sheet (only when the
+ *  project header has any filled fields) plus the main "Observer Log" table. */
+function buildLogSheets(): SheetTable[] {
+  const sheets: SheetTable[] = [];
+  const metaPairs = LOG_META_FIELDS
+    .filter((f) => (logMeta[f.key] ?? '').trim() !== '')
+    .map((f) => [f.label, logMeta[f.key]] as [string, string]);
+  if (metaPairs.length) {
+    sheets.push({ name: 'Project', header: ['Field', 'Value'], rows: metaPairs });
+  }
+  const { header, rows } = buildLogTable();
+  sheets.push({ name: 'Observer Log', header, rows });
+  return sheets;
+}
+
+/** Export the log as a real .xlsx (built in-core, zipped with JSZip, saved as bytes). */
+async function exportLogXlsx() {
+  if (logRows.length === 0) return;
+  try {
+    const bytes = await buildXlsx(buildLogSheets(), new JSZip());
+    const r = await api.exportBinary('observer-log.xlsx', bytes);
+    if (r?.ok) setLogExportStatus('Exported Excel (.xlsx).');
+  } catch { setText('ologGridLabel', 'Excel export failed.'); }
+}
+
+/** Export the log as a .ods (OpenDocument Spreadsheet) for LibreOffice / Calc. */
+async function exportLogOds() {
+  if (logRows.length === 0) return;
+  try {
+    const bytes = await buildOds(buildLogSheets(), new JSZip());
+    const r = await api.exportBinary('observer-log.ods', bytes);
+    if (r?.ok) setLogExportStatus('Exported LibreOffice (.ods).');
+  } catch { setText('ologGridLabel', 'ODS export failed.'); }
+}
+
+// ── Printable HTML report ──────────────────────────────────────────────────────
+
+/** HTML-escape text for safe insertion into the report document. */
+function htmlEscape(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+/** Build a clean, print-styled standalone HTML report (project header + table).
+ *  Saved to disk; the user opens it and prints to PDF (the app denies new windows). */
+function buildLogReportHtml(): string {
+  const title = (logMeta['project'] ?? '').trim() || 'Observer Log';
+  const metaRows = LOG_META_FIELDS
+    .filter((f) => (logMeta[f.key] ?? '').trim() !== '')
+    .map((f) => `<tr><th>${htmlEscape(f.label)}</th><td>${htmlEscape(logMeta[f.key] ?? '')}</td></tr>`)
+    .join('');
+  const { header, rows } = buildLogTable();
+  const headHtml = header.map((h) => `<th>${htmlEscape(h)}</th>`).join('');
+  const bodyHtml = rows
+    .map((r, i) => {
+      const cells = r.map((v) => `<td>${htmlEscape(typeof v === 'number' ? String(v) : v)}</td>`).join('');
+      return `<tr><td class="rn">${i + 1}</td>${cells}</tr>`;
+    })
+    .join('');
+  const generated = new Date().toLocaleString();
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>${htmlEscape(title)} — Observer Log</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; color: #11202e; margin: 28px; font-size: 12px; }
+  h1 { font-size: 19px; margin: 0 0 2px; }
+  .sub { color: #5a6b78; font-size: 11px; margin-bottom: 16px; }
+  table.meta { border-collapse: collapse; margin: 0 0 18px; }
+  table.meta th { text-align: left; color: #5a6b78; font-weight: 600; padding: 2px 16px 2px 0; vertical-align: top; white-space: nowrap; }
+  table.meta td { padding: 2px 0; }
+  table.log { border-collapse: collapse; width: 100%; }
+  table.log th, table.log td { border: 1px solid #cfd8df; padding: 4px 7px; text-align: left; vertical-align: top; }
+  table.log thead th { background: #eef3f6; font-weight: 700; position: sticky; top: 0; }
+  table.log td.rn { color: #8493a0; text-align: right; font-variant-numeric: tabular-nums; }
+  table.log tbody tr:nth-child(even) td { background: #f7fafb; }
+  .foot { margin-top: 14px; color: #8493a0; font-size: 10px; }
+  @media print {
+    body { margin: 0; }
+    table.log thead th { background: #eef3f6 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    table.log tbody tr:nth-child(even) td { background: #f7fafb !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  }
+</style>
+</head>
+<body>
+  <h1>${htmlEscape(title)}</h1>
+  <div class="sub">Observer Log · ${logRows.length} record${logRows.length === 1 ? '' : 's'} · generated ${htmlEscape(generated)}</div>
+  ${metaRows ? `<table class="meta"><tbody>${metaRows}</tbody></table>` : ''}
+  <table class="log">
+    <thead><tr><th>#</th>${headHtml}</tr></thead>
+    <tbody>${bodyHtml}</tbody>
+  </table>
+  <div class="foot">Print this page to PDF (Ctrl+P → “Save as PDF”) for a portable copy.</div>
+</body>
+</html>`;
+}
+
+/** Export the printable HTML report and save it via exportText. */
+async function exportLogReport() {
+  if (logRows.length === 0) return;
+  try {
+    const r = await api.exportText('observer-log-report.html', buildLogReportHtml());
+    if (r?.ok) setLogExportStatus('Exported report (HTML).');
+  } catch { /* ignore */ }
+}
+
+// ── Export toolbar ─────────────────────────────────────────────────────────────
+
+/** Build/refresh the export-bar buttons (Excel / CSV / LibreOffice / Report).
+ *  Buttons are disabled when there are no rows to export. */
+function renderLogExportBar() {
+  const host = $opt('obslogExportBar');
+  if (!host) return;
+  const disabled = logRows.length === 0;
+  // Build once; on re-render just toggle the disabled state.
+  if (!host.firstChild) {
+    const mk = (label: string, title: string, fn: () => void): HTMLButtonElement => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'btn sm';
+      b.textContent = label;
+      b.title = title;
+      b.addEventListener('click', fn);
+      return b;
+    };
+    host.appendChild(mk('Excel (.xlsx)', 'Export the log as a Microsoft Excel workbook', () => void exportLogXlsx()));
+    host.appendChild(mk('CSV', 'Export the log as a UTF-8 CSV file', () => void exportLogCsv()));
+    host.appendChild(mk('LibreOffice (.ods)', 'Export the log as an OpenDocument spreadsheet', () => void exportLogOds()));
+    host.appendChild(mk('Report', 'Export a printable HTML report (open it, then print to PDF)', () => void exportLogReport()));
+    (host as HTMLElement).style.display = 'inline-flex';
+    (host as HTMLElement).style.gap = '7px';
+  }
+  host.querySelectorAll('button').forEach((b) => { (b as HTMLButtonElement).disabled = disabled; });
+}
+
+// ── Wizard ───────────────────────────────────────────────────────────────────
+
+/** True once the log has been built (columns exist) — controls wizard vs grid. */
+function logConfigured(): boolean { return logColumns.length > 0; }
+
+/** Show the wizard (hide the grid) and (re)paint its dynamic bodies. */
+function openLogWizard() {
+  const wiz = $opt('obslogWizard'); const grid = $opt('obslogGrid');
+  if (wiz) wiz.style.display = '';
+  if (grid) grid.style.display = 'none';
+  // Prime the enabled-groups set on first open (or from persisted state).
+  if (!logEnabledGroups) logEnabledGroups = new Set(LOG_DEFAULT_GROUPS);
+  renderMetaForm();
+  renderGroupList();
+  renderCustomList();
+  syncSrcRadios();
+  syncRowRadios();
+  setText('ologWizStatus', '');
+}
+
+/** Wizard step 1 — project-header form, two-up grid of inputs. */
+function renderMetaForm() {
+  const host = $opt('ologMetaForm');
+  if (!host) return;
+  host.innerHTML = '';
+  for (const f of LOG_META_FIELDS) {
+    const wrap = document.createElement('div');
+    wrap.className = 'olog-field' + (f.wide ? ' wide' : '');
+    const lab = document.createElement('label');
+    lab.textContent = f.label;
+    const inp = document.createElement('input');
+    inp.type = 'text';
+    inp.value = logMeta[f.key] ?? '';
+    inp.addEventListener('input', () => { logMeta[f.key] = inp.value; });
+    wrap.appendChild(lab); wrap.appendChild(inp);
+    host.appendChild(wrap);
+  }
+}
+
+/** Wizard step 2 — one collapsible-ish block per default group with field checkboxes. */
+function renderGroupList() {
+  const host = $opt('ologGroupList');
+  if (!host) return;
+  host.innerHTML = '';
+  const enabled = logEnabledGroups ?? new Set(LOG_DEFAULT_GROUPS);
+  for (const g of LOG_SCHEMA) {
+    const block = document.createElement('div');
+    block.className = 'olog-group';
+    const head = document.createElement('div');
+    head.className = 'ogh';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = enabled.has(g.group);
+    cb.style.accentColor = 'var(--teal)';
+    cb.addEventListener('click', (e) => e.stopPropagation());
+    cb.addEventListener('change', () => {
+      if (cb.checked) enabled.add(g.group); else enabled.delete(g.group);
+      logEnabledGroups = enabled;
+    });
+    const title = document.createElement('span');
+    title.textContent = g.group;
+    const count = document.createElement('span');
+    count.className = 'ogcount';
+    const extra = g.group === 'Source' ? LOG_SRC_EXTRAS[logSrcType].length : 0;
+    count.textContent = `${g.fields.length + extra} cols`;
+    head.appendChild(cb); head.appendChild(title); head.appendChild(count);
+    head.addEventListener('click', () => { cb.checked = !cb.checked; cb.dispatchEvent(new Event('change')); });
+    block.appendChild(head);
+    // Field name preview (read-only — group toggle is the granularity).
+    const cols = document.createElement('div');
+    cols.className = 'olog-cols';
+    const fields = g.group === 'Source' ? [...g.fields, ...LOG_SRC_EXTRAS[logSrcType]] : g.fields;
+    for (const f of fields) {
+      const c = document.createElement('span');
+      c.className = 'olog-col';
+      c.textContent = f.label + (f.unit ? ` (${f.unit})` : '');
+      cols.appendChild(c);
+    }
+    block.appendChild(cols);
+    host.appendChild(block);
+  }
+}
+
+/** Wizard step 2 — render the user's custom-column chips. */
+function renderCustomList() {
+  const host = $opt('ologCustList');
+  if (!host) return;
+  host.innerHTML = '';
+  for (let i = 0; i < logCustomCols.length; i++) {
+    const c = logCustomCols[i];
+    const chip = document.createElement('span');
+    chip.className = 'olog-custom-chip';
+    const lbl = document.createElement('span');
+    lbl.textContent = c.label + (c.unit ? ` (${c.unit})` : '') + ` · ${c.type}`;
+    const x = document.createElement('button');
+    x.type = 'button';
+    x.textContent = '×';
+    x.title = 'Remove column';
+    x.addEventListener('click', () => { logCustomCols.splice(i, 1); renderCustomList(); });
+    chip.appendChild(lbl); chip.appendChild(x);
+    host.appendChild(chip);
+  }
+}
+
+/** Add a custom column from the step-2 inputs. */
+function addCustomColumn() {
+  const nameEl = $opt('ologCustName') as HTMLInputElement | null;
+  const typeEl = $opt('ologCustType') as HTMLSelectElement | null;
+  const unitEl = $opt('ologCustUnit') as HTMLInputElement | null;
+  const label = (nameEl?.value ?? '').trim();
+  if (!label) { setText('ologWizStatus', 'Enter a column name first.'); return; }
+  const type = (typeEl?.value ?? 'text') as LogColType;
+  const unit = (unitEl?.value ?? '').trim() || undefined;
+  // Derive a safe, unique key.
+  let base = 'custom_' + label.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  if (base === 'custom_') base = 'custom_col';
+  let key = base; let n = 2;
+  const used = new Set([...LOG_SCHEMA.flatMap((g) => g.fields.map((f) => f.key)), ...logCustomCols.map((c) => c.key)]);
+  while (used.has(key)) key = `${base}_${n++}`;
+  logCustomCols.push({ key, label, group: 'Custom', type, unit });
+  if (nameEl) nameEl.value = '';
+  if (unitEl) unitEl.value = '';
+  setText('ologWizStatus', '');
+  renderCustomList();
+}
+
+/** Reflect `logSrcType` onto the step-3 radio cards + group preview counts. */
+function syncSrcRadios() {
+  document.querySelectorAll<HTMLElement>('#ologSrcRadios .olog-radio').forEach((card) => {
+    const on = card.getAttribute('data-src') === logSrcType;
+    card.classList.toggle('sel', on);
+    const radio = card.querySelector('input') as HTMLInputElement | null;
+    if (radio) radio.checked = on;
+  });
+  renderGroupList(); // Source column count depends on the source type
+}
+
+/** Reflect the row-seed choice onto the step-4 radio cards + availability note. */
+function syncRowRadios() {
+  setText('ologSeedNote', logSeedNote());
+  const seedCard = document.querySelector<HTMLElement>('#ologRowRadios .olog-radio[data-rows="seed"]');
+  const seedRadio = seedCard?.querySelector('input') as HTMLInputElement | null;
+  const canSeed = logCanSeed();
+  if (seedRadio) seedRadio.disabled = !canSeed;
+  if (seedCard) seedCard.style.opacity = canSeed ? '1' : '.55';
+  // If seeding is unavailable, default the selection to "blank".
+  if (!canSeed) {
+    const blankRadio = document.querySelector<HTMLInputElement>('#ologRowRadios input[value="blank"]');
+    if (blankRadio) blankRadio.checked = true;
+  }
+  document.querySelectorAll<HTMLElement>('#ologRowRadios .olog-radio').forEach((card) => {
+    const radio = card.querySelector('input') as HTMLInputElement | null;
+    card.classList.toggle('sel', !!radio?.checked);
+  });
+}
+
+/** Commit the wizard: build columns, optionally seed rows, hide wizard, show grid. */
+async function buildLog() {
+  // At least one group or custom column must be selected.
+  logColumns = buildLogColumns();
+  if (logColumns.length === 0) { setText('ologWizStatus', 'Select at least one column group or add a custom column.'); return; }
+
+  const rowMode = (document.querySelector('#ologRowRadios input[name="ologRows"]:checked') as HTMLInputElement | null)?.value ?? 'blank';
+
+  // Reconcile existing rows to the new column set (keep known keys, add blanks).
+  if (logRows.length > 0) {
+    logRows = logRows.map((old) => {
+      const r = blankLogRow();
+      for (const c of logColumns) if (c.key in old) r[c.key] = old[c.key];
+      return r;
+    });
+  } else if (rowMode === 'seed' && logCanSeed()) {
+    setText('ologWizStatus', 'Seeding rows…');
+    const seeded = spsSummary ? await seedFromSps() : await seedFromTraces();
+    logRows = seeded.length ? seeded : [blankLogRow()];
+  } else {
+    logRows = [blankLogRow()];
+  }
+
+  saveLog();
+  renderLog();
+  updateHeaderClear();
+}
+
+// ── Grid ─────────────────────────────────────────────────────────────────────
+
+/** Top-level Observer Log renderer: wizard when unconfigured, grid otherwise. */
+function renderLog() {
+  const wiz = $opt('obslogWizard'); const grid = $opt('obslogGrid');
+  if (!logConfigured()) { openLogWizard(); return; }
+  if (wiz) wiz.style.display = 'none';
+  if (grid) grid.style.display = '';
+  renderLogMetaStrip();
+  renderLogGrid();
+  renderLogExportBar();
+  setText('ologGridLabel', `${logRows.length} record${logRows.length === 1 ? '' : 's'} · ${logColumns.length} columns`);
+}
+
+/** Compact project-header strip above the grid (only non-empty fields). */
+function renderLogMetaStrip() {
+  const host = $opt('ologMetaStrip');
+  if (!host) return;
+  host.innerHTML = '';
+  const parts = LOG_META_FIELDS.filter((f) => (logMeta[f.key] ?? '').trim() !== '');
+  if (parts.length === 0) { host.style.display = 'none'; return; }
+  host.style.display = '';
+  for (const f of parts) {
+    const span = document.createElement('span');
+    const b = document.createElement('b'); b.textContent = (logMeta[f.key] ?? '');
+    span.append(f.label + ': ', b);
+    host.appendChild(span);
+  }
+}
+
+/** Build the editable table: sticky header (with units) + a row per record. */
+function renderLogGrid() {
+  const thead = $opt('ologThead'); const tbody = $opt('ologTbody'); const empty = $opt('ologGridEmpty');
+  if (!thead || !tbody) return;
+
+  // Header
+  thead.innerHTML = '';
+  const htr = document.createElement('tr');
+  const rh = document.createElement('th'); rh.className = 'olog-rowhdr'; rh.textContent = '#';
+  htr.appendChild(rh);
+  for (const c of logColumns) {
+    const th = document.createElement('th');
+    th.title = `${c.group} · ${c.type}`;
+    th.textContent = c.label;
+    if (c.unit) { const u = document.createElement('span'); u.className = 'ogh-unit'; u.textContent = c.unit; th.appendChild(u); }
+    htr.appendChild(th);
+  }
+  const ah = document.createElement('th'); ah.textContent = ''; htr.appendChild(ah);
+  thead.appendChild(htr);
+
+  // Body
+  tbody.innerHTML = '';
+  if (logRows.length === 0) {
+    if (empty) empty.style.display = '';
+  } else {
+    if (empty) empty.style.display = 'none';
+    for (let i = 0; i < logRows.length; i++) tbody.appendChild(buildLogRowEl(i));
+  }
+}
+
+/** Build one <tr> for record index `i`, with editable cells + per-row actions. */
+function buildLogRowEl(i: number): HTMLTableRowElement {
+  const row = logRows[i];
+  const tr = document.createElement('tr');
+
+  const rh = document.createElement('td');
+  rh.className = 'olog-rowhdr';
+  rh.textContent = String(i + 1);
+  tr.appendChild(rh);
+
+  for (const c of logColumns) {
+    const td = document.createElement('td');
+    const raw = row[c.key];
+    const val = raw == null ? '' : String(raw);
+    if (c.type === 'select') {
+      const sel = document.createElement('select');
+      sel.className = 'olog-cell olog-status-cell';
+      for (const opt of (c.options ?? [])) {
+        const o = document.createElement('option'); o.value = opt; o.textContent = opt;
+        if (opt === val) o.selected = true;
+        sel.appendChild(o);
+      }
+      applyStatusClass(sel, val || (c.options?.[0] ?? ''));
+      sel.addEventListener('change', () => {
+        logRows[i][c.key] = sel.value;
+        applyStatusClass(sel, sel.value);
+        saveLog();
+      });
+      td.appendChild(sel);
+    } else {
+      const inp = document.createElement('input');
+      inp.className = 'olog-cell' + (c.type === 'number' ? ' num' : '');
+      inp.type = c.type === 'number' ? 'number' : c.type === 'date' ? 'date' : c.type === 'time' ? 'time' : 'text';
+      inp.value = val;
+      inp.addEventListener('change', () => {
+        const v = inp.value;
+        logRows[i][c.key] = c.type === 'number' && v.trim() !== '' && isFinite(Number(v)) ? Number(v) : v;
+        saveLog();
+      });
+      // Basic copy/paste support: Ctrl+C copies the cell, Ctrl+V pastes plain text.
+      inp.addEventListener('keydown', (e) => {
+        if ((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C') && inp.selectionStart === inp.selectionEnd) {
+          void navigator.clipboard?.writeText(inp.value).catch(() => { /* ignore */ });
+        }
+      });
+      td.appendChild(inp);
+    }
+    tr.appendChild(td);
+  }
+
+  // Per-row action buttons: insert-above, delete, move up, move down.
+  const act = document.createElement('td');
+  const wrap = document.createElement('div');
+  wrap.className = 'olog-actions';
+  wrap.appendChild(rowBtn('+', 'Insert row above', () => { logRows.splice(i, 0, blankLogRow()); saveLog(); renderLog(); }));
+  wrap.appendChild(rowBtn('↑', 'Move up', () => moveLogRow(i, -1)));
+  wrap.appendChild(rowBtn('↓', 'Move down', () => moveLogRow(i, 1)));
+  wrap.appendChild(rowBtn('✕', 'Delete row', () => { logRows.splice(i, 1); saveLog(); renderLog(); updateHeaderClear(); }));
+  act.appendChild(wrap);
+  tr.appendChild(act);
+  return tr;
+}
+
+function rowBtn(label: string, title: string, fn: () => void): HTMLButtonElement {
+  const b = document.createElement('button');
+  b.type = 'button'; b.textContent = label; b.title = title;
+  b.addEventListener('click', fn);
+  return b;
+}
+
+function moveLogRow(i: number, delta: number) {
+  const j = i + delta;
+  if (j < 0 || j >= logRows.length) return;
+  const [r] = logRows.splice(i, 1);
+  logRows.splice(j, 0, r);
+  saveLog();
+  renderLog();
+}
+
+/** Colour a Status <select> by its value (good/noisy/dead-family). */
+function applyStatusClass(el: HTMLElement, val: string) {
+  el.classList.remove('s-good', 's-noisy', 's-dead', 's-misfire', 's-reshoot');
+  const v = val.toLowerCase();
+  if (v === 'good') el.classList.add('s-good');
+  else if (v === 'noisy') el.classList.add('s-noisy');
+  else if (v === 'dead' || v === 'no-data' || v === 'dnp') el.classList.add('s-dead');
+  else if (v === 'misfire') el.classList.add('s-misfire');
+  else if (v === 're-shoot' || v === 'skip') el.classList.add('s-reshoot');
+}
+
+/** Append a fresh blank record + re-render. */
+function addLogRow() {
+  logRows.push(blankLogRow());
+  saveLog();
+  renderLog();
+  updateHeaderClear();
+}
+
+/** Wire the Observer Log controls (wizard + grid toolbar). Called once at init. */
+function initObsLog() {
+  loadLogState();
+  // Wizard: source-type radios
+  $opt('ologSrcRadios')?.addEventListener('change', (e) => {
+    const v = (e.target as HTMLInputElement).value;
+    if (v === 'explosive' || v === 'vibroseis' || v === 'nodal') { logSrcType = v; syncSrcRadios(); }
+  });
+  // Wizard: row-mode radios (just reflect selection)
+  $opt('ologRowRadios')?.addEventListener('change', syncRowRadios);
+  // Wizard: custom column add
+  $opt('ologCustAdd')?.addEventListener('click', addCustomColumn);
+  $opt('ologCustName')?.addEventListener('keydown', (e) => { if ((e as KeyboardEvent).key === 'Enter') { e.preventDefault(); addCustomColumn(); } });
+  // Wizard: build
+  $opt('ologBuildBtn')?.addEventListener('click', () => void buildLog());
+  // Grid toolbar
+  $opt('ologAddRowBtn')?.addEventListener('click', addLogRow);
+  $opt('ologReconfigBtn')?.addEventListener('click', () => { openLogWizard(); });
+  $opt('ologSaveBtn')?.addEventListener('click', () => void saveLogJson());
+  $opt('ologReloadBtn')?.addEventListener('click', () => void reloadLogJson());
+}
+
 // Wire the custom window-control buttons (frameless window) to the main process
 // and keep the maximize/restore icon in sync with the real window state.
 function initWindowControls() {
@@ -3499,6 +4373,7 @@ function init() {
   $('velExportBtn').addEventListener('click', () => void exportPicks());
   ($('velCanvas') as HTMLCanvasElement).addEventListener('click', onVelClick);
   workbenchInteractions(); // Trace Workbench: add/remove/clear + shared zoom/pan
+  initObsLog();             // Observer Log: wizard + editable grid wiring
   // OS-aware key hints (replaces the hard-coded ⌘ glyphs everywhere).
   applyKeyHints();
 

@@ -399,6 +399,100 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
 .wiz-body .wval{font-family:var(--mono);color:var(--teal-deep);font-weight:600;}
 .wiz-actions{margin-top:14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
 
+/* ---- Observer Log: wizard form + custom-column list ---- */
+.olog-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 16px;margin-top:12px;}
+.olog-field{display:flex;flex-direction:column;gap:4px;min-width:0;}
+.olog-field label{font-size:11px;font-weight:600;color:var(--ink-3);letter-spacing:.2px;}
+.olog-field input,.olog-field select{
+  background:var(--input-bg);color:var(--ink);border:1px solid var(--hair);border-radius:8px;
+  padding:6px 9px;font-size:12.5px;font-family:inherit;min-width:0;
+}
+.olog-field input:focus,.olog-field select:focus{outline:none;border-color:var(--teal);box-shadow:0 0 0 3px rgba(15,179,171,.16);}
+.olog-field.wide{grid-column:1 / -1;}
+
+/* column-group checkbox blocks */
+.olog-groups{display:flex;flex-direction:column;gap:14px;margin-top:12px;}
+.olog-group{border:1px solid var(--hair);border-radius:11px;overflow:hidden;}
+.olog-group .ogh{
+  display:flex;align-items:center;gap:9px;padding:9px 13px;background:var(--surface);
+  border-bottom:1px solid var(--hair-soft);font-size:12px;font-weight:700;color:var(--ink);cursor:pointer;
+}
+.olog-group .ogh .ogcount{margin-left:auto;font-size:10.5px;color:var(--ink-3);font-family:var(--mono);font-weight:500;}
+.olog-cols{display:flex;flex-wrap:wrap;gap:7px 16px;padding:11px 14px;}
+.olog-col{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--ink-2);cursor:pointer;user-select:none;}
+.olog-col input{accent-color:var(--teal);width:14px;height:14px;cursor:pointer;}
+.olog-custom{margin-top:12px;border:1px dashed var(--hair);border-radius:11px;padding:12px 14px;}
+.olog-custom .och{font-size:12px;font-weight:700;color:var(--ink);margin-bottom:9px;}
+.olog-custom-row{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;}
+.olog-custom-row .olog-field{flex:1;min-width:120px;}
+.olog-custom-list{display:flex;flex-wrap:wrap;gap:7px;margin-top:11px;}
+.olog-custom-chip{
+  display:inline-flex;align-items:center;gap:7px;padding:4px 6px 4px 11px;border-radius:999px;
+  background:var(--teal-tint);color:var(--teal-deep);font-size:11.5px;font-weight:600;
+}
+.olog-custom-chip button{
+  border:none;background:transparent;color:var(--teal-deep);cursor:pointer;font-size:14px;line-height:1;
+  padding:0 2px;border-radius:50%;
+}
+.olog-custom-chip button:hover{background:rgba(0,0,0,.08);}
+
+/* source-type + seed radio cards */
+.olog-radios{display:flex;flex-wrap:wrap;gap:11px;margin-top:12px;}
+.olog-radio{
+  display:flex;flex-direction:column;gap:3px;flex:1;min-width:150px;border:1px solid var(--hair);border-radius:11px;
+  padding:11px 14px;cursor:pointer;background:var(--card);transition:border-color .12s ease,background .12s ease;
+}
+.olog-radio:hover{border-color:var(--cyan);}
+.olog-radio.sel{border-color:var(--teal);background:var(--teal-tint);box-shadow:0 0 0 3px rgba(15,179,171,.14);}
+.olog-radio .ort{font-size:12.5px;font-weight:700;color:var(--ink);display:flex;align-items:center;gap:7px;}
+.olog-radio .ors{font-size:11px;color:var(--ink-3);}
+.olog-radio.sel .ort{color:var(--teal-deep);}
+.olog-radio input{accent-color:var(--teal);}
+
+/* ---- Observer Log: editable grid ---- */
+.olog-toolbar{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:10px;}
+.olog-meta-strip{
+  display:flex;flex-wrap:wrap;gap:6px 18px;padding:9px 14px;margin-bottom:10px;border:1px solid var(--hair);
+  border-radius:11px;background:var(--surface);font-size:11.5px;color:var(--ink-2);
+}
+.olog-meta-strip b{color:var(--ink);font-weight:600;}
+.olog-grid-wrap{border:1px solid var(--hair);border-radius:12px;overflow:auto;max-height:62vh;background:var(--card);}
+table.olog-grid{border-collapse:separate;border-spacing:0;width:max-content;min-width:100%;font-size:12px;}
+table.olog-grid th,table.olog-grid td{
+  border-right:1px solid var(--hair-soft);border-bottom:1px solid var(--hair-soft);
+  padding:0;white-space:nowrap;
+}
+table.olog-grid thead th{
+  position:sticky;top:0;z-index:3;background:var(--surface);color:var(--ink);font-weight:700;
+  text-align:left;padding:8px 10px;font-size:11px;letter-spacing:.2px;border-bottom:1px solid var(--hair);
+}
+table.olog-grid thead th .ogh-unit{color:var(--ink-3);font-weight:500;font-family:var(--mono);margin-left:4px;}
+table.olog-grid th.olog-rowhdr,table.olog-grid td.olog-rowhdr{
+  position:sticky;left:0;z-index:2;background:var(--surface);text-align:center;
+  color:var(--ink-3);font-family:var(--mono);font-weight:600;padding:0 8px;min-width:40px;
+}
+table.olog-grid thead th.olog-rowhdr{z-index:4;}
+table.olog-grid td .olog-cell{
+  width:100%;min-width:84px;border:none;background:transparent;color:var(--ink);font-family:inherit;font-size:12px;
+  padding:6px 9px;box-sizing:border-box;
+}
+table.olog-grid td .olog-cell.num{font-family:var(--mono);text-align:right;}
+table.olog-grid td .olog-cell:focus{outline:2px solid var(--teal);outline-offset:-2px;background:var(--teal-tint);}
+table.olog-grid td.sel{background:var(--teal-tint);}
+table.olog-grid select.olog-cell{cursor:pointer;-webkit-appearance:none;appearance:none;}
+table.olog-grid tr:hover td:not(.olog-rowhdr){background:var(--surface);}
+table.olog-grid tr.olog-rowsel td{background:var(--teal-tint-2);}
+.olog-status-cell{font-weight:700;}
+.olog-status-cell.s-good{color:var(--green);} .olog-status-cell.s-noisy{color:var(--amber);}
+.olog-status-cell.s-dead,.olog-status-cell.s-misfire,.olog-status-cell.s-reshoot{color:var(--red);}
+.olog-actions{display:flex;gap:3px;padding:0 6px;}
+.olog-actions button{
+  border:1px solid var(--hair);background:var(--card);color:var(--ink-3);border-radius:7px;cursor:pointer;
+  width:24px;height:24px;display:grid;place-items:center;font-size:12px;line-height:1;
+}
+.olog-actions button:hover{border-color:var(--teal);color:var(--teal-deep);}
+.olog-empty{padding:26px 14px;text-align:center;color:var(--ink-3);font-size:12.5px;}
+
 /* ---- Found-files banner ---- */
 .found{
   margin-bottom:14px;padding:11px 15px;border:1px solid var(--hair);border-radius:12px;
@@ -707,6 +801,11 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
         <path d="M3 12h2l2-5 3 10 2.5-7 1.8 4H17"/><path d="M19 6v12M22 6v12" opacity=".5"/></svg>
       <span class="lbl">Trace Workbench</span>
+    </button>
+    <button class="nav-item" id="tab-obslog" title="Observer Log">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M5 3h11l3 3v15a0 0 0 0 1 0 0H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z"/><path d="M8 8h7M8 12h7M8 16h4"/></svg>
+      <span class="lbl">Observer Log</span>
     </button>
 
     <div class="spacer"></div>
@@ -1256,6 +1355,131 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
         </div>
       </section>
 
+      <!-- ============================ OBSERVER LOG ============================ -->
+      <section id="panel-obslog" style="display:none;">
+
+        <!-- ── SETUP WIZARD ── (shown until the log is configured) -->
+        <div class="card" id="obslogWizard">
+          <div class="ch">
+            <h2>Set up the observer log</h2>
+            <span class="hint">Configure the project header, columns and rows, then edit the grid</span>
+            <div class="right"><span class="pill teal">wizard</span></div>
+          </div>
+          <div class="cb">
+
+            <!-- step 1: project header -->
+            <div class="wiz-step active" id="ologWizStepHeader">
+              <span class="wiz-num">1</span>
+              <div class="wiz-body">
+                <div class="wt">Project header</div>
+                <div class="ws">Survey metadata recorded on every page of the log.</div>
+                <div class="olog-form" id="ologMetaForm"></div>
+              </div>
+            </div>
+
+            <!-- step 2: columns -->
+            <div class="wiz-step" id="ologWizStepCols">
+              <span class="wiz-num">2</span>
+              <div class="wiz-body">
+                <div class="wt">Columns</div>
+                <div class="ws">Toggle the field groups you need, then add any custom columns.</div>
+                <div class="olog-groups" id="ologGroupList"></div>
+                <div class="olog-custom">
+                  <div class="och">Add a custom column</div>
+                  <div class="olog-custom-row">
+                    <div class="olog-field"><label>Name</label><input type="text" id="ologCustName" placeholder="e.g. Tide height"></div>
+                    <div class="olog-field" style="flex:none;width:130px;"><label>Type</label>
+                      <select id="ologCustType">
+                        <option value="text">Text</option>
+                        <option value="number">Number</option>
+                        <option value="date">Date</option>
+                        <option value="time">Time</option>
+                      </select>
+                    </div>
+                    <div class="olog-field" style="flex:none;width:100px;"><label>Unit</label><input type="text" id="ologCustUnit" placeholder="opt."></div>
+                    <button class="btn sm" id="ologCustAdd" type="button">Add column</button>
+                  </div>
+                  <div class="olog-custom-list" id="ologCustList"></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- step 3: source type -->
+            <div class="wiz-step" id="ologWizStepSrc">
+              <span class="wiz-num">3</span>
+              <div class="wiz-body">
+                <div class="wt">Source type</div>
+                <div class="ws">Swaps the source sub-columns to match the acquisition method.</div>
+                <div class="olog-radios" id="ologSrcRadios">
+                  <label class="olog-radio sel" data-src="explosive">
+                    <span class="ort"><input type="radio" name="ologSrc" value="explosive" checked>Explosive</span>
+                    <span class="ors">Dynamite / shot holes — hole depth, charge, uphole, detonator.</span>
+                  </label>
+                  <label class="olog-radio" data-src="vibroseis">
+                    <span class="ort"><input type="radio" name="ologSrc" value="vibroseis">Vibroseis</span>
+                    <span class="ors">Vibrators — sweeps, sweep length, frequency band, drive level.</span>
+                  </label>
+                  <label class="olog-radio" data-src="nodal">
+                    <span class="ort"><input type="radio" name="ologSrc" value="nodal">Nodal / other</span>
+                    <span class="ors">Base source columns only.</span>
+                  </label>
+                </div>
+              </div>
+            </div>
+
+            <!-- step 4: rows -->
+            <div class="wiz-step" id="ologWizStepRows">
+              <span class="wiz-num">4</span>
+              <div class="wiz-body">
+                <div class="wt">Rows</div>
+                <div class="ws">Seed one row per shot from loaded data, or start with an empty grid.</div>
+                <div class="olog-radios" id="ologRowRadios">
+                  <label class="olog-radio sel" data-rows="seed">
+                    <span class="ort"><input type="radio" name="ologRows" value="seed" checked>Seed from data</span>
+                    <span class="ors" id="ologSeedNote">No SPS survey or seismic file loaded yet.</span>
+                  </label>
+                  <label class="olog-radio" data-rows="blank">
+                    <span class="ort"><input type="radio" name="ologRows" value="blank">Start blank</span>
+                    <span class="ors">Begin with one empty row and add as you go.</span>
+                  </label>
+                </div>
+              </div>
+            </div>
+
+            <div class="wiz-actions">
+              <button class="btn btn-primary lg" id="ologBuildBtn" type="button">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+                Build log
+              </button>
+              <span class="trace-label" id="ologWizStatus"></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── GRID ── (shown once the log is built) -->
+        <div id="obslogGrid" style="display:none;">
+          <div class="olog-toolbar">
+            <button class="btn btn-primary sm" id="ologAddRowBtn" type="button">+ Add row</button>
+            <button class="btn sm" id="ologReconfigBtn" type="button">Reconfigure…</button>
+            <button class="btn sm" id="ologSaveBtn" type="button" title="Save the log (header + columns + rows) to a JSON file">Save log</button>
+            <button class="btn sm" id="ologReloadBtn" type="button" title="Reload a previously saved log JSON file">Reload…</button>
+            <span style="flex:1"></span>
+            <!-- export buttons (Excel / CSV / LibreOffice / Report) are built here by the renderer -->
+            <span id="obslogExportBar"></span>
+            <span class="trace-label" id="ologGridLabel"></span>
+          </div>
+          <div class="olog-meta-strip" id="ologMetaStrip"></div>
+          <div class="olog-grid-wrap">
+            <table class="olog-grid" id="ologTable">
+              <thead id="ologThead"></thead>
+              <tbody id="ologTbody"></tbody>
+            </table>
+          </div>
+          <div class="olog-empty" id="ologGridEmpty" style="display:none;">No records yet — use “+ Add row”.</div>
+        </div>
+
+      </section>
+
     </div>
 
     <!-- ============================ STATUS STRIP ============================ -->
@@ -1290,7 +1514,7 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
     </div>
     <div class="mbody">
       <h3>What SeisConv does</h3>
-      <p>SeisConv reads common seismic exchange formats off the UI thread and converts them between formats, with built-in QC and quick visual checks. Use the icon rail on the left to move between tabs; press <span class="kbd" data-key="tabs">1–5</span> to jump directly to a tab.</p>
+      <p>SeisConv reads common seismic exchange formats off the UI thread and converts them between formats, with built-in QC and quick visual checks. Use the icon rail on the left to move between tabs; press <span class="kbd" data-key="tabs">1–7</span> to jump directly to a tab.</p>
 
       <h3>Converter tab</h3>
       <p>Two modes, chosen from the cards at the top:</p>
@@ -1312,6 +1536,9 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
       <h3>Velocity</h3>
       <p>Compute an <b>NMO semblance</b> panel over a velocity range, then click the panel to pick a stacking-velocity function and export the picks as CSV.</p>
 
+      <h3>Observer Log</h3>
+      <p>A per-shot field log. A short <b>wizard</b> sets up the <b>project header</b>, the <b>columns</b> (toggle field groups or add custom columns), the <b>source type</b> (explosive / vibroseis / nodal), and the <b>rows</b> (seed one row per shot from a loaded SPS survey or seismic file, or start blank). Edit cells directly in the grid; add, insert, delete or reorder rows. <b>Reconfigure</b> reopens the wizard. <b>Clear</b> empties the log records.</p>
+
       <h3>The 9 output formats</h3>
       <table class="fmt-tbl">
         <thead><tr><th>Format</th><th>Ext</th><th>Notes</th></tr></thead>
@@ -1332,7 +1559,7 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
       <ul>
         <li><span class="kbd" data-key="open">Open</span> — open a single file</li>
         <li><span class="kbd" data-key="batch">Batch</span> — jump to folder (batch) mode</li>
-        <li><span class="kbd" data-key="tabs">1–5</span> — switch tabs</li>
+        <li><span class="kbd" data-key="tabs">1–7</span> — switch tabs</li>
         <li><span class="kbd" data-key="help">?</span> — this manual · <span class="kbd">Esc</span> closes it</li>
       </ul>
     </div>

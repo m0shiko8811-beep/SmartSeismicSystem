@@ -224,6 +224,15 @@ export interface SemblanceData {
   offNote: string;
 }
 
+/** Observer Log payload restored from a saved .json (shape matches what the
+ *  renderer writes via exportText). Fields are loosely typed — the renderer
+ *  reconciles them against its own LogColumn / LogRow types on load. */
+export interface LogJson {
+  meta: Record<string, string>;
+  columns: { key: string; label: string; group: string; type: string; unit?: string; options?: string[] }[];
+  rows: Record<string, string | number>[];
+}
+
 const api = {
   /** Host OS, for OS-aware key hints (set to process.platform at preload load). */
   platform: process.platform as string,
@@ -293,6 +302,10 @@ const api = {
   semblance: (opts: { velMin: number; velMax: number; velStep: number }): Promise<SemblanceData> => ipcRenderer.invoke('seisconv:semblance', opts),
   /** Save arbitrary text (e.g. velocity picks CSV) via a native dialog. */
   exportText: (name: string, text: string): Promise<ConvertResult> => ipcRenderer.invoke('seisconv:exportText', { name, text }),
+  /** Save arbitrary binary bytes (e.g. a renderer-built .xlsx / .ods) via a native dialog. */
+  exportBinary: (name: string, bytes: Uint8Array): Promise<ConvertResult> => ipcRenderer.invoke('seisconv:exportBinary', { name, bytes }),
+  /** Observer Log RELOAD: open a .json picker, parse it, return {meta,columns,rows} (or null). */
+  openLogJson: (): Promise<LogJson | null> => ipcRenderer.invoke('seisconv:openLogJson'),
   /** Current application-wide UI zoom factor (1 = 100 %); reads webFrame state. */
   getZoom: (): number => webFrame.getZoomFactor(),
   /** Set the application-wide UI zoom factor (clamped to 0.5–2.5) via webFrame. */

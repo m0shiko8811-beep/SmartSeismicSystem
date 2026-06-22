@@ -6,7 +6,7 @@
 // only through the typed `seisconvAPI` in preload.
 
 import { app, BrowserWindow, dialog, ipcMain, Menu } from 'electron';
-import { writeFile, readdir } from 'node:fs/promises';
+import { writeFile, readFile, readdir } from 'node:fs/promises';
 import { Worker } from 'node:worker_threads';
 import * as path from 'node:path';
 import JSZip from 'jszip';
@@ -521,6 +521,39 @@ ipcMain.handle('seisconv:exportText', async (_e, args: { name: string; text: str
   if (save.canceled || !save.filePath) return { ok: false, canceled: true };
   await writeFile(save.filePath, args.text, 'utf8');
   return { ok: true, path: save.filePath };
+});
+
+// Save arbitrary BINARY bytes (e.g. an .xlsx / .ods the renderer built in-core)
+// via a native dialog. Mirrors exportText but writes a Buffer instead of a UTF-8
+// string. `bytes` arrives as a Uint8Array over IPC (structured-clone safe).
+ipcMain.handle('seisconv:exportBinary', async (_e, args: { name: string; bytes: Uint8Array }) => {
+  if (!win) return { ok: false };
+  const save = await dialog.showSaveDialog(win, { defaultPath: args.name });
+  if (save.canceled || !save.filePath) return { ok: false, canceled: true };
+  await writeFile(save.filePath, Buffer.from(args.bytes));
+  return { ok: true, path: save.filePath };
+});
+
+// Observer Log RELOAD: open a .json picker, read + parse it, and return the
+// {meta, columns, rows} payload (or null if cancelled / unreadable). The shape
+// matches what the renderer saves via exportText('observer-log.json', …).
+ipcMain.handle('seisconv:openLogJson', async () => {
+  if (!win) return null;
+  const res = await dialog.showOpenDialog(win, {
+    properties: ['openFile'],
+    filters: [
+      { name: 'Observer Log (JSON)', extensions: ['json'] },
+      { name: 'All files', extensions: ['*'] },
+    ],
+  });
+  if (res.canceled || !res.filePaths.length) return null;
+  const text = await readFile(res.filePaths[0], 'utf8');
+  const o = JSON.parse(text) as { meta?: unknown; columns?: unknown; rows?: unknown };
+  return {
+    meta: o && typeof o.meta === 'object' && o.meta ? o.meta : {},
+    columns: Array.isArray(o?.columns) ? o.columns : [],
+    rows: Array.isArray(o?.rows) ? o.rows : [],
+  };
 });
 
 app.whenReady().then(() => {
