@@ -191,14 +191,25 @@ export function parseSEG2(b: Bytes): ParsedFile {
       sampleByteBudget -= nSamples * bps;
       const bpsInt = trDataFmt === 1 ? 2 : trDataFmt === 2 ? 4 : trDataFmt === 5 ? 8 : 4;
       if (trDataFmt === 3) {
-        // 20-bit packed (2 samples per 5 bytes)
-        for (let i = 0; i < Math.floor(nSamples / 2); i++) {
+        // 20-bit packed (2 samples per 5 bytes). Decode full PAIRS, then the
+        // trailing single sample when nSamples is odd (it sits in the low 20 bits
+        // of the final 5-byte group). Without the odd-tail decode the last sample
+        // of every odd-length trace stays 0 although nSamples counts it.
+        const pairs = Math.floor(nSamples / 2);
+        for (let i = 0; i < pairs; i++) {
           const p = dataStart + i * 5;
           if (p + 5 > b.length) break;
           let s1 = b[p] | (b[p + 1] << 8) | ((b[p + 2] & 0xf) << 16);
           let s2 = (b[p + 2] >> 4) | (b[p + 3] << 4) | (b[p + 4] << 12);
           samples[i * 2] = s1 & 0x80000 ? s1 - 0x100000 : s1;
           samples[i * 2 + 1] = s2 & 0x80000 ? s2 - 0x100000 : s2;
+        }
+        if (nSamples % 2 === 1) {
+          const p = dataStart + pairs * 5;
+          if (p + 3 <= b.length) {
+            let s1 = b[p] | (b[p + 1] << 8) | ((b[p + 2] & 0xf) << 16);
+            samples[nSamples - 1] = s1 & 0x80000 ? s1 - 0x100000 : s1;
+          }
         }
       } else {
         for (let i = 0; i < nSamples; i++) {

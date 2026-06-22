@@ -22,6 +22,13 @@ export function parseTpimage(b: Bytes): TPFile[] {
   const files: TPFile[] = [];
   let pos = 0;
   let pendingName: string | null = null;
+  // Bound the fan-out: a crafted tape image with thousands of tiny data blocks
+  // would otherwise materialize an unbounded array of copied buffers (and run
+  // detect() per block) before any result is shown. Cap both the embedded-file
+  // count and the cumulative extracted bytes; stop extracting once either is hit.
+  const MAX_FILES = 4096;
+  const MAX_TOTAL_BYTES = 1024 * 1024 * 1024; // 1 GB of extracted data blocks
+  let totalBytes = 0;
 
   while (pos + 4 <= b.length) {
     const blen = r32be(pos);
@@ -59,6 +66,10 @@ export function parseTpimage(b: Bytes): TPFile[] {
     pendingName = null;
     const ext = fmt === 'SEG-2' ? '.dat' : fmt === 'SEG-D' ? '.segd' : fmt === 'SU' ? '.su' : '.segy';
     files.push({ bytes: blockData, name: dname + ext, fmt });
+    totalBytes += blockData.length;
+    // Stop once we've extracted enough files / bytes — a representative set is
+    // still returned; the rest of a pathological image is ignored, not slurped.
+    if (files.length >= MAX_FILES || totalBytes >= MAX_TOTAL_BYTES) break;
   }
   return files;
 }

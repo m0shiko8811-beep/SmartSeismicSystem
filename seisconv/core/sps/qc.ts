@@ -87,15 +87,24 @@ export function runSPSQC(data: SPSData, params: QCParams = {}): QCResult[] {
     for (const x of data.xrefs) {
       if (!srcMap.has(`${x.srcLine}|${num(x.srcPt)}`))
         res.push({ sev: 'error', cat: 'X-Ref', msg: `Missing source in X-file: Line ${x.srcLine} SP ${x.srcPt} (FFID ${x.ffid})` });
-      const rcvLine = rcvByLine[String(x.rcvLineFrom).trim()] || [];
-      const pts = rcvLine.map((r) => r.point);
-      let ptMin = Infinity, ptMax = -Infinity;
-      for (const v of pts) {
-        if (v < ptMin) ptMin = v;
-        if (v > ptMax) ptMax = v;
-      }
-      if (pts.length && (num(x.rcvPtFrom) < ptMin || num(x.rcvPtTo) > ptMax))
-        res.push({ sev: 'warn', cat: 'X-Ref', msg: `X-file receiver range may exceed station list: Line ${x.rcvLineFrom} ST ${x.rcvPtFrom}–${x.rcvPtTo}` });
+      // A relation can span rcvLineFrom..rcvLineTo: rcvPtFrom lives on rcvLineFrom
+      // and rcvPtTo on rcvLineTo. Resolve each endpoint against ITS OWN line so a
+      // cross-line relation isn't range-checked against the wrong station list
+      // (which would yield spurious or missed warnings). When they're the same
+      // line this reduces to the original single-line check.
+      const fromLine = String(x.rcvLineFrom).trim();
+      const toLine = String(x.rcvLineTo ?? x.rcvLineFrom).trim();
+      const rangeOf = (pts: number[]) => {
+        let lo = Infinity, hi = -Infinity;
+        for (const v of pts) { if (v < lo) lo = v; if (v > hi) hi = v; }
+        return { lo, hi, n: pts.length };
+      };
+      const fromR = rangeOf((rcvByLine[fromLine] || []).map((r) => r.point));
+      const toR = toLine === fromLine ? fromR : rangeOf((rcvByLine[toLine] || []).map((r) => r.point));
+      const fromBad = fromR.n > 0 && num(x.rcvPtFrom) < fromR.lo;
+      const toBad = toR.n > 0 && num(x.rcvPtTo) > toR.hi;
+      if (fromBad || toBad)
+        res.push({ sev: 'warn', cat: 'X-Ref', msg: `X-file receiver range may exceed station list: Line ${x.rcvLineFrom}${toLine !== fromLine ? `–${x.rcvLineTo}` : ''} ST ${x.rcvPtFrom}–${x.rcvPtTo}` });
     }
   }
 

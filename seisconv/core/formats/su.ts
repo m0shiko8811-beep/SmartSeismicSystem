@@ -12,7 +12,7 @@
 
 import { dv, getF32, r16u, r32s, w16, w32 } from '../binary';
 import type { Bytes, ParsedFile, Trace, TraceHeader } from '../types';
-import { MAX_SAMPLE_TRACES } from '../types';
+import { MAX_SAMPLE_TRACES, MAX_SAMPLES_PER_TRACE, MAX_TRACES } from '../types';
 
 /**
  * Detect SU byte order. SU is headerless and carries no magic, so we combine
@@ -89,7 +89,14 @@ export function parseSU(b: Bytes): ParsedFile {
   }
   // Surface the detected order for the worker summary / tests (mirrors segy.ts).
   r.bh = { sampleInt: si, samplesTrace: nSamp, dataFmt: fmt, littleEndian: le ? 1 : 0 };
-  const nTraces = Math.floor(b.length / tSize);
+  // Cap the trace COUNT at MAX_TRACES like segy/segd: nTraces is derived from the
+  // file size and a tiny per-trace stride (e.g. nSamp=1 → 244 bytes), so a 500 MB
+  // file would otherwise materialize ~2M TraceHeader objects and exhaust memory.
+  const nTraces = Math.min(Math.floor(b.length / tSize), MAX_TRACES);
+  // Bound the per-trace sample read by MAX_SAMPLES_PER_TRACE (defense-in-depth,
+  // matching segy/seg2/segd) — nSamp is a 16-bit field so already ≤ 65535, but
+  // keeping the shared cap here means no decode path is the lone unbounded one.
+  const nSampClamped = Math.min(nSamp, MAX_SAMPLES_PER_TRACE);
   for (let i = 0; i < nTraces; i++) {
     const off = i * tSize;
     const hdr: TraceHeader = {
@@ -100,10 +107,10 @@ export function parseSU(b: Bytes): ParsedFile {
     };
     let samples: Float32Array | null = null;
     if (i < MAX_SAMPLE_TRACES) {
-      samples = new Float32Array(nSamp);
-      for (let j = 0; j < nSamp; j++) samples[j] = getF32(b, off + 240 + j * 4, le);
+      samples = new Float32Array(nSampClamped);
+      for (let j = 0; j < nSampClamped; j++) samples[j] = getF32(b, off + 240 + j * 4, le);
     }
-    const trace: Trace = { hdr, samples, nSamples: nSamp };
+    const trace: Trace = { hdr, samples, nSamples: nSampClamped };
     r.traces.push(trace);
   }
   r.traceCount = nTraces;

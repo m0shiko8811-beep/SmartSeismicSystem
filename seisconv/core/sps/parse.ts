@@ -146,8 +146,37 @@ function sstr(s: string, a: number, b: number): string {
   return (s || '').substring(a, Math.min(b, (s || '').length)).trim();
 }
 
+/**
+ * The 4-char H-record code of a raw SPS line (cols 1-4, trimmed), matching how
+ * {@link parseSPSText} reads it: pad the line to ≥4 chars, take cols 0-4, trim.
+ * Returns '' when the line is not an H-record. Single source of truth so the
+ * parser, the reprojector and the Header Editor agree on what code a line is —
+ * the old reproject `substring(0,3)+digit-check` produced a different code for a
+ * non-digit 4th char and could miss the record the parser saw.
+ */
+export function hRecCode(raw: string): string {
+  const ln = (raw || '').padEnd(4, ' ');
+  if (ln[0]?.toUpperCase() !== 'H') return '';
+  return ln.substring(0, 4).trim();
+}
+
+/**
+ * Fixed E/N column spans for each detected S/R layout (end-exclusive, 0-based),
+ * the single source of truth shared by {@link spsParseCoords} (read) and the
+ * reprojector (write-back). `tail` is the first column AFTER the coordinate block
+ * (elevation/flags), so a rewriter can splice `prefix + E + N + line.slice(tail)`.
+ * Layout 'D' (whitespace-delimited) has no fixed columns → no entry → callers
+ * fall back to leaving the line unchanged rather than mis-columning it.
+ */
+export const SPS_COORD_SPANS: Record<string, { eStart: number; eEnd: number; nStart: number; nEnd: number; tail: number }> = {
+  'SPS2.1': { eStart: 46, eEnd: 55, nStart: 55, nEnd: 65, tail: 65 },
+  A: { eStart: 14, eEnd: 24, nStart: 24, nEnd: 34, tail: 34 },
+  B: { eStart: 14, eEnd: 26, nStart: 26, nEnd: 38, tail: 38 },
+  C: { eStart: 13, eEnd: 23, nStart: 23, nEnd: 33, tail: 33 },
+};
+
 /** Try multiple SPS column layouts — real files vary considerably. */
-function spsParseCoords(ln: string): { e: number; n: number; z?: number; layout: string } | null {
+export function spsParseCoords(ln: string): { e: number; n: number; z?: number; layout: string } | null {
   // SPS 2.1 SPEC — X cols 47-55, Y 56-65, Z 66-71
   let e = sfloat(ln, 46, 55), n = sfloat(ln, 55, 65);
   const z = sfloat(ln, 65, 71);
@@ -287,8 +316,14 @@ export function parseSPSText(text: string): SPSData {
 
     if (t === 'H') {
       const code = ln.substring(0, 4).trim();
-      const val = ln.substring(32).replace(/;.*$/, '').trim();
-      out.headers.push({ code, val, raw });
+      // Cap the stored value AND raw line length. A conformant H-record is 80
+      // cols; a hostile multi-MB H line would otherwise be carried verbatim into
+      // the headerList IPC payload and saved ZIP rewrites (the EDIT path already
+      // clamps, but pass-through records did not). 4096 is far beyond any real
+      // record yet bounds the worst case.
+      const MAX_H_LEN = 4096;
+      const val = ln.substring(32).replace(/;.*$/, '').trim().slice(0, MAX_H_LEN);
+      out.headers.push({ code, val, raw: raw.length > MAX_H_LEN ? raw.slice(0, MAX_H_LEN) : raw });
       continue;
     }
     if (t === 'P' || t === '!' || t === ' ') continue;

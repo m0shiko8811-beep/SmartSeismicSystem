@@ -639,6 +639,12 @@ function applyOpenedFile(s: Summary) {
   // summary.name with the OLD samples (a silent label/data desync). When the
   // trace panel is visible, refreshTrace() below repopulates it for the new file.
   lastTrace = null;
+  // Also drop the section cache + data-zoom window (symmetric with clearConverter):
+  // without this, stepping files with ]/[ from a non-section tab leaves lastSection
+  // holding the OLD file's matrix and secView pinned to the OLD file's zoom window,
+  // so the next section redraw could paint stale data before refreshSection re-fits.
+  lastSection = null;
+  secView.init = false;
   // Invalidate the Spectrum + Velocity caches: they're module-level and keyed to
   // the previously-open file, so stepping files with ]/[ on those tabs would keep
   // showing the OLD file's spectra/semblance. Drop the payloads, reset the
@@ -1723,6 +1729,10 @@ function drawSection(cv: HTMLCanvasElement, sec: SectionData) {
   if (mode === 'wiggle' || mode === 'va' || mode === 'vdwig') {
     const tw = pw / numTraces;
     const wsc = Math.max(tw * 0.48, 1);
+    // Guard the vertical scale denominator: with colLen === 1 (a genuine 1-sample
+    // record or a fully-decimated trace) s/(colLen-1) would be 0/0 = NaN → lineTo
+    // (x, NaN) and the wiggle/VA overlay silently fails to draw.
+    const sDen = Math.max(1, colLen - 1);
     for (let t = 0; t < numTraces; t++) {
       const base = t * colLen;
       const x0 = ML + (t + 0.5) * tw;
@@ -1731,7 +1741,7 @@ function drawSection(cv: HTMLCanvasElement, sec: SectionData) {
         ctx.moveTo(x0, MT);
         for (let s = 0; s < colLen; s++) {
           const v = Math.max(0, Math.min(1, data[base + s] * g));
-          ctx.lineTo(x0 + v * wsc, MT + (s / (colLen - 1)) * ph);
+          ctx.lineTo(x0 + v * wsc, MT + (s / sDen) * ph);
         }
         ctx.lineTo(x0, MT + ph);
         ctx.closePath();
@@ -1742,7 +1752,7 @@ function drawSection(cv: HTMLCanvasElement, sec: SectionData) {
         for (let s = 0; s < colLen; s++) {
           const v = Math.max(-1, Math.min(1, data[base + s] * g));
           const x = x0 + v * wsc;
-          const y = MT + (s / (colLen - 1)) * ph;
+          const y = MT + (s / sDen) * ph;
           if (s === 0) ctx.moveTo(x, y);
           else ctx.lineTo(x, y);
         }
@@ -2313,8 +2323,8 @@ function drawWorkbench() {
 // All compute is client-side (the samples already live in wbTraces) via the pure
 // crossCorrelate/difference core ops — no worker round-trip.
 
-let wbSelA = 0; // chosen A trace id (−1 ⇒ none)
-let wbSelB = 0; // chosen B trace id (−1 ⇒ none)
+let wbSelA = -1; // chosen A trace id (−1 ⇒ none)
+let wbSelB = -1; // chosen B trace id (−1 ⇒ none)
 
 /** Find a collected trace by id (null when absent). */
 function wbTraceById(id: number): WbTrace | null {
@@ -3904,11 +3914,14 @@ function drawVelocity() {
 
   const velMin = vels[0];
   const velMax = vels[nV - 1];
+  // Span guarded ≥1 so a single-velocity scan (velMin === velMax → length-1 vels)
+  // doesn't divide by zero → NaN x (markers vanish / picks can't be hit-tested).
+  const velSpan = Math.max(1, velMax - velMin);
   const totalMs = nT * dt * 1000;
   ctx.strokeStyle = '#ff5d6c';
   ctx.lineWidth = 1.5;
   for (const p of velPicks) {
-    const x = ML + ((p.v - velMin) / (velMax - velMin)) * pw;
+    const x = ML + ((p.v - velMin) / velSpan) * pw;
     const y = MT + (p.tMs / totalMs) * ph;
     ctx.beginPath();
     ctx.arc(x, y, 4, 0, Math.PI * 2);
@@ -3938,11 +3951,14 @@ function onVelClick(e: MouseEvent) {
   const { vels, nT, dt } = velResult;
   const velMin = vels[0];
   const velMax = vels[vels.length - 1];
+  // Guard the span (≥1) so a single-velocity scan doesn't collapse every click to
+  // velMin and produce a NaN near-test (picks would stack and be undeletable).
+  const velSpan = Math.max(1, velMax - velMin);
   const totalMs = nT * dt * 1000;
-  const v = Math.round(velMin + ((px - ML) / pw) * (velMax - velMin));
+  const v = Math.round(velMin + ((px - ML) / pw) * velSpan);
   const tMs = Math.round(((py - MT) / ph) * totalMs);
   const near = velPicks.findIndex((p) => {
-    const x = ML + ((p.v - velMin) / (velMax - velMin)) * pw;
+    const x = ML + ((p.v - velMin) / velSpan) * pw;
     const y = MT + (p.tMs / totalMs) * ph;
     return Math.hypot(px - x, py - y) < 12;
   });
@@ -5578,8 +5594,18 @@ function asTemplate(o: unknown, fallbackName: string): LogTemplate | null {
   if (!o || typeof o !== 'object') return null;
   const t = o as Partial<LogTemplate>;
   if (!Array.isArray(t.columns) || t.columns.length === 0) return null;
+  // Validate each column `key` against a safe identifier pattern and reject the
+  // prototype-pollution names. Keys are used as dynamic object properties on plain
+  // row objects (r[c.key] = …), so an imported template carrying key '__proto__'
+  // (or 'constructor'/'prototype') would otherwise corrupt per-row state.
+  const SAFE_KEY = /^[A-Za-z][A-Za-z0-9_]*$/;
+  const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
   const columns = t.columns
-    .filter((c): c is LogColumn => !!c && typeof c === 'object' && typeof (c as LogColumn).key === 'string')
+    .filter((c): c is LogColumn => {
+      if (!c || typeof c !== 'object') return false;
+      const k = (c as LogColumn).key;
+      return typeof k === 'string' && SAFE_KEY.test(k) && !FORBIDDEN_KEYS.has(k);
+    })
     .map((c) => withColRoleDefaults({ ...c }));
   if (columns.length === 0) return null;
   return {

@@ -10,7 +10,7 @@
 import { parentPort } from 'node:worker_threads';
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
-import { applyAGC, averageSpectrum, computeSemblance, crsFromSpec, detectSPSType, EPSG_DB, fkSpectrum, generateProjHeaders, getWriter, groupByLine, mergeSPSData, nextPow2, normFactorPercentile, parseAny, parseSPSText, projToLatLon, PROJ_HEADER_CODES, reprojectSPS, resampleLinear, runSPSQC, spectrogram, spsHeaderDesc, type AGCType, type CRSSpec, type ParsedFile, type QCParams, type SPSData, type SPSHeader, type SPSPoint } from '../core';
+import { applyAGC, averageSpectrum, computeSemblance, crsFromSpec, detectSPSType, EPSG_DB, fkSpectrum, generateProjHeaders, getWriter, groupByLine, hRecCode, mergeSPSData, nextPow2, normFactorPercentile, parseAny, parseSPSText, projToLatLon, PROJ_HEADER_CODES, reprojectSPS, resampleLinear, runSPSQC, spectrogram, spsHeaderDesc, type AGCType, type CRSSpec, type ParsedFile, type QCParams, type SPSData, type SPSHeader, type SPSPoint } from '../core';
 
 if (!parentPort) throw new Error('parse.worker must run as a worker thread');
 const port = parentPort;
@@ -279,13 +279,6 @@ function buildSPSQCReport(d: SPSData, params: QCParams): { name: string; text: s
 // field, terminated with `;`. The parser (parseSPSText) reads code = cols 1-4
 // and val = everything from col 33 with a trailing `;…` stripped, so we write
 // the value into cols 33-80, left/space-pad the whole line to 80, and re-add `;`.
-
-/** The 4-char H-record code of a raw line (cols 1-4, trimmed). '' if not an H. */
-function hRecCode(raw: string): string {
-  const ln = (raw || '').padEnd(4, ' ');
-  if (ln[0]?.toUpperCase() !== 'H') return '';
-  return ln.substring(0, 4).trim();
-}
 
 /** Read the DATA field (cols 33-80) of an H-record line the way parseSPSText does:
  *  everything from col 33 on, with a trailing `;…` stripped, then trimmed. Used to

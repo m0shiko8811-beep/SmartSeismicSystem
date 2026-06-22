@@ -21,7 +21,11 @@ export interface SemblanceResult {
 
 export function computeSemblance(traces: Trace[], siUs: number, velMin: number, velMax: number, velStep: number): SemblanceResult {
   const dt = siUs * 1e-6; // seconds
-  const nT = traces[0]?.nSamples ?? 0;
+  // Time axis = the LONGEST trace, not traces[0]: on a mixed-length gather a short
+  // first trace would truncate every longer one, and (with the per-trace bounds
+  // check below) a short trace simply contributes no sample beyond its own end.
+  let nT = 0;
+  for (const tr of traces) if (tr.nSamples > nT) nT = tr.nSamples;
   const vels: number[] = [];
   for (let v = velMin; v <= velMax; v += velStep) vels.push(v);
   const nV = vels.length;
@@ -34,7 +38,14 @@ export function computeSemblance(traces: Trace[], siUs: number, velMin: number, 
   });
   const validOff = rawOff.filter((x) => x !== null && x > 0);
   const hasOff = validOff.length > traces.length * 0.5;
-  const offsets = rawOff.map((off, i) => (hasOff && off !== null && off > 0 ? off : Math.abs(i - traces.length / 2) * 25));
+  // When the gather has real header offsets, traces WITHOUT a valid offset get
+  // `null` (and are skipped below) rather than a synthetic index*25 m offset on a
+  // different distance scale — mixing the two scales on one gather biases the NMO
+  // hyperbola and the stacking-velocity peak. Only when NO real offsets exist do
+  // we fall back to a uniform synthetic spacing for the whole gather.
+  const offsets = rawOff.map((off, i) =>
+    hasOff ? (off !== null && off > 0 ? off : null) : Math.abs(i - traces.length / 2) * 25,
+  );
 
   const semb = new Float32Array(nV * nT);
   for (let vi = 0; vi < nV; vi++) {
@@ -49,9 +60,12 @@ export function computeSemblance(traces: Trace[], siUs: number, velMin: number, 
         const s = traces[j].samples;
         if (!s) continue;
         const x = offsets[j];
+        if (x === null) continue; // no valid offset on a header-offset gather → skip
         const tNmo = Math.sqrt(Math.max(0, t02 + (x * x) / v2));
         const si = Math.round(tNmo / dt);
-        if (si >= 0 && si < nT) {
+        // Bound `si` by THIS trace's real length, not the gather's max nT, so a
+        // shorter trace never reads s[si] === undefined → NaN into the sums.
+        if (si >= 0 && si < s.length) {
           const amp = s[si];
           sumA += amp;
           sumA2 += amp * amp;

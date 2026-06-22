@@ -51,14 +51,10 @@ export function parseWithRegistry(b: Bytes, name?: string): ParsedFile {
   const id = detect(b, name);
   const mod = parsers.get(id);
   if (!mod) {
-    return {
-      format: id,
-      revision: 0,
-      bh: {},
-      traces: [],
-      traceCount: 0,
-      errors: [`No parser registered for ${id} (e.g. TPIMAGE extraction is not yet supported)`],
-    };
+    const errors = id === 'UNKNOWN'
+      ? ['Unsupported file: the content matches no known seismic format (SEG-Y / SEG-D / SEG-2 / SU / tape image).']
+      : [`No parser registered for ${id} (e.g. TPIMAGE extraction is not yet supported)`];
+    return { format: id, revision: 0, bh: {}, traces: [], traceCount: 0, errors };
   }
   return mod.parse(b, name);
 }

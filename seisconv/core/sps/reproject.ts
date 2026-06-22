@@ -6,7 +6,7 @@
 // SeisConv reference. Pure — no DOM.
 
 import { latLonToProj, projToLatLon, type Projection } from '../coords';
-import type { SPSProjection } from './parse';
+import { hRecCode, spsParseCoords, SPS_COORD_SPANS, type SPSProjection } from './parse';
 
 export interface CRS {
   code: string;
@@ -53,6 +53,22 @@ export function searchEPSG(q: string): CRS[] {
   }).slice(0, 40);
 }
 
+/**
+ * Format `v` to fit EXACTLY `width` columns, right-justified, preferring 2
+ * decimals but dropping decimals (then, if still too wide, clipping the integer
+ * part) so the result never exceeds the field — preventing a long coordinate
+ * (e.g. a 10,000,000 m northing in a 10-col field) from shifting later columns.
+ */
+function fitNum(v: number, width: number): string {
+  for (let dp = 2; dp >= 0; dp--) {
+    const s = v.toFixed(dp);
+    if (s.length <= width) return s.padStart(width);
+  }
+  // Even with no decimals it doesn't fit (extreme/garbage value): clip to width.
+  const s = v.toFixed(0);
+  return s.length > width ? s.slice(0, width) : s.padStart(width);
+}
+
 function decToDMS(deg: number, pos: string, neg: string): string {
   const abs = Math.abs(deg);
   const d = Math.floor(abs);
@@ -61,8 +77,11 @@ function decToDMS(deg: number, pos: string, neg: string): string {
   return String(d).padStart(3, '0') + String(m).padStart(2, '0') + s.toFixed(3).padStart(6, '0') + (deg >= 0 ? pos : neg);
 }
 function fmtFalseEN(tgt: CRS): string {
-  const fe = (tgt.FE || 0).toFixed(2).padStart(11, '0');
-  const fn = (tgt.FN || 0).toFixed(2).padStart(11, '0');
+  // 3 decimal places (mm) so canonical false-eastings/northings with sub-cm
+  // precision (e.g. ITM FE 219529.584) are preserved — toFixed(2) silently
+  // dropped the last millimetre on every survey re-headered to such a grid.
+  const fe = (tgt.FE || 0).toFixed(3).padStart(12, '0');
+  const fn = (tgt.FN || 0).toFixed(3).padStart(12, '0');
   return fe + 'E ' + fn + 'N';
 }
 function fmtHelmert(hP?: CRS['helmert']): string {
@@ -222,22 +241,37 @@ export function reprojectSPS(srcLines: string[], tgt: CRS, spsType: 'S' | 'R' | 
     const t = line[0];
 
     if (t === 'H') {
-      const code = line.substring(0, 3).trimEnd() + (line[3] && /\d/.test(line[3]) ? line[3] : '');
-      const gen = projHeaders[code];
+      // Use the canonical H-code parser so the record this rewrites is exactly the
+      // one parseSPSText recognises (the old substring(0,3)+digit-check diverged).
+      const code = hRecCode(line);
+      const gen = code ? projHeaders[code] : undefined;
       if (gen != null) { out.push(gen); continue; }
       out.push(raw.trimEnd());
       continue;
     }
 
     if ((t === 'S' || t === 'R') && spsType !== 'X') {
-      const E = parseFloat(line.substring(46, 55).trim());
-      const N = parseFloat(line.substring(55, 65).trim());
-      if (isFinite(E) && isFinite(N)) {
-        const ll = projToLatLon(E, N, srcP, 0);
+      // Detect the SAME layout the parser uses and write the new coordinates back
+      // into THAT layout's columns. Hardcoding the SPS2.1 columns produced NaN for
+      // a legacy-layout file (→ the S/R line was emitted unchanged in the SOURCE
+      // CRS while the H-records were rewritten to the target CRS — a silent datum
+      // mismatch). Layout 'D' (whitespace-delimited) has no fixed span, so such a
+      // line is left unchanged rather than mis-columned.
+      const padded = line.padEnd(80, ' ');
+      const coords = spsParseCoords(padded);
+      const span = coords ? SPS_COORD_SPANS[coords.layout] : undefined;
+      if (coords && span && isFinite(coords.e) && isFinite(coords.n)) {
+        const ll = projToLatLon(coords.e, coords.n, srcP, 0);
         const newEN = tgt.subtype === 'GEO' ? { E: ll.lon, N: ll.lat } : latLonToProj(ll.lat, ll.lon, tgtProj, 0);
-        const newE = newEN.E.toFixed(2).padStart(9);
-        const newN = newEN.N.toFixed(2).padStart(10);
-        out.push(line.substring(0, 46) + newE + newN + line.substring(65));
+        const eW = span.eEnd - span.eStart;
+        const nW = span.nEnd - span.nStart;
+        // Right-justify within the field; truncate (never pad past) the width so a
+        // value too large for the field (e.g. a southern-hemisphere northing of
+        // 10,000,000 in a 10-col field) can't push every later column one place to
+        // the right. fitNum keeps as many decimals as fit, else clips the string.
+        const newE = fitNum(newEN.E, eW);
+        const newN = fitNum(newEN.N, nW);
+        out.push(padded.substring(0, span.eStart) + newE + newN + padded.substring(span.tail).trimEnd());
         continue;
       }
     }

@@ -10,8 +10,9 @@
 /** Raw bytes of a seismic file (or any binary blob). */
 export type Bytes = Uint8Array;
 
-/** Detected container format. */
-export type SeismicFormat = 'SEG-Y' | 'SEG-D' | 'SEG-2' | 'SU' | 'TPIMAGE';
+/** Detected container format. 'UNKNOWN' = the blob matched no known signature
+ *  (surfaced as a clean "unsupported file" error rather than mis-parsed). */
+export type SeismicFormat = 'SEG-Y' | 'SEG-D' | 'SEG-2' | 'SU' | 'TPIMAGE' | 'UNKNOWN';
 
 /**
  * Per-trace header. SEG-Y / SU headers are all numeric; SEG-2 free-form headers

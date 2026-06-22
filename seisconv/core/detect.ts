@@ -30,6 +30,10 @@ export function detect(b: Bytes, name?: string): SeismicFormat {
 
   const fc = bcd2(b[2]) * 100 + bcd2(b[3]);
   if ([8058, 8068, 8048, 8015, 32, 8032, 4, 8064].includes(fc)) return 'SEG-D';
+  // A blob large enough to hold a SEG-Y text+binary header is still a plausible
+  // (header-only-recognisable) SEG-Y; anything smaller matched no signature, so
+  // report UNKNOWN rather than forcing it through parseSEGY (which would emit a
+  // misleading '<3600 bytes' error instead of 'unsupported file').
   if (b.length >= 3600) return 'SEG-Y';
-  return 'SEG-Y';
+  return 'UNKNOWN';
 }

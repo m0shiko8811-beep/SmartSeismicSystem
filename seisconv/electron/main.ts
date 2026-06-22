@@ -47,6 +47,20 @@ function isAuthorizedPath(p: string): boolean {
   return typeof p === 'string' && authorizedPaths.has(path.resolve(p));
 }
 
+// Allowlist of OUTPUT directories the user has chosen via the folder picker.
+// batchConvert writes attacker-influenceable bytes (templated names) into its
+// outDir, so confining writes to a user-picked directory stops a compromised
+// renderer from dropping files into e.g. the Startup folder.
+const authorizedDirs = new Set<string>();
+function authorizeDir(p: string): string {
+  const abs = path.resolve(p);
+  authorizedDirs.add(abs);
+  return abs;
+}
+function isAuthorizedDir(p: string): boolean {
+  return typeof p === 'string' && authorizedDirs.has(path.resolve(p));
+}
+
 // Enumerate the seismic siblings of `filePath` (same directory), sorted by name,
 // and remember the open file's position. Best-effort: on any fs error we fall
 // back to a one-element list containing just the open file so navigation is a
@@ -144,6 +158,39 @@ function callWorker<T = any>(req: Record<string, unknown>, transfer: Transferabl
 // clean error (never throws/rejects) on timeout, DNS failure, or offline so the
 // renderer can surface "sync failed" without crashing. 2-second hard timeout.
 const NTP_UNIX_EPOCH_DIFF = 2208988800; // seconds between 1900-01-01 and 1970-01-01
+
+// Reject SNTP targets that point at the local machine / private networks so a
+// compromised renderer can't drive the main process to probe internal hosts
+// over UDP/123 (an SSRF the sandboxed renderer itself could never perform). We
+// only block obviously-internal LITERALS (loopback, RFC-1918, link-local,
+// unique-local IPv6); public hostnames like pool.ntp.org are resolved normally.
+function isInternalNtpHost(host: string): boolean {
+  const h = host.trim().toLowerCase().replace(/^\[|\]$/g, '');
+  if (h === 'localhost' || h === '' || h.endsWith('.localhost')) return true;
+  // IPv4 literal?
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  if (m) {
+    const o = m.slice(1).map(Number);
+    if (o.some((x) => x > 255)) return true; // malformed → reject
+    const [a, b] = o;
+    if (a === 0 || a === 127) return true;                 // this-host / loopback
+    if (a === 10) return true;                              // 10/8
+    if (a === 172 && b >= 16 && b <= 31) return true;       // 172.16/12
+    if (a === 192 && b === 168) return true;                // 192.168/16
+    if (a === 169 && b === 254) return true;                // link-local
+    if (a >= 224) return true;                              // multicast/reserved
+    return false;
+  }
+  // IPv6 literal: block loopback (::1), unspecified (::), unique-local (fc00::/7),
+  // and link-local (fe80::/10). Heuristic prefix check is sufficient here.
+  if (h.includes(':')) {
+    if (h === '::1' || h === '::') return true;
+    if (/^f[cd]/.test(h)) return true; // fc00::/7 unique-local
+    if (/^fe[89ab]/.test(h)) return true; // fe80::/10 link-local
+    return false;
+  }
+  return false;
+}
 
 function sntpQuery(server: string): Promise<{ ok: boolean; offsetMs?: number; serverTimeMs?: number; error?: string }> {
   return new Promise((resolve) => {
@@ -327,7 +374,8 @@ ipcMain.handle('seisconv:pickOutputFolder', async () => {
   if (!win) return null;
   const res = await dialog.showOpenDialog(win, { properties: ['openDirectory'] });
   if (res.canceled || !res.filePaths.length) return null;
-  return res.filePaths[0];
+  // Authorize the chosen directory so batchConvert may write into it.
+  return authorizeDir(res.filePaths[0]);
 });
 
 // Strip characters illegal in file names so a templated base is always safe.
@@ -402,6 +450,16 @@ ipcMain.handle(
     const files = opts?.files ?? [];
     const tpl = opts?.nameTemplate || '{name}';
     const dateStr = opts?.dateStr || '';
+    // The renderer supplies the input paths AND the output directory; neither is
+    // trustworthy if the renderer is compromised. Only read inputs the user has
+    // actually authorized (dialog/enumerated, same gate as extractTrace), and
+    // only write into an output directory the user picked via pickOutputFolder.
+    // Without these gates a compromised renderer could read any file on disk and
+    // overwrite attacker-controlled bytes into any writable directory.
+    if (!isAuthorizedDir(opts.outDir)) {
+      return { ok: false, error: 'batchConvert: unauthorized output directory' };
+    }
+    const outDir = path.resolve(opts.outDir);
     const total = files.length;
     const results: { name: string; ok: boolean; error?: string }[] = [];
     let done = 0;
@@ -423,11 +481,14 @@ ipcMain.handle(
       }
       emit({ index, total, file: f.name, state: 'start' });
       try {
+        // Only convert inputs the user actually authorized (dialog/enumerated),
+        // mirroring extractTrace — the worker reads f.path with no gate of its own.
+        if (!isAuthorizedPath(f.path)) throw new Error('unauthorized input file path');
         const r = await callWorker<{ ok: boolean; bytes?: ArrayBuffer; ext?: string; error?: string }>({ type: 'convertPath', path: f.path, format: opts.format });
         if (!r.ok || !r.bytes) throw new Error(r.error ?? 'conversion failed');
         const inputBase = f.name.replace(/\.[^.]+$/, '');
         const base = applyNameTemplate(tpl, { name: inputBase, fmt: opts.format, date: dateStr, n: index });
-        await writeFile(path.join(opts.outDir, `${base}.${r.ext}`), Buffer.from(r.bytes));
+        await writeFile(path.join(outDir, `${base}.${r.ext}`), Buffer.from(r.bytes));
         done++;
         results.push({ name: f.name, ok: true });
         emit({ index, total, file: f.name, state: 'done' });
@@ -450,6 +511,13 @@ ipcMain.handle('seisconv:resetState', async () => {
   lastOpenedPath = '';
   siblingPaths = [];
   siblingIndex = -1;
+  // Scope the read/write allowlists to the current working set: resetState drops
+  // the open file + siblings, so the paths the user touched before should no
+  // longer be reachable by a (possibly compromised) renderer. Without this the
+  // sets grow unbounded for the whole process lifetime and keep granting access
+  // to every path the user ever opened.
+  authorizedPaths.clear();
+  authorizedDirs.clear();
 });
 
 ipcMain.handle('seisconv:openSPS', async () => {
@@ -706,6 +774,7 @@ ipcMain.handle('seisconv:openTemplateJson', async () => {
 // resolves { ok: false, error }. Default server 'pool.ntp.org'.
 ipcMain.handle('seisconv:ntpSync', async (_e, server?: string) => {
   const host = (typeof server === 'string' && server.trim()) ? server.trim() : 'pool.ntp.org';
+  if (isInternalNtpHost(host)) return { ok: false, error: 'NTP server must be a public host (internal/loopback addresses are blocked)' };
   return sntpQuery(host);
 });
 

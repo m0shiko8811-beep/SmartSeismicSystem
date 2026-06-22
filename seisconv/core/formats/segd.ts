@@ -9,6 +9,26 @@ import { bcd2, dv, r32u, rIEEE, w32 } from '../binary';
 import type { Bytes, ParsedFile, Trace } from '../types';
 import { MAX_SAMPLES_PER_TRACE } from '../types';
 
+// SEG-D Rev 1 base-scan-interval codes → microseconds. Codes 7/8 are the true
+// fractional intervals (62.5 / 31.25 µs for 16/8 kHz); truncating them to 62/31
+// biases the time axis (and thus NMO velocities / spectra) ~0.8% for fast data.
+const BSI_TABLE: Record<number, number> = { 1: 4000, 2: 2000, 3: 1000, 4: 500, 5: 250, 6: 125, 7: 62.5, 8: 31.25, 9: 16, 10: 8 };
+
+/** Inverse of BSI_TABLE: pick the BSI code whose interval is closest to `us`
+ *  (defaults to 2000 µs / code 2 when absent). Used by writeSEGD so the written
+ *  base-scan-interval round-trips through parseSEGD. */
+function bsiCodeForInterval(us: number | undefined): number {
+  const target = typeof us === 'number' && isFinite(us) && us > 0 ? us : 2000;
+  let best = 2; // 2000 µs default
+  let bestErr = Infinity;
+  for (const k of Object.keys(BSI_TABLE)) {
+    const code = Number(k);
+    const err = Math.abs(BSI_TABLE[code] - target);
+    if (err < bestErr) { bestErr = err; best = code; }
+  }
+  return best;
+}
+
 export function parseSEGD(b: Bytes): ParsedFile {
   const r: ParsedFile = { format: 'SEG-D', revision: 1, gh1: {}, bh: {}, traces: [], traceCount: 0, errors: [] };
   if (b.length < 64) {
@@ -31,8 +51,7 @@ export function parseSEGD(b: Bytes): ParsedFile {
   };
   // Base scan interval from GH1 byte 21 high nibble (SEG-D Rev 1 code).
   const bsiCode = (b[21] >> 4) & 0xf;
-  const bsiTable: Record<number, number> = { 1: 4000, 2: 2000, 3: 1000, 4: 500, 5: 250, 6: 125, 7: 62, 8: 31, 9: 16, 10: 8 };
-  const si_us = bsiTable[bsiCode] || 2000;
+  const si_us = BSI_TABLE[bsiCode] || 2000;
   r.bh = { sampleInt: si_us }; // for SEG-Y-style viewers
 
   // Bytes per scan in GH1 bytes 18-20 (BCD). For IEEE float (0032): spt = bps/4.
@@ -69,8 +88,14 @@ export function parseSEGD(b: Bytes): ParsedFile {
     let samples: Float32Array | null = null;
     let ns = 0;
     if (bpsBits === 32) {
-      ns = sptStored > 0 ? sptStored : Math.min(Math.floor(rem / (4 * Math.max(seisCC, 1))), MAX_SAMPLES_PER_TRACE);
-      if (sptStored > 0) ns = Math.min(ns, Math.floor(rem / 4));
+      // Each demultiplexed trace record carries its OWN samples after its 20-byte
+      // header, so the per-trace sample count is bounded by THIS record's bytes
+      // (rem/4), not the whole file divided by the seismic-channel count — the old
+      // /seisCC fallback read every trace at ~1/seisCC of its true length on a
+      // multi-channel-set survey. When sptStored is set it is attacker-controllable,
+      // so clamp it by both the on-disk bytes AND MAX_SAMPLES_PER_TRACE.
+      ns = sptStored > 0 ? sptStored : Math.floor(rem / 4);
+      ns = Math.min(ns, Math.floor(rem / 4), MAX_SAMPLES_PER_TRACE);
       if (ns <= 0) break;
       if (tc < 2000) {
         samples = new Float32Array(ns);
@@ -78,8 +103,10 @@ export function parseSEGD(b: Bytes): ParsedFile {
       }
       off += ns * 4;
     } else if (bpsBits === 24) {
-      ns = sptStored > 0 ? sptStored : Math.min(Math.floor(rem / (3 * Math.max(seisCC, 1))), MAX_SAMPLES_PER_TRACE);
-      if (sptStored > 0) ns = Math.min(ns, Math.floor(rem / 3));
+      // Same per-record bound as the 32-bit branch: rem/3 (3 bytes/sample), clamped
+      // by MAX_SAMPLES_PER_TRACE when sptStored is attacker-controllable.
+      ns = sptStored > 0 ? sptStored : Math.floor(rem / 3);
+      ns = Math.min(ns, Math.floor(rem / 3), MAX_SAMPLES_PER_TRACE);
       if (ns <= 0) break;
       if (tc < 2000) {
         samples = new Float32Array(ns);
@@ -91,23 +118,35 @@ export function parseSEGD(b: Bytes): ParsedFile {
       }
       off += ns * 3;
     } else {
-      ns = sptStored > 0 ? sptStored : Math.min(Math.floor((rem * 2) / (5 * Math.max(seisCC, 1))), MAX_SAMPLES_PER_TRACE);
-      // SECURITY: when sptStored>0 it is attacker-controllable, so bound it by the
-      // bytes actually remaining (2 samples per 5 packed bytes → floor(rem*2/5)),
-      // mirroring the 32-bit and 24-bit branches above. Without this an inflated
-      // bytes-per-scan field drives a multi-GB Float32Array on a tiny file.
-      if (sptStored > 0) ns = Math.min(ns, Math.floor((rem * 2) / 5));
+      // 20-bit packed (2 samples per 5 bytes). Per-record bound = rem*2/5; when
+      // sptStored>0 it is attacker-controllable so clamp by both the on-disk bytes
+      // AND MAX_SAMPLES_PER_TRACE (an inflated bytes-per-scan field would otherwise
+      // drive a multi-GB Float32Array on a tiny file). No /seisCC: each record
+      // carries its own samples (see the 32-bit branch).
+      ns = sptStored > 0 ? sptStored : Math.floor((rem * 2) / 5);
+      ns = Math.min(ns, Math.floor((rem * 2) / 5), MAX_SAMPLES_PER_TRACE);
       const nb = Math.ceil((ns * 5) / 2);
       if (ns <= 0) break;
       if (tc < 2000) {
         samples = new Float32Array(ns);
-        for (let i = 0; i < Math.floor(ns / 2); i++) {
+        // Decode full sample PAIRS, then the trailing single sample when ns is odd
+        // (it occupies the first 2.5 bytes of the final 5-byte group). Without the
+        // odd-tail decode the last sample of every odd-length 20-bit trace stays 0.
+        const pairs = Math.floor(ns / 2);
+        for (let i = 0; i < pairs; i++) {
           const p = off + i * 5;
           if (p + 5 > b.length) break;
           let s1 = (b[p] << 12) | (b[p + 1] << 4) | ((b[p + 2] >> 4) & 0xf);
           let s2 = ((b[p + 2] & 0xf) << 16) | (b[p + 3] << 8) | b[p + 4];
           samples[i * 2] = s1 & 0x80000 ? s1 - 0x100000 : s1;
           samples[i * 2 + 1] = s2 & 0x80000 ? s2 - 0x100000 : s2;
+        }
+        if (ns % 2 === 1) {
+          const p = off + pairs * 5;
+          if (p + 3 <= b.length) {
+            let s1 = (b[p] << 12) | (b[p + 1] << 4) | ((b[p + 2] >> 4) & 0xf);
+            samples[ns - 1] = s1 & 0x80000 ? s1 - 0x100000 : s1;
+          }
         }
       }
       off += nb;
@@ -134,10 +173,12 @@ export function parseSEGD(b: Bytes): ParsedFile {
 export function writeSEGD(pd: ParsedFile, rev3: boolean): Bytes {
   const trc = pd.traces;
   if (!trc || !trc.length) throw new Error('No traces');
-  // Samples-per-trace drives the fixed record size. The reference sizes from the
-  // first trace; keep that for numeric equivalence, but clamp per-trace writes to
-  // `spt` (below) so a later, longer trace can't overrun the DataView.
-  const spt = trc[0].nSamples;
+  // Samples-per-trace drives the fixed record size. Size it from the LONGEST
+  // trace (like the SEG-Y / SU writers) — sizing from trc[0] silently truncates
+  // every trace longer than the first when the gather has variable lengths. The
+  // per-trace write is still clamped to `spt` so a trace can never overrun the
+  // DataView; shorter traces are zero-padded to the fixed slot.
+  const spt = trc.reduce((m, t) => Math.max(m, t.nSamples || 0), 0);
   const trD = spt * 4; // 4 bytes/sample (IEEE float32, code 8058)
   const gh2 = rev3 ? 32 : 0; // General Header Block 2 (Rev 3 only)
   const nExt = rev3 ? 1 : 0; // one extended header (Rev 3 only)
@@ -170,6 +211,11 @@ export function writeSEGD(pd: ParsedFile, rev3: boolean): Bytes {
   out[18] = ((Math.floor(bpsVal / 100000) % 10) << 4) | (Math.floor(bpsVal / 10000) % 10);
   out[19] = ((Math.floor(bpsVal / 1000) % 10) << 4) | (Math.floor(bpsVal / 100) % 10);
   out[20] = ((Math.floor(bpsVal / 10) % 10) << 4) | (bpsVal % 10);
+  // Base scan interval code in GH1 byte 21 (hi nibble) — the parser reads this to
+  // recover the sample interval (bsiCode → bsiTable). Without it the written file
+  // always reads back at the default 2000 µs, losing the true interval on every
+  // non-2000 µs round-trip. Map the file's sampleInt (µs) to the nearest BSI code.
+  out[21] = (bsiCodeForInterval(pd.bh?.sampleInt) << 4) & 0xf0;
   // numChanSets (hi nibble) = 1 (a single channel-set descriptor is written in
   // both revisions); addl GH blocks (lo nibble) = 1. The parser reads the GH2
   // presence from byte 10's hi nibble (set above), not from here.
