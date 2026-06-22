@@ -149,6 +149,24 @@ export interface SpsXrefLines {
   log: string;
 }
 
+/** FOLD / coverage bin map: CMP-midpoint counts per bin. `fold` is a row-major
+ *  Int32 grid of nx×ny cells; cell (ix,iy) lives at fold[iy*nx+ix] and covers the
+ *  projected E/N rectangle [originX+ix*binX, originX+(ix+1)*binX] ×
+ *  [originY+iy*binY, originY+(iy+1)*binY]. `decimated` flags a sampled survey. */
+export interface SpsFold {
+  nx: number;
+  ny: number;
+  binX: number;
+  binY: number;
+  originX: number;
+  originY: number;
+  fold: Int32Array;
+  maxFold: number;
+  totalMid: number;
+  decimated: boolean;
+  log: string;
+}
+
 /** Lightweight coords for one offending point in a QC finding (no full SPSPoint). */
 export interface QCPoint {
   rtype: 'S' | 'R';
@@ -232,6 +250,8 @@ const api = {
   spsGeometry: (geo: boolean): Promise<SpsGeometry> => ipcRenderer.invoke('seisconv:spsGeometry', geo),
   /** Get shot→receiver "spider" segments (projected E/N, or WGS84 lon/lat when geo=true). */
   spsXrefLines: (geo: boolean): Promise<SpsXrefLines> => ipcRenderer.invoke('seisconv:spsXrefLines', geo),
+  /** Get the CMP-midpoint FOLD / coverage bin map (projected E/N) for the given bin size. */
+  spsFold: (opts: { binX: number; binY: number }): Promise<SpsFold> => ipcRenderer.invoke('seisconv:spsFold', opts),
   /** Run survey QC on the loaded SPS data. */
   spsQC: (qc?: { srcInt?: number; rcvInt?: number; tol?: number; maxOff?: number; maxSrc?: number; maxRcv?: number }): Promise<QCRow[]> =>
     ipcRenderer.invoke('seisconv:spsQC', qc ?? {}),

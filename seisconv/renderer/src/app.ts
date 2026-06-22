@@ -3,7 +3,7 @@
 // never touches Node/fs directly. Pure render helpers come from core.
 
 import { normFactorPercentile } from '../../core/render/model';
-import { getColor } from '../../core/render/colormaps';
+import { getColor, colorViridis } from '../../core/render/colormaps';
 import { EPSG_DB } from '../../core/sps/reproject';
 import { amplitudeSpectrum } from '../../core/dsp/fft';
 import L from 'leaflet';
@@ -32,6 +32,7 @@ type SpsSummary = { sources: number; receivers: number; xrefs: number; layout: s
 type SpsLines = { x: Float32Array; y: Float32Array; line: Int32Array; pt: Float32Array; names: string[] };
 type SpsGeometry = { geo: boolean; src: SpsLines; rcv: SpsLines; bbox: { minX: number; maxX: number; minY: number; maxY: number } };
 type SpsXrefLines = { geo: boolean; sx: Float32Array; sy: Float32Array; rx: Float32Array; ry: Float32Array; shot: Int32Array; shotKeys: string[]; decimated: boolean; log: string };
+type SpsFold = { nx: number; ny: number; binX: number; binY: number; originX: number; originY: number; fold: Int32Array; maxFold: number; totalMid: number; decimated: boolean; log: string };
 type QCParamsUI = { srcInt?: number; rcvInt?: number; tol?: number; maxOff?: number };
 type QCPoint = { rtype: 'S' | 'R'; lineName: string; point: number; easting: number; northing: number };
 type QCRow = { sev: string; cat: string; msg: string; pts?: QCPoint[] };
@@ -96,6 +97,7 @@ declare global {
       openSPS(): Promise<SpsSummary | null>;
       spsGeometry(geo: boolean): Promise<SpsGeometry>;
       spsXrefLines(geo: boolean): Promise<SpsXrefLines>;
+      spsFold(opts: { binX: number; binY: number }): Promise<SpsFold>;
       spsQC(qc?: QCParamsUI): Promise<QCRow[]>;
       spsPointDetail(args: { rtype: 'S' | 'R'; lineName: string; point: number; idx?: string }): Promise<SPSPointDetail | null>;
       spsReproject(code: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
@@ -231,6 +233,10 @@ let spsGeom: SpsGeometry | null = null;
 // X-ref spider (shot→receiver segments). Cached like spsGeom; cleared when the
 // geometry space (grid E/N vs map lon/lat) changes so endpoints stay valid.
 let spsSpider: SpsXrefLines | null = null;
+// FOLD / coverage bin map (projected E/N). Cached and re-fetched on bin-size
+// change or a new SPS load; `spsFoldBin` records the bin the cache was built for.
+let spsFold: SpsFold | null = null;
+let spsFoldBin = 0;
 // 'srcLine|srcPt' of the shot whose fan is currently emphasized (null = none).
 let highlightedShot: string | null = null;
 let spsView: 'grid' | 'map' = 'grid';
@@ -1633,6 +1639,8 @@ async function loadSPS() {
     spsSummary = s;
     spsGeom = null;
     spsSpider = null;
+    spsFold = null;
+    spsFoldBin = 0;
     highlightedShot = null;
     gridView.init = false;
     gridHighlight = null;
@@ -1679,6 +1687,11 @@ async function refreshSps() {
   if (spsView === 'grid' && spsShowXrefs() && (!spsSpider || spsSpider.geo !== wantGeo)) {
     await ensureSpider();
   }
+  // Fold map is grid-view + projected-E/N only (it's a planning heatmap). Fetch
+  // it lazily the first time it's toggled on, and whenever the bin size changes.
+  if (spsView === 'grid' && !spsGeom.geo && spsShowFold()) {
+    await ensureFold();
+  }
   if (spsView === 'grid') drawSurveyGrid();
   else updateMap();
 }
@@ -1699,6 +1712,34 @@ async function ensureSpider(): Promise<void> {
   } catch (e) {
     spsSpider = null;
     $('spsLabel').textContent = 'X-ref spider failed: ' + errMsg(e);
+  }
+}
+
+/** Whether the Fold/coverage toggle is on (absent checkbox ⇒ off). */
+function spsShowFold(): boolean {
+  return !!($opt('spsShowFold') as HTMLInputElement | null)?.checked;
+}
+
+/** Current bin size (m) from the toolbar input; clamps to ≥ 1, default 25. */
+function spsBinSize(): number {
+  const v = parseFloat(($opt('spsBinSize') as HTMLInputElement | null)?.value ?? '');
+  return isFinite(v) && v >= 1 ? v : 25;
+}
+
+/** Fetch + cache the fold map for the current bin size (no-op if already current).
+ *  Best-effort: a failure (e.g. bin too small) leaves spsFold null and surfaces
+ *  the reason in the status label, so the grid still draws without the heatmap. */
+async function ensureFold(): Promise<void> {
+  const bin = spsBinSize();
+  if (spsFold && spsFoldBin === bin) return;
+  try {
+    spsFold = await api.spsFold({ binX: bin, binY: bin });
+    spsFoldBin = bin;
+    if (spsFold.log) $('spsLabel').textContent = spsFold.log;
+  } catch (e) {
+    spsFold = null;
+    spsFoldBin = 0;
+    $('spsLabel').textContent = 'Fold map failed: ' + errMsg(e);
   }
 }
 
@@ -1778,6 +1819,43 @@ function drawSurveyGrid() {
     ctx.fillStyle = '#5e7186'; ctx.fillText(n.toFixed(pr), 3, y - 2);
   }
 
+  // FOLD / coverage heatmap, drawn UNDER everything else (grid view + projected
+  // E/N only — skip on the map view or in geographic space). Each non-empty bin
+  // is a viridis-tinted rect at alpha 0.6; viewport-culled to the visible cells.
+  // Uses X()/Yf() so it tracks pan/zoom exactly like the points.
+  let foldDrawn = false;
+  if (spsShowFold() && !geo && spsFold && spsFold.maxFold > 0) {
+    const f = spsFold;
+    ctx.save();
+    ctx.globalAlpha = 0.6;
+    // Visible world rectangle → bin index range (cull cells outside it).
+    const ix0 = Math.max(0, Math.floor((e0 - f.originX) / f.binX));
+    const ix1 = Math.min(f.nx - 1, Math.ceil((e1 - f.originX) / f.binX));
+    const iy0 = Math.max(0, Math.floor((nBot - f.originY) / f.binY));
+    const iy1 = Math.min(f.ny - 1, Math.ceil((nTop - f.originY) / f.binY));
+    const inv = 1 / f.maxFold;
+    for (let iy = iy0; iy <= iy1; iy++) {
+      const rowBase = iy * f.nx;
+      // Cell rows go bottom-up in world N; in canvas the rect spans from the
+      // top edge Yf(originY+(iy+1)*binY) down to Yf(originY+iy*binY).
+      const yTop = Yf(f.originY + (iy + 1) * f.binY);
+      const yBot = Yf(f.originY + iy * f.binY);
+      const rh = yBot - yTop;
+      for (let ix = ix0; ix <= ix1; ix++) {
+        const v = f.fold[rowBase + ix];
+        if (v <= 0) continue;
+        // Map fold/maxFold (0..1) onto viridis, whose input is -1..1.
+        const [r, g2, b] = colorViridis(v * inv * 2 - 1);
+        ctx.fillStyle = `rgb(${r},${g2},${b})`;
+        const xL = X(f.originX + ix * f.binX);
+        const xR = X(f.originX + (ix + 1) * f.binX);
+        ctx.fillRect(xL, yTop, xR - xL, rh);
+      }
+    }
+    ctx.restore();
+    foldDrawn = true;
+  }
+
   // X-ref "spider": shot→receiver segments, drawn UNDER the points. Thin + low
   // opacity for the full set; if a shot is highlighted, dim the rest and over-
   // draw that shot's fan bright. Off-screen segments are cheaply skipped.
@@ -1843,6 +1921,14 @@ function drawSurveyGrid() {
   if (showS) legend('#ff8c00', `${spsSummary?.sources ?? 0} sources`);
   if (showR) legend('#3aa0e0', `${spsSummary?.receivers ?? 0} receivers`);
 
+  // Fold colorbar (vertical viridis gradient, 0..maxFold) in the bottom-left.
+  if (foldDrawn && spsFold) drawFoldColorbar(ctx, H, spsFold.maxFold);
+  // Fold is on but can't render here (geographic space) — a small hint.
+  else if (spsShowFold() && geo) {
+    ctx.font = '11px "Segoe UI", sans-serif'; ctx.fillStyle = '#9fb0c4';
+    ctx.fillText('Fold/coverage: Survey-grid view only', 52, ly + 20);
+  }
+
   // north arrow (north-up)
   ctx.fillStyle = '#9fb0c4'; ctx.font = 'bold 12px Consolas, monospace';
   ctx.fillText('N', W - 22, 24);
@@ -1873,6 +1959,26 @@ function drawScaleBar(ctx: CanvasRenderingContext2D, W: number, H: number, scPxP
   ctx.fillStyle = '#c8d2e0'; ctx.font = '10px Consolas, monospace'; ctx.textAlign = 'center';
   ctx.fillText(meters >= 1000 ? `${meters / 1000} km` : `${meters} m`, x0 + barPx / 2, y0 - 6);
   ctx.textAlign = 'left';
+}
+
+/** Vertical viridis gradient legend (top = maxFold, bottom = 0) for the fold map,
+ *  drawn in the lower-left corner. Colors match the heatmap (fold/maxFold → viridis). */
+function drawFoldColorbar(ctx: CanvasRenderingContext2D, H: number, maxFold: number) {
+  const bw = 12, bh = 120;
+  const x0 = 52, y0 = H - 28 - bh;
+  // Top (maxFold) → bottom (0); sample viridis the same way the heatmap does.
+  for (let p = 0; p < bh; p++) {
+    const t = 1 - p / (bh - 1); // 1 at top, 0 at bottom
+    const [r, g, b] = colorViridis(t * 2 - 1);
+    ctx.fillStyle = `rgb(${r},${g},${b})`;
+    ctx.fillRect(x0, y0 + p, bw, 1);
+  }
+  ctx.strokeStyle = 'rgba(200,210,224,0.5)'; ctx.lineWidth = 1;
+  ctx.strokeRect(x0 + 0.5, y0 + 0.5, bw, bh);
+  ctx.fillStyle = '#c8d2e0'; ctx.font = '10px Consolas, monospace'; ctx.textAlign = 'left';
+  ctx.fillText(String(maxFold), x0 + bw + 4, y0 + 8);
+  ctx.fillText('0', x0 + bw + 4, y0 + bh);
+  ctx.fillStyle = '#9fb0c4'; ctx.fillText('fold', x0, y0 - 4);
 }
 
 /** Attach wheel-zoom / drag-pan / hover to the grid canvas (once, at init). */
@@ -2338,6 +2444,13 @@ function init() {
     // Toggling off drops any shot emphasis; on triggers a lazy first fetch via refreshSps.
     if (!spsShowXrefs()) highlightedShot = null;
     void refreshSps();
+  });
+  // Fold/coverage: toggling on triggers a lazy first fetch via refreshSps.
+  $opt('spsShowFold')?.addEventListener('change', () => void refreshSps());
+  // Bin-size change invalidates the cached fold grid; refetch only if it's on.
+  $opt('spsBinSize')?.addEventListener('change', () => {
+    spsFold = null; spsFoldBin = 0;
+    if (spsShowFold()) void refreshSps();
   });
   $('viewGrid').addEventListener('click', () => setView('grid'));
   $('viewMap').addEventListener('click', () => setView('map'));

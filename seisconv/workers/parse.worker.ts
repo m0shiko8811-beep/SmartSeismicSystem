@@ -21,7 +21,7 @@ let currentSPSFiles: { name: string; text: string; type: 'S' | 'R' | 'X' | 'mixe
 
 interface Req {
   id: number;
-  type: 'open' | 'trace' | 'section' | 'convert' | 'convertPath' | 'reset' | 'openSPS' | 'spsGeometry' | 'spsXrefLines' | 'spsQC' | 'spsPointDetail' | 'spsReproject' | 'semblance';
+  type: 'open' | 'trace' | 'section' | 'convert' | 'convertPath' | 'reset' | 'openSPS' | 'spsGeometry' | 'spsXrefLines' | 'spsFold' | 'spsQC' | 'spsPointDetail' | 'spsReproject' | 'semblance';
   path?: string;
   paths?: string[];
   qc?: QCParams;
@@ -49,6 +49,9 @@ interface Req {
   agc?: boolean;
   agcType?: AGCType;
   agcWindowMs?: number;
+  // spsFold: CMP bin dimensions (projected units, e.g. metres).
+  binX?: number;
+  binY?: number;
 }
 
 function summarize(pf: ParsedFile) {
@@ -256,6 +259,116 @@ port.on('message', (req: Req) => {
       port.postMessage(
         { id, ok: true, geo, sx, sy, rx, ry, shot, shotKeys, decimated, log },
         [sx.buffer, sy.buffer, rx.buffer, ry.buffer, shot.buffer] as ArrayBuffer[],
+      );
+      return;
+    }
+
+    // FOLD / coverage bin map: count CMP midpoints ((shot+receiver)/2) per bin.
+    // Reuses the EXACT xref-expansion logic from spsXrefLines (srcMap/rcvMap +
+    // SPS2.1 incr-1 / legacy rcvPtIncr range walk), but instead of emitting a
+    // segment per (shot, receiver) pair it accumulates the midpoint into a 2-D
+    // bin grid. Always works in PROJECTED E/N (fold maps are a planning view).
+    if (type === 'spsFold') {
+      if (!currentSPS) {
+        port.postMessage({ id, ok: false, error: 'no SPS loaded' });
+        return;
+      }
+      const num = (v: unknown): number => (typeof v === 'number' ? v : parseFloat(String(v)));
+      const binX = num(req.binX) > 0 ? num(req.binX) : 25;
+      const binY = num(req.binY) > 0 ? num(req.binY) : 25;
+
+      // Same lookup maps as spsXrefLines: trimmed(line)|point → SPSPoint.
+      const srcMap = new Map<string, SPSPoint>();
+      for (const s of currentSPS.sources) srcMap.set(`${(s.lineName || '').trim()}|${s.point}`, s);
+      const rcvMap = new Map<string, SPSPoint>();
+      for (const r of currentSPS.receivers) rcvMap.set(`${(r.lineName || '').trim()}|${r.point}`, r);
+
+      const xrefs = currentSPS.xrefs;
+
+      // Cap total CMP pairs. First count how many a full pass would emit, then
+      // decimate the xref LIST by a stride (keep every Nth xref) if over.
+      const MAX_PAIRS = 2_000_000;
+      let wouldEmit = 0;
+      for (const x of xrefs) {
+        const from = num(x.rcvPtFrom), to = num(x.rcvPtTo);
+        if (!isFinite(from) || !isFinite(to)) continue;
+        const incr = x.layout === 'SPS2.1' ? 1 : Math.max(1, num(x.rcvPtIncr) || 1);
+        if (to >= from) wouldEmit += Math.floor((to - from) / incr) + 1;
+      }
+      const xrefStride = wouldEmit > MAX_PAIRS ? Math.ceil(wouldEmit / MAX_PAIRS) : 1;
+      const decimated = xrefStride > 1;
+
+      // FIRST PASS: walk every (shot, receiver) pair, accumulate midpoints into a
+      // flat buffer AND track the midpoint extent. We materialize midpoints once
+      // (Float64) so the second binning pass is a cheap index loop.
+      const mx: number[] = [];
+      const my: number[] = [];
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      for (let xi = 0; xi < xrefs.length; xi++) {
+        if (decimated && xi % xrefStride !== 0) continue;
+        const x = xrefs[xi];
+        const shot = srcMap.get(`${String(x.srcLine).trim()}|${num(x.srcPt)}`);
+        if (!shot) continue;
+        const sx = shot.easting, sy = shot.northing;
+        if (!isFinite(sx) || !isFinite(sy)) continue;
+        const rcvLine = String(x.rcvLineFrom).trim();
+        const from = num(x.rcvPtFrom), to = num(x.rcvPtTo);
+        if (!isFinite(from) || !isFinite(to) || to < from) continue;
+        const incr = x.layout === 'SPS2.1' ? 1 : Math.max(1, num(x.rcvPtIncr) || 1);
+        for (let rp = from; rp <= to; rp += incr) {
+          const rcv = rcvMap.get(`${rcvLine}|${rp}`);
+          if (!rcv) continue;
+          const rx = rcv.easting, ry = rcv.northing;
+          if (!isFinite(rx) || !isFinite(ry)) continue;
+          const cx = (sx + rx) / 2, cy = (sy + ry) / 2;
+          mx.push(cx); my.push(cy);
+          if (cx < minX) minX = cx;
+          if (cx > maxX) maxX = cx;
+          if (cy < minY) minY = cy;
+          if (cy > maxY) maxY = cy;
+        }
+      }
+
+      const totalMid = mx.length;
+      if (totalMid === 0 || !isFinite(minX)) {
+        port.postMessage({ id, ok: false, error: 'no CMP midpoints (need matching S/R points referenced by X-refs)' });
+        return;
+      }
+
+      // Grid dimensions, row-major (iy * nx + ix).
+      const nx = Math.ceil((maxX - minX) / binX) + 1;
+      const ny = Math.ceil((maxY - minY) / binY) + 1;
+
+      // Guard: clamp total cells to a sane cap; ask for a bigger bin if exceeded.
+      const MAX_CELLS = 4_000_000;
+      if (nx * ny > MAX_CELLS) {
+        const ext = `${Math.round(maxX - minX)} × ${Math.round(maxY - minY)} units`;
+        port.postMessage({
+          id, ok: false,
+          error: `bin too small: ${nx} × ${ny} = ${nx * ny} cells exceeds the ${MAX_CELLS} cell cap for a ${ext} midpoint extent. Increase the bin size.`,
+        });
+        return;
+      }
+
+      // SECOND PASS: bin the midpoints.
+      const fold = new Int32Array(nx * ny);
+      let maxFold = 0;
+      for (let i = 0; i < totalMid; i++) {
+        let ix = Math.floor((mx[i] - minX) / binX);
+        let iy = Math.floor((my[i] - minY) / binY);
+        if (ix < 0) ix = 0; else if (ix >= nx) ix = nx - 1;
+        if (iy < 0) iy = 0; else if (iy >= ny) iy = ny - 1;
+        const v = ++fold[iy * nx + ix];
+        if (v > maxFold) maxFold = v;
+      }
+
+      const log = decimated
+        ? `Fold map decimated: ~${wouldEmit} CMP pairs > ${MAX_PAIRS} cap; kept every ${xrefStride}${xrefStride === 2 ? 'nd' : xrefStride === 3 ? 'rd' : 'th'} xref → ${totalMid} midpoints. Bin ${binX}×${binY}, grid ${nx}×${ny}, max fold ${maxFold}.`
+        : `Fold map: ${totalMid} CMP midpoints, bin ${binX}×${binY}, grid ${nx}×${ny}, max fold ${maxFold}.`;
+
+      port.postMessage(
+        { id, ok: true, nx, ny, binX, binY, originX: minX, originY: minY, fold, maxFold, totalMid, decimated, log },
+        [fold.buffer] as ArrayBuffer[],
       );
       return;
     }

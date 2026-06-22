@@ -357,6 +357,14 @@ ipcMain.handle('seisconv:spsXrefLines', async (_e, geo: boolean) => {
   return { geo: r.geo, sx: r.sx, sy: r.sy, rx: r.rx, ry: r.ry, shot: r.shot, shotKeys: r.shotKeys, decimated: r.decimated, log: r.log };
 });
 
+// FOLD / coverage bin map: CMP-midpoint counts per bin, as a row-major Int32
+// grid (nx × ny) anchored at (originX, originY) in projected E/N.
+ipcMain.handle('seisconv:spsFold', async (_e, opts: { binX: number; binY: number }) => {
+  const r = await callWorker<{ ok: boolean; error?: string } & Record<string, any>>({ type: 'spsFold', binX: opts?.binX, binY: opts?.binY });
+  if (!r.ok) throw new Error(r.error || 'sps fold failed');
+  return { nx: r.nx, ny: r.ny, binX: r.binX, binY: r.binY, originX: r.originX, originY: r.originY, fold: r.fold, maxFold: r.maxFold, totalMid: r.totalMid, decimated: r.decimated, log: r.log };
+});
+
 ipcMain.handle('seisconv:spsQC', async (_e, qc: Record<string, number>) => {
   const r = await callWorker<{ ok: boolean; results?: unknown[]; error?: string }>({ type: 'spsQC', qc });
   if (!r.ok) throw new Error(r.error || 'QC failed');
