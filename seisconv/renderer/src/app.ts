@@ -2566,10 +2566,12 @@ function clickGrid(e: MouseEvent) {
 // ── Real basemap (Leaflet, geographic) ──
 function ensureMap() {
   if (leafletMap) return;
-  const dark = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap, © CARTO' });
-  const sat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19, attribution: 'Esri World Imagery' });
-  const streets = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' });
-  leafletMap = L.map('spsMap', { layers: [dark], preferCanvas: true });
+  // maxZoom 24 with per-source maxNativeZoom lets the basemap keep zooming PAST the
+  // tile providers' native levels (upscaled) for sub-meter survey detail.
+  const dark = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png', { maxZoom: 24, maxNativeZoom: 20, attribution: '© OpenStreetMap, © CARTO' });
+  const sat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 24, maxNativeZoom: 21, attribution: 'Esri World Imagery' });
+  const streets = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 24, maxNativeZoom: 19, attribution: '© OpenStreetMap' });
+  leafletMap = L.map('spsMap', { layers: [dark], preferCanvas: true, maxZoom: 24, zoomSnap: 0.5 });
   L.control.layers({ Dark: dark, Satellite: sat, Streets: streets }).addTo(leafletMap);
   leafletMap.setView([32, 35], 6);
 }
