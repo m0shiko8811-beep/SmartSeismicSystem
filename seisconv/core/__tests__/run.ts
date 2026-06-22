@@ -6,7 +6,7 @@
 //   cd seisconv && npx --yes tsx core/__tests__/run.ts
 //
 // Validates the ported parsers/writers/coords against the real sample data in
-// D:\Projects\SeisconvApp\Data_Games (round-trip invariants + golden-value print).
+// the directory pointed to by SEISCONV_DATA (round-trip invariants + golden-value print).
 
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import assert from 'node:assert/strict';
@@ -51,7 +51,8 @@ import {
 } from '../index';
 import { bytesToBase64, base64ToBytes } from '../base64';
 
-const DATA = process.env.SEISCONV_DATA || 'D:/Projects/SeisconvApp/Data_Games';
+const DATA = process.env.SEISCONV_DATA || '';
+if (!DATA) { console.warn('SEISCONV_DATA not set — file-backed tests will be skipped (unit-only mode).'); }
 const SEGY = `${DATA}/00000186_SegY_Rev2.segy`;
 const GEODE = `${DATA}/1006.dat`;
 const BATCH_DIR = `${DATA}/Raw Original Data/GP_393_26_SegY`;

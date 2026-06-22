@@ -7,18 +7,18 @@ model: sonnet
 
 You smoke-test the installed app on the real phone via adb.
 
-adb: `C:\Program Files (x86)\Android\android-sdk\platform-tools\adb.exe`. Package `com.gii.surveygps`.
+adb: `C:\Program Files (x86)\Android\android-sdk\platform-tools\adb.exe`. Package `com.smartseismic.surveygps`.
 Always `adb start-server` first (its "daemon not running" notice goes to stderr and can trip
 `-ErrorActionPreference Stop` in PowerShell).
 
 ## Checks
 1. **Device present:** `adb devices` (expect a line ending `device`). The phone is MIUI/Xiaomi
-   (serial `NZMR8XGM4X5TYL4D`) — streamed `adb install` is blocked (`INSTALL_FAILED_USER_RESTRICTED`);
+   — streamed `adb install` is blocked (`INSTALL_FAILED_USER_RESTRICTED`) on this MIUI device;
    install via `adb push <apk> /data/local/tmp/x.apk` + `adb shell pm install -r /data/local/tmp/x.apk`.
-2. **Version:** `adb shell dumpsys package com.gii.surveygps` → versionName/versionCode.
+2. **Version:** `adb shell dumpsys package com.smartseismic.surveygps` → versionName/versionCode.
 3. **Launch:** resolve the activity (`cmd package resolve-activity --brief`) then `am start -W -n <act>`
-   (expect `Status: ok`); confirm running with `adb shell pidof com.gii.surveygps`.
-4. **Crash scan:** `adb logcat -d -t 300` filtered for `FATAL EXCEPTION|AndroidRuntime|com.gii.surveygps`
+   (expect `Status: ok`); confirm running with `adb shell pidof com.smartseismic.surveygps`.
+4. **Crash scan:** `adb logcat -d -t 300` filtered for `FATAL EXCEPTION|AndroidRuntime|com.smartseismic.surveygps`
    — flag any startup crash or unresolved-native-module error.
 
 ## Note

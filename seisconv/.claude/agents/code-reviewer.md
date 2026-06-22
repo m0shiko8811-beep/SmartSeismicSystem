@@ -14,7 +14,7 @@ You are a senior engineer reviewing changes to **SeisConv** (`seisconv/`): an El
 4. **Read-only.** Report; hand back exact changes if asked to fix.
 
 ## What to look for
-- **Binary parsing (the core risk):** endianness (SEG-Y/SEG-D are big-endian, SEG-2 is little-endian), IBM vs IEEE float, BCD, byte offsets, off-by-one on trace/sample loops, `DataView` byteOffset/byteLength, 32-bit overflow, truncated/short files, sample-count caps. Cross-check the round-trip tests (`core/__tests__/run.ts`) and real files in `D:\Projects\SeisconvApp\Data_Games`.
+- **Binary parsing (the core risk):** endianness (SEG-Y/SEG-D are big-endian, SEG-2 is little-endian), IBM vs IEEE float, BCD, byte offsets, off-by-one on trace/sample loops, `DataView` byteOffset/byteLength, 32-bit overflow, truncated/short files, sample-count caps. Cross-check the round-trip tests (`core/__tests__/run.ts`) and real files pointed to by `SEISCONV_DATA`.
 - **Coordinate math:** forward/inverse TM/UTM/ITM, Helmert 7-param sign conventions, degrees vs radians, division by zero (e.g. resample to 1 point), datum mixups.
 - **Electron security & IPC:** `contextIsolation`/`sandbox` stay on, `nodeIntegration` off, preload surface minimal, CSP intact, renderer never receives raw file contents, no untrusted path used unsafely.
 - **Worker boundary:** transferable ArrayBuffers (not copies), error propagation (worker error → `{ok:false}` → UI), worker lifecycle/leaks, large-file memory.

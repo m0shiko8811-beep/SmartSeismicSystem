@@ -1,156 +1,227 @@
 <p align="center">
-  <img src="docs/logo.png" alt="SmartSeismicSystem" width="340"/>
+  <img src="docs/logo.png" alt="SmartSeismicSystem" width="320"/>
 </p>
 
 <h1 align="center">SmartSeismicSystem</h1>
 <p align="center"><strong>Pinpoint the source. Own the future.</strong></p>
-<p align="center">Centimeter-accurate RTK GPS + millisecond-precise (nanosecond-capable) seismic shot timing — on hardware and code built in-house.</p>
+<p align="center">
+  One platform — centimeter RTK positioning, millisecond-precise shot timing, and a full desktop seismic data toolkit.
+</p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/MCU-ESP32-000000?logo=espressif&logoColor=white" alt="ESP32"/>
   <img src="https://img.shields.io/badge/App-Expo_SDK_56-1B1F23?logo=expo&logoColor=white" alt="Expo SDK 56"/>
-  <img src="https://img.shields.io/badge/RTK-cm--level-00E676" alt="RTK cm-level"/>
+  <img src="https://img.shields.io/badge/RTK-cm--level-00C853" alt="RTK cm-level"/>
   <img src="https://img.shields.io/badge/BLE-encrypted-0A84FF?logo=bluetooth&logoColor=white" alt="BLE encrypted"/>
+  <img src="https://img.shields.io/badge/Desktop-Electron_33-47848F?logo=electron&logoColor=white" alt="Electron 33"/>
+  <img src="https://img.shields.io/badge/license-proprietary-red" alt="Proprietary"/>
   <img src="https://img.shields.io/badge/release-v2.8.1-blue" alt="release v2.8.1"/>
 </p>
 
 ---
 
-## What it is
+## Overview
 
-**A multipurpose seismic field system: RTK survey positioning _and_ a universal source trigger — in one phone-sized device.**
+SmartSeismicSystem is a personal engineering project — three shippable products in one monorepo, covering the full seismic acquisition workflow from field hardware to desktop QC.
 
-> **RTK GPS gives the _where_. The source trigger gives the _when_.**
-> Every shot point is geolocated to the **centimeter** and timestamped to the **millisecond** — replacing bulky, expensive commercial _positioning **and** trigger_ gear with a phone + a matchbox-sized box.
->
-> _Millisecond-precise today; the u-blox UBX-NAV-PVT time base is nanosecond-resolution, so the design is **nanosecond-capable** once a PPS input is added._
+| Product | Layer | Ships as |
+|---|---|---|
+| [`firmware/`](firmware/) | Hardware — ESP32 trigger + RTK GPS | `firmware.bin` (PlatformIO / esptool) |
+| [`app/`](app/) | Field — Android survey + trigger app | Android APK (self-signed) |
+| [`seisconv/`](seisconv/) | Office — desktop seismic data toolkit | Windows NSIS installer; macOS DMG / Linux AppImage targets defined |
 
-**Two jobs, one box:**
+The firmware and app work together as the **field system**: the device fixes centimeter positions and captures millisecond shot times; the app is the control surface and data logger. SeisConv is the **office tool**: it reads, converts, inspects, and QC-checks seismic data files produced by acquisition systems — useful independently, not tightly coupled to the field hardware.
 
-1. **Survey** — lay out & record source/receiver points at cm RTK accuracy (lines/stations, 5-point averaging, stakeout, QC, ITM/EPSG export).
-2. **Trigger** — capture the exact instant energy enters the ground, geolocated + timestamped.
+---
 
-**Source-agnostic — that's the game.** The trigger fires on any **contact closure or trigger pulse**, so it works across essentially every seismic source:
+## Products
 
-- 🔨 **Hammer & plate** · weight-drop
-- 💥 **Explosive shots / blasts** — blaster fire / shot-break
-- 🚛 **Vibroseis** — mechanical _and_ hydraulic vibrators (time-break / start-of-sweep)
-- ➕ …and anything else that closes a contact or emits a pulse (with simple signal interfacing)
+### firmware/ — ESP32 trigger device
 
-### Under the hood
+The hardware layer. An ESP32 paired with a u-blox NEO-M9N RTK GPS module provides centimeter positioning and millisecond shot timing over encrypted BLE.
 
-- 🛰️ **`firmware/`** — ESP32 + u-blox RTK-GPS: centimeter positioning, a GPIO32 falling-edge ISR shot trigger with millisecond UBX-NAV-PVT timestamps (nanosecond-resolution time base), RTCM relay over **encrypted** BLE, LittleFS waypoint/shot storage.
-- 📱 **`app/`** — Expo SDK 56 / React Native: BLE link, NTRIP correction relay, live Leaflet map, survey + averaging, the **Shots** tab, stakeout, QC, and CSV/photo export in ITM / EPSG.
-- 🖥️ **`seisconv/`** — desktop seismic-data toolkit (Electron + a pure-TypeScript engine): read & convert SEG-Y · SEG-D · SEG-2 / Geode · SU, with parsing/processing on a worker thread so large files don't block the UI. _(in active development)_
+- GPIO32 falling-edge ISR captures the shot instant; timestamp comes from UBX-NAV-PVT (millisecond precision, nanosecond-resolution time base)
+- Source-agnostic: fires on any contact closure — hammer/plate, weight-drop, explosive shot-break, vibroseis time-break/start-of-sweep
+- BLE encrypted (Secure Connections + bonding); RTCM relay from phone to GPS chip
+- LittleFS waypoint and shot storage; RGB status LED
 
-## Features
+**Status: working, field-tested hardware.**
 
-| | |
-|---|---|
-| 🎯 **Centimeter RTK** | u-blox multi-band + NTRIP corrections relayed phone → device |
-| ⏱️ **Millisecond shots** (ns-capable) | any source — hammer / blast / vibroseis → ISR → UBX-NAV-PVT timestamp |
-| 📡 **Survey** | line/station numbering, 5-point averaging, retake |
-| 🗺️ **Live map** | Leaflet / OSM, offline tile cache, waypoint + shot layers |
-| 🧭 **Stakeout** | navigate to planned points |
-| ✅ **QC** | duplicate / no-fix / accuracy / station-gap checks |
-| 📤 **Export** | CSV (ITM / EPSG), KML, photos; raw NMEA log |
-| 🔊 **Field UX** | voice prompts + shot / waypoint sounds |
+See [firmware/README.md](firmware/README.md) for wiring, build, and flash instructions.
 
-## Screenshots
+---
+
+### app/ — Survey GPS (Android)
+
+The field control surface. An Expo SDK 56 / React Native app that connects to the ESP32 over BLE and handles NTRIP correction relay, survey data recording, and export.
+
+- RTK Fix quality 4 yields 1-2 cm horizontal accuracy (per u-blox NEO-M9N + `hdopToAccuracy()` logic)
+- NTRIP 1.0 (ICY 200 OK) and 2.0 correction relay; credentials stored in the OS keystore
+- Survey screen: line/station/step numbering, 5-point averaging, retake-last-N, accuracy filter
+- Shots tab: GPIO32 trigger config (edge, debounce), shot list, CSV export, shot-plan import
+- Live Leaflet / OpenStreetMap map: position + accuracy circle, per-line polylines, stakeout navigation
+- QC: duplicate / no-fix / poor-accuracy / station-gap checks
+- Export: CSV (ITM / EPSG), KML, photos, raw NMEA log; voice prompts and shot/waypoint sounds
+
+**Status: working Android app, v2.8.1 (versionCode 281). Requires the ESP32 device.**
+
+See [app/README.md](app/README.md) for build and install instructions.
 
 <p align="center">
-  <img src="docs/media/app-survey.png" width="30%" alt="Survey — waypoint numbering & stakeout"/>
+  <img src="docs/media/app-survey.png" width="30%" alt="Survey screen — waypoint numbering and stakeout"/>
   &nbsp;
-  <img src="docs/media/app-shots.png" width="30%" alt="Shots — trigger config (edge / debounce)"/>
+  <img src="docs/media/app-shots.png" width="30%" alt="Shots tab — trigger config (edge / debounce)"/>
   &nbsp;
-  <img src="docs/media/app-settings.png" width="30%" alt="Settings — device & NTRIP casters"/>
+  <img src="docs/media/app-settings.png" width="30%" alt="Settings — device and NTRIP caster setup"/>
 </p>
+<p align="center"><sub>Survey numbering &amp; stakeout · shot-trigger config · device &amp; NTRIP caster setup</sub></p>
 
-<p align="center"><sub>Survey numbering &amp; stakeout · shot-trigger config (edge / debounce / apply-to-device) · device &amp; NTRIP caster setup</sub></p>
+---
 
-## Architecture
+### seisconv/ — SeisConv desktop seismic toolkit
+
+The office layer. A cross-platform Electron desktop app with a pure-TypeScript parsing core. Reads, converts, inspects, views, and QC-checks seismic data.
+
+- **Formats:** SEG-Y Rev 0/1/2, SEG-D Rev 1/3, SEG-2 / Geode `.dat`, Seismic Unix (SU), tape image (`.tpimage`) — read; SEG-Y, SEG-2, SU, tape image, CSV — write; SEG-D write is experimental (not validated against vendor tools). Single-file or whole-folder batch conversion with a save wizard, live progress, and cancel
+- **5-tab UI:** Converter, Trace Inspector (wiggle + FFT spectrum), File Viewer (variable-density / wiggle / variable-area, 4 colormaps, gain/AGC), SPS 2.1 (survey grid + real basemap, QC, EPSG reprojection export), Velocity (NMO semblance, pick + export CSV)
+- Worker-thread architecture: large files never block the UI
+- 50 core unit tests; real-data QC harness against a field file corpus
+
+**Status: working desktop app. Windows NSIS installer (unsigned — Windows SmartScreen will warn on first run). macOS DMG and Linux AppImage targets are defined but not yet built or distributed.**
+
+See [seisconv/README.md](seisconv/README.md) for full feature details, build instructions, and format notes.
+
+<p align="center">
+  <img src="seisconv/design/previews/gui-C.png" width="80%" alt="SeisConv — Converter"/>
+</p>
+<p align="center"><sub>SeisConv — Converter (single-file &amp; folder-batch, with a save wizard and live progress)</sub></p>
+
+---
+
+## Repository structure
+
+```
+SmartSeismicSystem/
+├── firmware/          ESP32 trigger + RTK GPS (C++ / Arduino / PlatformIO)
+├── app/               Survey GPS Android app (Expo SDK 56 / React Native / TypeScript)
+├── seisconv/          SeisConv desktop toolkit (Electron 33 + TypeScript)
+└── docs/              Logo, social preview, and app screenshots
+```
+
+---
+
+## System architecture
 
 ```mermaid
 flowchart LR
-  ANT([GNSS antenna]) --> GPS[u-blox RTK GPS]
-  GPS -->|"NMEA + UBX · UART 38400"| ESP[ESP32]
-  ESP -->|"RTCM + config"| GPS
-  SRC([Source: hammer · blast · vibro]) -->|"trigger → GPIO32 ISR"| ESP
+  ANT([GNSS antenna]) --> GPS[u-blox NEO-M9N RTK]
+  GPS -->|"NMEA + UBX-NAV-PVT · UART 38400"| ESP[ESP32]
+  ESP -->|"RTCM config"| GPS
+  SRC([Source: hammer / blast / vibroseis]) -->|"trigger pulse → GPIO32 ISR"| ESP
   ESP <-->|"encrypted BLE"| PHONE[Android app]
   PHONE -->|"internet"| NTRIP[(NTRIP caster)]
-  NTRIP -->|"RTCM"| PHONE
-  ESP -->|"GPIO25-27"| LED[RGB status LED]
+  NTRIP -->|"RTCM3 corrections"| PHONE
+  ESP -->|"GPIO 25-27"| LED[RGB status LED]
+  PHONE -->|"CSV / KML / NMEA"| OFFICE[Office / SeisConv]
 ```
 
-**Wiring (ESP32):**
+**ESP32 wiring:**
 
-| Pin | To | Notes |
+| Pin | Connected to | Notes |
 |---|---|---|
-| `GPIO16` / `GPIO17` | GPS TX / RX | UART1, 38400 8N1 |
-| `GPIO25` / `26` / `27` | RGB LED R / G / B | status |
-| `GPIO32` | hammer (plate → GND) | `INPUT_PULLUP`, falling-edge = shot |
+| GPIO16 / GPIO17 | GPS TX / RX | UART1, 38400 8N1 |
+| GPIO25 / 26 / 27 | RGB LED R / G / B | status indicator |
+| GPIO32 | trigger input (contact to GND) | INPUT_PULLUP, falling-edge = shot |
 
-### How to wire it
+---
 
-```mermaid
-flowchart LR
-  BATT([5V USB / power bank]) -->|"5V · GND"| ESP[ESP32]
-  ANT([GNSS antenna]) --> GPS[u-blox GPS]
-  GPS -->|"TX → GPIO16"| ESP
-  ESP -->|"GPIO17 → RX · 3V3 · GND"| GPS
-  ESP -->|"R/G/B → GPIO25/26/27"| RGB[RGB LED]
-  RGB -->|"– → GND"| ESP
-  HAMMER([Hammer]) -->|"→ GPIO32"| ESP
-  PLATE([Steel plate]) -->|"→ GND"| ESP
-  ESP <-->|"encrypted BLE"| PHONE[Android phone]
+## Quickstart
+
+### Firmware
+
+```bash
+# requires PlatformIO
+cd firmware
+pio run -t upload
 ```
+
+Or flash a prebuilt `firmware.bin` from [Releases](../../releases) with esptool:
+
+```bash
+esptool.py --chip esp32 write_flash 0x10000 firmware.bin
+```
+
+### App
+
+```bash
+# builds on the Linux build server via app/build.ps1
+# prebuilt APK is attached to each tagged release
+adb install SmartSeismicSurvey-v2.8.1.apk
+```
+
+See [app/README.md](app/README.md) for the full build pipeline.
+
+### SeisConv
+
+```bash
+cd seisconv
+npm install
+npm test        # run the core unit tests (50)
+npm start       # build and launch
+npm run dist    # package an NSIS installer (Windows)
+```
+
+---
 
 ## Roadmap
 
-**Universal trigger**
+**Near term**
+- PPS input on GPIO for sub-millisecond shot timing (the u-blox time base is already nanosecond-resolution; a PPS wire is the only gap)
+- Opto-isolated trigger inputs for compatibility with blaster fire / shot-break signals
+- SEG-D write validation against Sercel / ION / Geospace acquisition tools
 
-- 💥 **Any source, one box** — opto-isolated inputs so the same unit fires on blaster fire / shot-break, vibroseis time-break, weight-drop, or a hammer/plate contact.
-- 🎯 **Sub-millisecond timing** — wire the receiver's PPS pin to push shot times from millisecond toward microsecond / nanosecond class.
-- 🛰️ **Multi-unit time sync** — many trigger / rover units sharing one GNSS time base across a spread, so every source is on the same clock.
-- 🔗 **Recorder / SEG-Y hooks** — feed precise shot times + cm positions straight into the processing chain.
+**Longer term**
+- Multi-unit time sync across a spread on one GNSS time base
+- "Waze for vibroseis fleets" — live fleet map with routing to source points and full offline operation
+- Real-time field QC — flag bad or mis-positioned shots while the crew is still on site
+- Recorder / SEG-Y hooks — feed precise shot times and cm positions straight into the processing chain
 
-**Bigger picture**
-
-- 🚜 **"Waze" for vibroseis fleets** — a live fleet map with turn-by-turn routing to every source point in the optimal order, real-time progress, and full **offline** operation in no-signal terrain.
-- 🤖 **Autonomous source vehicles** — a staged climb from driver-assist to self-positioning at the source point: smaller crews, 24/7 acquisition, perfectly repeatable cm placement.
-- 📟 **The trigger in your pocket** — a phone + a matchbox-sized box replacing bulky, vendor-locked commercial trigger/timing units.
-- 🛰️ **Be your own RTK base** — broadcast your own corrections for centimeter accuracy **anywhere**, no NTRIP subscription and no cell coverage needed.
-- 🧠 **Real-time field QC** — flag bad, missed, or mis-positioned shots while the crew is _still on site_, killing the cost of re-mobilizing.
-- 📊 **Productivity dashboard** — shots/hour, coverage %, and downtime at a glance for the crew chief and the office.
-- 🧩 **One platform, many products** — survey rover, source trigger, fleet nav, and autonomy on one codebase **you own** — something to license or sell, not just an internal tool.
-
-## Build & flash
-
-- **App** — `build.ps1` builds on the build server and installs to the phone (MIUI-safe). Or grab the prebuilt APK from Releases.
-- **Firmware** — PlatformIO (`pio run -t upload`), or flash `firmware.bin` from a release with esptool. BLE is encrypted — pair with the device passkey on first connect.
+---
 
 ## Releases
 
-Prebuilt **Android APK** + ESP32 **firmware.bin** are attached to each tagged release → [**v2.8.1**](../../releases/tag/v2.8.1).
+Prebuilt **Android APK** and ESP32 **firmware.bin** are attached to each tagged release.
+The **SeisConv Windows installer** is included from the first SeisConv release onward.
 
-## Credits & licenses
+See [Releases](../../releases) for the latest.
 
-Standing on these open-source projects — all permissively licensed (safe for private & commercial use; none forces opening this project's source):
+---
+
+## License
+
+Copyright (c) 2026 Moshe Fridin. All rights reserved.
+This repository is proprietary and confidential. See [LICENSE](LICENSE).
+
+Third-party open-source dependencies remain under their own licenses; see Credits below.
+
+---
+
+## Credits
 
 **Firmware**
-- [TinyGPSPlus](https://github.com/mikalhart/TinyGPSPlus) — Mikal Hart · LGPL-2.1
-- ESP32 Arduino core & bundled libraries (BLE, LittleFS, Preferences) — Espressif / Arduino · Apache-2.0 / LGPL-2.1
+- [TinyGPSPlus](https://github.com/mikalhart/TinyGPSPlus) — Mikal Hart, LGPL-2.1
+- ESP32 Arduino core and bundled libraries (BLE, LittleFS, Preferences) — Espressif / Arduino, Apache-2.0 / LGPL-2.1
 
 **App**
-- React Native · Expo SDK & modules · React Navigation — MIT
+- React Native, Expo SDK 56 and modules, React Navigation — MIT
 - react-native-ble-plx — Apache-2.0
-- react-native-tcp-socket · react-native-webview · react-native-svg · gesture-handler · screens · safe-area-context · async-storage · jszip — MIT
-- [Leaflet](https://leafletjs.com) (BSD-2-Clause) + leaflet-rotate (MIT) for the map
+- react-native-tcp-socket, react-native-webview, react-native-svg, gesture-handler, screens, safe-area-context, async-storage, jszip — MIT
+- [Leaflet](https://leafletjs.com) — BSD-2-Clause; leaflet-rotate — MIT
+- Map data: OpenStreetMap contributors — ODbL; used per the [OSM tile usage policy](https://operations.osmfoundation.org/policies/tiles/)
 
-**Map data**
-- © OpenStreetMap contributors — tiles under the [ODbL](https://www.openstreetmap.org/copyright), used per the OSM tile usage policy.
-
-_Audited 2026-06-03: all dependencies are mainstream and permissively licensed; the only standing obligation (OpenStreetMap attribution) is honored above._
+**SeisConv**
+- Electron — MIT; electron-builder — MIT
+- esbuild — MIT
 
 ---
 

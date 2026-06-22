@@ -96,7 +96,7 @@ All notable changes to the GPS Survey Tool are documented here.
 - **NTRIP header parser**: NTRIP 1.0 casters (including rtk2go.com) send `ICY 200 OK\r\n` followed immediately by binary RTCM data — no blank line. The parser was waiting for `\r\n\r\n` (HTTP double-CRLF) which never arrived, so the connection timed out every time even though TCP was working. Parser now handles both formats.
 - **NTRIP write timing**: added 80 ms delay before writing the HTTP GET request inside the TCP connect callback — prevents a rare Android race where the write is buffered and never flushed.
 - **Map WP/distance labels**: `L.divIcon` without `iconSize:[0,0]` defaults to Leaflet's 12×12 px clip box, cutting off the background behind labels. Fixed with `iconSize:[0,0]` on both `wpIcon` and `distIcon`.
-- **Version footer**: removed "GII" suffix.
+- **Version footer**: removed the legacy branding suffix.
 
 ### Diagnostics
 - New activity log events: `ntrip_request_sent` (fires when HTTP GET is written to socket) and `ntrip_server_data` (fires on first server byte, shows first 40 chars). These make it possible to distinguish "server not responding" from "parser failure".
@@ -212,7 +212,7 @@ All notable changes to the GPS Survey Tool are documented here.
 - New service: `src/services/activityLog.ts`
 - Appends a JSONL entry on: `app_start`, `ble_connected`, `ble_disconnected`, `wp_saved`, `avg_started`, `avg_cancelled`, `wp_retake`, `wp_cleared`, `ntrip_sent`
 - File location: `documentDirectory/activity_log.jsonl` (not exposed in any UI screen)
-- Access via ADB: `adb exec-out run-as com.gii.surveygps cat files/activity_log.jsonl`
+- Access via ADB: `adb exec-out run-as com.smartseismic.surveygps cat files/activity_log.jsonl`
 - Provides a timestamped audit trail for post-survey review without affecting the field user experience
 
 #### App Version

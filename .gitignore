@@ -3,12 +3,11 @@
 
 # Expo / React Native build output
 **/.expo/
-**/dist/
 **/web-build/
 app/android/
 app/ios/
 
-# Android artifacts
+# Android build artifacts
 *.apk
 *.aab
 *.keystore
@@ -16,7 +15,26 @@ app/ios/
 # PlatformIO (firmware) build output
 **/.pio/
 
-# Logs & OS cruft
+# SeisConv build / package output
+seisconv/dist/
+seisconv/out/
+seisconv/build/
+
+# Electron-builder release artifacts
+release/
+*.exe
+*.dmg
+*.AppImage
+*.deb
+*.rpm
+*.snap
+
+# TypeScript incremental build info
+*.tsbuildinfo
+
+# Logs and OS cruft
 *.log
 .DS_Store
 Thumbs.db
+ehthumbs.db
+Desktop.ini

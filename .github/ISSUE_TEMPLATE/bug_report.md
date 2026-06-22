@@ -1,24 +1,39 @@
 ---
 name: Bug report
-about: Something isn't working
+about: Something is broken or behaving incorrectly
 title: "[bug] "
 labels: bug
 ---
 
-**Component:** firmware / app / both
+## Component
 
-**What happened**
+- [ ] `firmware/` (ESP32)
+- [ ] `app/` (Android)
+- [ ] `seisconv/` (desktop)
 
+## What happened
 
-**Expected**
+<!-- What did you observe? -->
 
+## What was expected
 
-**Steps to reproduce**
-1.
+<!-- What should have happened? -->
 
-**Environment**
-- App version / firmware version:
-- Phone (model + Android version):
-- GPS module / link (BLE, NTRIP caster):
+## Steps to reproduce
 
-**Logs / screenshots**
+1. 
+2. 
+3. 
+
+## Environment
+
+| Item | Value |
+|---|---|
+| App version / firmware version | |
+| Phone model + Android version | |
+| GPS module / NTRIP caster (if relevant) | |
+| OS (for SeisConv) | |
+
+## Logs or screenshots
+
+<!-- Paste serial monitor output, app activity log, or screenshots here. -->

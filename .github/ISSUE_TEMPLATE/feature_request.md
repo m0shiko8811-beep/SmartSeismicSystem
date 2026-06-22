@@ -1,16 +1,24 @@
 ---
 name: Feature request
-about: Suggest an idea
+about: Suggest an improvement or new capability
 title: "[feat] "
 labels: enhancement
 ---
 
-**The problem / use case**
+## Component
 
+- [ ] `firmware/` (ESP32)
+- [ ] `app/` (Android)
+- [ ] `seisconv/` (desktop)
 
-**Proposed solution**
+## Problem or use case
 
+<!-- What situation does this address? What is currently missing or frustrating? -->
 
-**Component:** firmware / app / both
+## Proposed solution
 
-**Alternatives considered**
+<!-- Describe what you would like to see. Be as specific as you can. -->
+
+## Alternatives considered
+
+<!-- Any other approaches you thought about? -->

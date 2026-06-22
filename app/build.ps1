@@ -8,8 +8,8 @@ $ErrorActionPreference = 'Stop'
 $PLINK   = 'C:\Program Files\PuTTY\plink.exe'
 $PSCP    = 'C:\Program Files\PuTTY\pscp.exe'
 $ADB     = 'C:\Program Files (x86)\Android\android-sdk\platform-tools\adb.exe'
-$HOSTKEY = 'SHA256:Pk744LC4EAdU7CDYt2zQVjDFJ++fgKX7ThJqorg+i9Y'
-$SERVER  = 'bosman67@10.2.20.38'
+$HOSTKEY = $env:SGPS_HOSTKEY   # set to the server's SSH host-key fingerprint
+$SERVER  = $env:SGPS_SERVER    # set to user@host of the build server
 # Server SSH password — never hardcode. Provide via $env:SGPS_PW, otherwise you
 # are prompted (input hidden). NOTE: the old password was previously committed to
 # this repo — rotate it on the server and scrub it from git history.
@@ -106,7 +106,7 @@ if ($LASTEXITCODE -ne 0) {
 
 # Step 4: Download APK
 Write-Host "  [4/4] Downloading APK..." -ForegroundColor Yellow
-Download "/home/bosman67/sgps/android/app/build/outputs/apk/release/app-release.apk" $APK
+Download "~/sgps/android/app/build/outputs/apk/release/app-release.apk" $APK
 $mb = [math]::Round((Get-Item $APK).Length / 1MB, 1)
 Write-Host "         $mb MB" -ForegroundColor DarkGray
 

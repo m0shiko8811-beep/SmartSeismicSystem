@@ -1,20 +1,55 @@
 # Contributing to SmartSeismicSystem
 
-Thanks for your interest! This is a two-part project:
+This is a personal project — contributions are welcome but the scope is intentional. Read this before opening a PR.
 
-- **`firmware/`** — ESP32 / PlatformIO (Arduino C++)
-- **`app/`** — Expo SDK 56 / React Native (TypeScript)
+## What lives where
+
+| Directory | Stack | Notes |
+|---|---|---|
+| `firmware/` | C++ / Arduino / PlatformIO | ESP32, board `nodemcu-32s` |
+| `app/` | Expo SDK 56 / React Native / TypeScript | Android only |
+| `seisconv/` | Electron 33 + TypeScript | Windows / macOS / Linux |
 
 ## Getting set up
-- **Firmware:** open `firmware/` in PlatformIO; board `nodemcu-32s`; `pio run -t upload`.
-- **App:** `cd app && npm install`, then build/run via Expo. (See the README for the build pipeline.)
 
-## Before a PR
-- Keep changes focused; describe the *what* and *why*.
-- Match the surrounding style; **no secrets, keys, or credentials** in code or history.
-- **Firmware:** keep ISR work minimal and never block `loop()`.
-- **App:** use the Expo SDK 56 APIs (verify against the v56 docs).
-- Test on real hardware where you can — firmware on the ESP32, app on Android.
+**Firmware**
+```bash
+cd firmware
+# open in PlatformIO (VS Code extension or CLI)
+pio run -t upload
+```
 
-## Reporting bugs / ideas
-Open an issue using the templates. For anything security-related, see [SECURITY.md](SECURITY.md).
+**App**
+```bash
+cd app
+npm install
+# build with app/build.ps1 (requires the Linux build server)
+# or: npx expo start --android for development
+```
+
+**SeisConv**
+```bash
+cd seisconv
+npm install
+npm test        # core unit tests (50; file-backed ones skip without sample data)
+npm start       # build and launch
+```
+
+## Before opening a PR
+
+- Keep changes focused. Describe the **what** and **why** in the PR description — not just what changed.
+- Match the surrounding code style; do not introduce new linters or formatters without discussion.
+- **No secrets, keys, passkeys, or credentials** in code, comments, or git history.
+- **Firmware:** keep ISR handlers minimal; never block `loop()` or call `Serial.print` from an ISR.
+- **App:** use Expo SDK 56 APIs only — check [docs.expo.dev/versions/v56.0.0/](https://docs.expo.dev/versions/v56.0.0/) before writing any Expo call.
+- **SeisConv core:** the `core/` package must remain free of Electron and DOM imports.
+- Test on real hardware where you can — firmware changes on the ESP32 device, app changes on a physical Android phone.
+- Update the relevant README and CHANGELOG if your change affects user-facing behavior.
+
+## Reporting bugs and ideas
+
+Use the issue templates:
+- **Bug report** — something that is broken or incorrect
+- **Feature request** — an idea or proposal
+
+For security issues, see [SECURITY.md](SECURITY.md) — do not open a public issue.

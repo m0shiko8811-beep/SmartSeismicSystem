@@ -21,7 +21,7 @@
 //   (or)  npm run qc:realdata
 //
 // Config via env:
-//   SEISCONV_QC_ROOT   root dir to scan (default 'D:/Projects/SeisconvApp')
+//   SEISCONV_QC_ROOT   root dir to scan (required — no default; script exits if unset)
 //   SEISCONV_QC_FULLCAP   full-round-trip cap per format (default 40)
 //   SEISCONV_QC_MAXMB     skip files larger than this many MB (default 80)
 
@@ -41,7 +41,8 @@ import {
 import type { ParsedFile, Bytes } from '../core/index';
 
 // ── Config ──────────────────────────────────────────────────────────────────
-const ROOT = process.env.SEISCONV_QC_ROOT || 'D:/Projects/SeisconvApp';
+const ROOT = process.env.SEISCONV_QC_ROOT;
+if (!ROOT) { console.error('SEISCONV_QC_ROOT is not set. Point it at your local seismic data root.'); process.exit(1); }
 const FULL_ROUNDTRIP_CAP = Number(process.env.SEISCONV_QC_FULLCAP || 40);
 const MAX_FILE_BYTES = Number(process.env.SEISCONV_QC_MAXMB || 80) * 1024 * 1024;
 const EXTS = new Set(['sgy', 'segy', 'segd', 'seg', 'seg2', 'dat', 'bat', 'su']);
