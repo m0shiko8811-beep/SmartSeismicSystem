@@ -14,8 +14,15 @@ import {
   parseAny,
   parseSEGY,
   parseSU,
+  parseSEG2,
+  parseSEGD,
+  parseTpimage,
   writeSEGY,
   writeSU,
+  writeSEG2,
+  writeSEGD,
+  writeTapeImage,
+  writeCSV,
   detect,
   latLonToUTM,
   utmToLatLon,
@@ -509,6 +516,109 @@ test('parseAny does NOT throw on garbage / mis-detection-prone bytes', () => {
     const pf = parseAny(big, 'zero.sgy');
     assert.ok(Array.isArray(pf.traces) && Array.isArray(pf.errors), 'zero-buffer → ParsedFile');
   }, 'parseAny threw on zero buffer');
+});
+
+// ── Writers (new outputs: SEG-Y Rev 2, SEG-2, SEG-D, Tape Image, CSV) ─────────
+// Each writer is exercised offline against a synthetic ParsedFile (mkPF), so the
+// suite stays deterministic whether or not the D: sample data is present.
+console.log('\n[writers]');
+
+test('writeSEGY Rev 2 → parseSEGY re-parses with revision 2 (sample-exact)', () => {
+  const pf = mkPF([100, 100, 100]);
+  const out = writeSEGY(pf, 2);
+  const re = parseSEGY(out);
+  assert.equal(re.errors.length, 0, `errors: ${re.errors.join('; ')}`);
+  assert.equal(re.revision, 2, 'Rev 2 marker honoured');
+  assert.equal(re.traceCount, 3, 'trace count preserved');
+  assert.ok(samplesEqual(pf.traces[0].samples, re.traces[0].samples, 100), 'trace-0 samples identical');
+});
+
+// ── CSV / ASCII export (write-only) ────────────────────────────────────────────
+console.log('\n[csv]');
+test('writeCSV emits preamble, header row, and one row per sample (right column count)', () => {
+  const pf: any = {
+    format: 'SEG-Y', revision: 0,
+    bh: { sampleInt: 2000, samplesTrace: 3 },
+    traceCount: 2, errors: [],
+    traces: [
+      { hdr: {}, samples: Float32Array.from([1.5, 2.5, 3.5]), nSamples: 3 },
+      { hdr: {}, samples: Float32Array.from([10, 20]), nSamples: 2 }, // shorter trace
+    ],
+  };
+  const txt = new TextDecoder().decode(writeCSV(pf));
+  const lines = txt.trim().split('\n');
+  // preamble is '#'-commented
+  assert.ok(lines[0].startsWith('# SeisConv CSV export'), `preamble: ${lines[0]}`);
+  // header row: 'sample,time_ms,t1,t2' → 2 fixed + 2 trace columns
+  const hIdx = lines.findIndex((l) => l.startsWith('sample,'));
+  assert.ok(hIdx >= 0, 'header row present');
+  assert.equal(lines[hIdx], 'sample,time_ms,t1,t2', `header: ${lines[hIdx]}`);
+  assert.equal(lines[hIdx].split(',').length, 4, 'header has 4 columns');
+  // first data row: sample 0, time 0 ms, both trace amplitudes
+  assert.equal(lines[hIdx + 1], '0,0,1.5,10', `row0: ${lines[hIdx + 1]}`);
+  assert.equal(lines[hIdx + 1].split(',').length, 4, 'data row has 4 columns');
+  // last row: shorter trace t2 produces a trailing blank cell; time = 2*2000/1000 = 4 ms
+  assert.equal(lines[hIdx + 3], '2,4,3.5,', `last row: ${lines[hIdx + 3]}`);
+});
+
+// ── SEG-2 writer round-trip ───────────────────────────────────────────────
+console.log('\n[SEG-2 writer]');
+test('writeSEG2 → parseSEG2 round-trips traceCount and trace-0 samples', () => {
+  const ramp = (t: number, nn: number) => {
+    const s = new Float32Array(nn);
+    for (let i = 0; i < nn; i++) s[i] = (t + 1) * 1000 + i + 0.5;
+    return s;
+  };
+  const counts = [8, 256, 256]; // short first trace + full-length data traces
+  const traces = counts.map((nn, t) => ({ hdr: { channelNum: t + 1 }, samples: ramp(t, nn), nSamples: nn, dataFmt: 4 }));
+  const pf: any = { format: 'SEG-2', revision: 1, bh: { sampleInt: 2000, samplesTrace: counts[0] }, traceCount: traces.length, errors: [], traces };
+  const out = writeSEG2(pf);
+  const re = parseSEG2(out);
+  assert.equal(re.errors.length, 0, `errors: ${re.errors.join('; ')}`);
+  assert.equal(re.traceCount, pf.traceCount, 'trace count preserved');
+  const n = pf.traces[0].nSamples;
+  let maxErr = 0;
+  for (let i = 0; i < n; i++) maxErr = Math.max(maxErr, Math.abs(re.traces[0].samples![i] - pf.traces[0].samples![i]));
+  assert.ok(maxErr < 1e-3, `trace-0 samples within float tolerance (maxErr ${maxErr})`);
+});
+
+// ── SEG-D writer (round-trip) ──────────────────────────────────────────────
+console.log('\n[SEG-D writer]');
+test('writeSEGD Rev 1 → detect() = SEG-D and re-parses to >0 traces (sample-exact)', () => {
+  const pf = mkPF([100, 100, 100]);
+  const out = writeSEGD(pf, false);
+  assert.equal(detect(out), 'SEG-D', 'detect identifies SEG-D');
+  const re = parseSEGD(out);
+  assert.equal(re.errors.length, 0, `errors: ${re.errors.join('; ')}`);
+  assert.equal(re.traceCount, 3, 'trace count preserved');
+  assert.ok(samplesEqual(pf.traces[0].samples, re.traces[0].samples, 100), 'trace-0 samples identical');
+});
+test('writeSEGD Rev 3 → detect() = SEG-D, revision 3, re-parses to >0 traces', () => {
+  const pf = mkPF([100, 100, 100]);
+  const out = writeSEGD(pf, true);
+  assert.equal(detect(out), 'SEG-D', 'detect identifies SEG-D');
+  const re = parseSEGD(out);
+  assert.equal(re.errors.length, 0, `errors: ${re.errors.join('; ')}`);
+  assert.equal(re.revision, 3, 'Rev 3 marker honoured');
+  assert.ok(re.traceCount > 0, 'expected > 0 traces');
+  assert.ok(samplesEqual(pf.traces[2].samples, re.traces[2].samples, 100), 'trace-2 samples identical');
+});
+
+// ── TPIMAGE (tape image) ──────────────────────────────────────────────────────
+console.log('\n[tpimage]');
+test('writeTapeImage wraps a SEG-Y that parseTpimage + detect() recover', () => {
+  const pf = mkPF([100, 100, 100]); // reuses the run.ts mkPF helper
+  const tp = writeTapeImage(pf); // defaults: label 'ansi', volSerial 'SEI001', innerFmt 'segy1'
+  assert.equal(detect(tp, 'tape.tpimage'), 'TPIMAGE', 'image detects as TPIMAGE');
+  const files = parseTpimage(tp);
+  assert.ok(files.length >= 1, `expected >=1 embedded file, got ${files.length}`);
+  assert.equal(detect(files[0].bytes, files[0].name), 'SEG-Y', 'embedded file is SEG-Y');
+  // round-trip the embedded SEG-Y back to traces
+  const re = parseSEGY(files[0].bytes);
+  assert.equal(re.traceCount, 3, 'embedded SEG-Y trace count preserved');
+  // 'none' label mode still yields a detectable SEG-Y block
+  const raw = parseTpimage(writeTapeImage(pf, { label: 'none' }));
+  assert.ok(raw.length >= 1 && detect(raw[0].bytes, raw[0].name) === 'SEG-Y', 'unlabeled image still extracts SEG-Y');
 });
 
 // ── Summary ───────────────────────────────────────────────────────────────────

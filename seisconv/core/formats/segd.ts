@@ -5,7 +5,7 @@
 // NOTE: not covered by the bundled sample data — validate against real SEG-D
 // before relying on it.
 
-import { bcd2, r32u, rIEEE } from '../binary';
+import { bcd2, dv, r32u, rIEEE, w32 } from '../binary';
 import type { Bytes, ParsedFile, Trace } from '../types';
 
 export function parseSEGD(b: Bytes): ParsedFile {
@@ -109,4 +109,91 @@ export function parseSEGD(b: Bytes): ParsedFile {
   }
   r.traceCount = tc;
   return r;
+}
+
+/**
+ * Write traces as SEG-D (always IEEE float32, format code 0032). `rev3` selects
+ * Rev 3 (adds a General Header Block 2 with the 0xFF end marker + one extended
+ * header) versus Rev 1. Ported verbatim from the SeisConv reference writeSEGD.
+ *
+ * CAVEAT: this is a minimal, SeisConv-internal SEG-D layout — it round-trips
+ * through `parseSEGD` above but is UNVALIDATED against vendor SEG-D readers
+ * (Sercel/SEAL, ION, Geospace, etc.). The general/channel-set/extended headers
+ * carry only the fields the bundled parser needs; many standard SEG-D fields are
+ * left zero. Do not feed this to acquisition QC tooling without validating first.
+ */
+export function writeSEGD(pd: ParsedFile, rev3: boolean): Bytes {
+  const trc = pd.traces;
+  if (!trc || !trc.length) throw new Error('No traces');
+  // Samples-per-trace drives the fixed record size. The reference sizes from the
+  // first trace; keep that for numeric equivalence, but clamp per-trace writes to
+  // `spt` (below) so a later, longer trace can't overrun the DataView.
+  const spt = trc[0].nSamples;
+  const trD = spt * 4; // 4 bytes/sample (IEEE float32, code 0032)
+  const gh2 = rev3 ? 32 : 0; // General Header Block 2 (Rev 3 only)
+  const nExt = rev3 ? 1 : 0; // one extended header (Rev 3 only)
+  const off0 = 32 + gh2 + 32 + nExt * 32; // GH1 + [GH2] + channel-set + [ext]
+  const out = new Uint8Array(off0 + trc.length * (20 + trD));
+
+  // ── General Header Block 1 (32 bytes) ──
+  out[0] = 0;
+  out[1] = 1;
+  out[2] = 0;
+  out[3] = 0x32; // format code 0032 (BCD) = IEEE float32
+  const yr = new Date().getFullYear() % 100;
+  out[9] = (Math.floor(yr / 10) << 4) | (yr % 10); // year (BCD)
+  const now = new Date();
+  const jd = Math.floor((now.getTime() - new Date(now.getFullYear(), 0, 0).getTime()) / 86400000);
+  // Byte 10: hi nibble = number of additional GH blocks (parser reads this to
+  // decide whether a GH2 follows), lo nibble = Julian-day high bits.
+  out[10] = ((rev3 ? 1 : 0) << 4) | ((jd >> 8) & 0xf);
+  out[11] = jd & 0xff; // Julian day
+  out[12] = (Math.floor(now.getHours() / 10) << 4) | (now.getHours() % 10); // hour (BCD)
+  out[13] = (Math.floor(now.getMinutes() / 10) << 4) | (now.getMinutes() % 10); // minute (BCD)
+  out[14] = (Math.floor(now.getSeconds() / 10) << 4) | (now.getSeconds() % 10); // second (BCD)
+  // Bytes-per-scan in GH1 bytes 18-20 as BCD (= spt * 4 for IEEE float).
+  const bpsVal = spt * 4;
+  out[18] = ((Math.floor(bpsVal / 100000) % 10) << 4) | (Math.floor(bpsVal / 10000) % 10);
+  out[19] = ((Math.floor(bpsVal / 1000) % 10) << 4) | (Math.floor(bpsVal / 100) % 10);
+  out[20] = ((Math.floor(bpsVal / 10) % 10) << 4) | (bpsVal % 10);
+  // numChanSets (hi nibble) = 1 (a single channel-set descriptor is written in
+  // both revisions); addl GH blocks (lo nibble) = 1. The parser reads the GH2
+  // presence from byte 10's hi nibble (set above), not from here.
+  out[22] = 0x11;
+  out[23] = rev3 ? 0x10 : 0; // extHdrLen (hi nibble) | extlHdrLen (lo nibble)
+
+  let go = 32;
+  if (rev3) {
+    out[go + 31] = 0xff; // GH2 end marker → parser bumps revision to 3
+    go += 32;
+  }
+  // ── Channel Set Descriptor (32 bytes) ──
+  const cc = trc.length;
+  out[go] = 0x11;
+  out[go + 1] = 0x10;
+  out[go + 8] = (cc >> 8) & 0xf;
+  out[go + 9] = cc & 0xff; // channel count
+  out[go + 10] = 0x10; // channel type 1 (seismic) in hi nibble
+  go += 32;
+  if (rev3) go += 32; // skip the extended header block
+
+  // ── Demultiplexed trace records: 20-byte trace header + trD bytes data ──
+  let to = go;
+  for (let t = 0; t < trc.length; t++) {
+    out[to] = 0;
+    out[to + 1] = 1;
+    out[to + 2] = 0x11;
+    out[to + 3] = 0x10;
+    w32(out, to + 4, t + 1); // trace number
+    to += 20;
+    if (trc[t].samples) {
+      const sdv = dv(out);
+      // Clamp to `spt` (the allocated slot) so a longer-than-first trace can't
+      // run past the buffer end ('Offset is outside the bounds of the DataView').
+      const ns2 = Math.min(trc[t].nSamples, spt);
+      for (let i = 0; i < ns2; i++) sdv.setFloat32(to + i * 4, trc[t].samples![i] || 0, false);
+    }
+    to += trD;
+  }
+  return out;
 }

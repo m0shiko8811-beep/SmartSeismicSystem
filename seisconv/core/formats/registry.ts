@@ -8,9 +8,11 @@
 import type { Bytes, ParsedFile, SeismicFormat } from '../types';
 import { detect } from '../detect';
 import { parseSEGY, writeSEGY } from './segy';
-import { parseSEGD } from './segd';
-import { parseSEG2 } from './seg2';
+import { parseSEGD, writeSEGD } from './segd';
+import { parseSEG2, writeSEG2 } from './seg2';
 import { parseSU, writeSU } from './su';
+import { writeCSV } from './ascii';
+import { writeTapeImage } from './tapeimage';
 
 export interface FormatModule {
   id: SeismicFormat;
@@ -70,4 +72,10 @@ registerFormat({ id: 'SU', parse: parseSU });
 
 registerWriter({ id: 'segy1', label: 'SEG-Y Rev 1', ext: 'sgy', write: (pf) => writeSEGY(pf, 1) });
 registerWriter({ id: 'segy0', label: 'SEG-Y Rev 0', ext: 'sgy', write: (pf) => writeSEGY(pf, 0) });
+registerWriter({ id: 'segy2', label: 'SEG-Y Rev 2', ext: 'sgy', write: (pf) => writeSEGY(pf, 2) });
 registerWriter({ id: 'su', label: 'Seismic Unix', ext: 'su', write: writeSU });
+registerWriter({ id: 'seg2', label: 'SEG-2 / .dat', ext: 'dat', write: writeSEG2 });
+registerWriter({ id: 'segd1', label: 'SEG-D Rev 1', ext: 'segd', write: (pf) => writeSEGD(pf, false) });
+registerWriter({ id: 'segd3', label: 'SEG-D Rev 3', ext: 'segd', write: (pf) => writeSEGD(pf, true) });
+registerWriter({ id: 'tpimage', label: 'Tape Image', ext: 'tpimage', write: (pd) => writeTapeImage(pd) });
+registerWriter({ id: 'csv', label: 'CSV / ASCII', ext: 'csv', write: writeCSV });

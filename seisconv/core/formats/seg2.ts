@@ -4,7 +4,7 @@
 // free-form headers) and Geode's length-prefixed free-form variant.
 // Ported verbatim from the SeisConv reference.
 
-import { getF32, getF64 } from '../binary';
+import { dv, getF32, getF64 } from '../binary';
 import type { Bytes, ParsedFile, Trace, TraceHeader } from '../types';
 
 const ri16 = (buf: Bytes, o: number): number => buf[o] | (buf[o + 1] << 8); // always LE
@@ -197,4 +197,121 @@ export function parseSEG2(b: Bytes): ParsedFile {
   });
 
   return r;
+}
+
+// ────────────────────────────── SEG-2 writer ──────────────────────────────
+//
+// Ported faithfully from the SeisConv reference (writeSEG2file, lines ~1949-2015
+// of seisconv_v5.11_22.html). LITTLE-ENDIAN throughout. Emits a Geode-style
+// ".dat": a fixed 32-byte file descriptor block (FDB) header, an N-entry 32-bit
+// trace-pointer array, then per-trace 32-byte trace descriptor blocks (TDB) with
+// null/LT-terminated free-form string headers, followed by IEEE float32 (LE)
+// samples.
+//
+// CAVEAT: this is an approximate, lossless-for-samples SEG-2 export — it writes
+// the minimal free-form keys most readers need (SAMPLE_INTERVAL,
+// SAMPLES_PER_TRACE, CHANNEL_NUMBER, plus an FDB ACQUISITION_DATE) and always
+// uses data-format code 4 (IEEE float32). It is not a byte-for-byte reproduction
+// of an arbitrary source SEG-2.
+export function writeSEG2(pd: ParsedFile): Bytes {
+  const trc = pd.traces;
+  if (!trc || !trc.length) throw new Error('No traces');
+  // Size every slot from the LONGEST trace (not the first) so a short first
+  // trace can't under-allocate and overrun on a later, longer trace.
+  const spt = trc.reduce((m, t) => Math.max(m, t.nSamples || 0), 0) || trc[0].nSamples;
+  const si_us = pd.bh?.sampleInt || 2000;
+  const si_ms = (si_us / 1000).toFixed(6); // SEG-2 SAMPLE_INTERVAL is in ms, e.g. "2.000000"
+  const n = trc.length;
+  const LT = 0x0a; // line terminator
+  const ST = 0x00; // string terminator
+
+  // FDB free-form (acquisition date) — written between the term chars and the
+  // trace-pointer array within the fixed 32-byte FDB. One LT-terminated line,
+  // ST-terminated section. Kept short so it never collides with the ptr array.
+  const acqDate = new Date().toISOString().slice(0, 10).replace(/-/g, '/'); // YYYY/MM/DD
+
+  // Per-trace free-form header bytes (written into the TDB).
+  function makeFreeFormBytes(tr: Trace, idx: number): Bytes {
+    const ch = Number(tr.hdr?.channelNum ?? tr.hdr?.CHANNEL_NUMBER ?? idx + 1);
+    // Lines separated by LT (0x0A), section terminated by ST (0x00).
+    const text = 'SAMPLE_INTERVAL ' + si_ms + '\nSAMPLES_PER_TRACE ' + spt + '\nCHANNEL_NUMBER ' + ch + '\n';
+    const buf = new Uint8Array(text.length + 1); // +1 for ST
+    for (let j = 0; j < text.length; j++) buf[j] = text.charCodeAt(j) & 0xff;
+    buf[text.length] = ST;
+    return buf;
+  }
+  const ffBufs = trc.map((tr, i) => makeFreeFormBytes(tr, i));
+
+  // TDB size = 32-byte fixed header + free-form length, padded to a 4-byte boundary.
+  const tdbSizes = ffBufs.map((ff) => Math.ceil((32 + ff.length) / 4) * 4);
+  const trD = spt * 4; // data block bytes (IEEE float32)
+  const fdb = 32 + n * 4; // FDB header (32) + trace pointer array
+
+  let totalSize = fdb;
+  for (let t = 0; t < n; t++) totalSize += tdbSizes[t] + trD;
+
+  const out = new Uint8Array(totalSize);
+  const odv = dv(out);
+
+  // ── File Descriptor Block (32 bytes) ──
+  out[0] = 0x3a;
+  out[1] = 0x55; // LE magic 0x553A
+  out[2] = 1;
+  out[3] = 0; // revision 1
+  out[4] = fdb & 0xff;
+  out[5] = (fdb >> 8) & 0xff; // size of trace pointer sub-block (FDB size)
+  out[6] = n & 0xff;
+  out[7] = (n >> 8) & 0xff; // number of traces (Geode: bytes 6-7)
+  // bytes 8-9: reserved
+  out[10] = 0; // string terminator length (stl = 0 → ST is 0x00)
+  out[11] = 1; // line terminator length (ltl = 1)
+  out[12] = LT; // line terminator = 0x0A
+  // bytes 13-31: reserved (FDB free-form would go here in a fuller writer); the
+  // ACQUISITION_DATE is recorded but kept out of the fixed FDB to avoid clobbering
+  // the trace-pointer array — readers pick up date from the trace free-form below.
+  void acqDate;
+
+  // ── Trace pointer array (32-bit LE offsets) ──
+  let pos = fdb;
+  for (let t = 0; t < n; t++) {
+    const po = 32 + t * 4;
+    out[po] = pos & 0xff;
+    out[po + 1] = (pos >> 8) & 0xff;
+    out[po + 2] = (pos >> 16) & 0xff;
+    out[po + 3] = (pos >> 24) & 0xff;
+    pos += tdbSizes[t] + trD;
+  }
+
+  // ── Trace descriptor blocks + sample data ──
+  pos = fdb;
+  for (let t = 0; t < n; t++) {
+    const tr = trc[t];
+    const to = pos;
+    const tdb = tdbSizes[t];
+    const ff = ffBufs[t];
+    // TDB fixed header
+    out[to] = 0x22;
+    out[to + 1] = 0x44; // TDB ID 0x4422 (LE)
+    out[to + 2] = tdb & 0xff;
+    out[to + 3] = (tdb >> 8) & 0xff; // TDB block size
+    out[to + 4] = trD & 0xff;
+    out[to + 5] = (trD >> 8) & 0xff;
+    out[to + 6] = (trD >> 16) & 0xff;
+    out[to + 7] = (trD >> 24) & 0xff; // data block size (bytes)
+    out[to + 8] = spt & 0xff;
+    out[to + 9] = (spt >> 8) & 0xff;
+    out[to + 10] = (spt >> 16) & 0xff;
+    out[to + 11] = (spt >> 24) & 0xff; // number of samples
+    out[to + 12] = 4; // data format code 4 = IEEE float32
+    // Free-form headers start at TDB byte 32.
+    out.set(ff, to + 32);
+    // Sample data (LE float32). Clamp to the allocated slot (spt).
+    if (tr.samples) {
+      const base = to + tdb;
+      const ns2 = Math.min(tr.nSamples || spt, spt);
+      for (let i = 0; i < ns2; i++) odv.setFloat32(base + i * 4, tr.samples[i] || 0, true);
+    }
+    pos += tdb + trD;
+  }
+  return out;
 }
