@@ -273,7 +273,12 @@ export function writeSEG2(pd: ParsedFile): Bytes {
   // trace can't under-allocate and overrun on a later, longer trace.
   const spt = trc.reduce((m, t) => Math.max(m, t.nSamples || 0), 0) || trc[0].nSamples;
   const si_us = pd.bh?.sampleInt || 2000;
-  const si_ms = (si_us / 1000).toFixed(6); // SEG-2 SAMPLE_INTERVAL is in ms, e.g. "2.000000"
+  // SEG-2 SAMPLE_INTERVAL is in SECONDS (Pullan 1990; ObsPy header['delta'] is
+  // seconds; SeisUnix seg2segy multiplies by 1e6 to reach µs). Emitting ms here
+  // would make every conformant reader mis-time the traces by 1000×. e.g. a
+  // 2000 µs interval → "0.002000000". Our own parser's seconds branch (value <
+  // 0.1 → ×1e6) reads this straight back to 2000 µs, so the round-trip is exact.
+  const si_s = (si_us / 1e6).toFixed(9);
   const n = trc.length;
   const LT = 0x0a; // line terminator
   const ST = 0x00; // string terminator
@@ -287,7 +292,7 @@ export function writeSEG2(pd: ParsedFile): Bytes {
   function makeFreeFormBytes(tr: Trace, idx: number): Bytes {
     const ch = Number(tr.hdr?.channelNum ?? tr.hdr?.CHANNEL_NUMBER ?? idx + 1);
     // Lines separated by LT (0x0A), section terminated by ST (0x00).
-    const text = 'SAMPLE_INTERVAL ' + si_ms + '\nSAMPLES_PER_TRACE ' + spt + '\nCHANNEL_NUMBER ' + ch + '\n';
+    const text = 'SAMPLE_INTERVAL ' + si_s + '\nSAMPLES_PER_TRACE ' + spt + '\nCHANNEL_NUMBER ' + ch + '\n';
     const buf = new Uint8Array(text.length + 1); // +1 for ST
     for (let j = 0; j < text.length; j++) buf[j] = text.charCodeAt(j) & 0xff;
     buf[text.length] = ST;
@@ -315,9 +320,17 @@ export function writeSEG2(pd: ParsedFile): Bytes {
   out[5] = (fdb >> 8) & 0xff; // size of trace pointer sub-block (FDB size)
   out[6] = n & 0xff;
   out[7] = (n >> 8) & 0xff; // number of traces (Geode: bytes 6-7)
-  // bytes 8-9: reserved
-  out[10] = 0; // string terminator length (stl = 0 → ST is 0x00)
-  out[11] = 1; // line terminator length (ltl = 1)
+  // SEG-2 FDB terminator definitions, 'BccBcc' @ byte 8 (Pullan 1990; ObsPy /
+  // MathWorks / Stanford readers REQUIRE the string-terminator size at byte 8 to
+  // be 1 or 2). This is exactly the layout real Geometrics Geode hardware writes
+  // (byte8=1, byte9=0x00, byte10=0, byte11=1, byte12=0x0A). Our own parser reads
+  // the string terminator from byte 10 (=0 here) and the line terminator from
+  // byte 11/12, so adding the spec bytes 8/9 keeps the in-house round-trip
+  // identical while making the file acceptable to strict SEG-2 readers.
+  out[8] = 1; // size of string terminator (bytes)
+  out[9] = ST; // string terminator char = 0x00
+  // byte 10: reserved (0) — our parser's legacy string-terminator slot
+  out[11] = 1; // size of line terminator (bytes)
   out[12] = LT; // line terminator = 0x0A
   // bytes 13-31: reserved (FDB free-form would go here in a fuller writer); the
   // ACQUISITION_DATE is recorded but kept out of the fixed FDB to avoid clobbering

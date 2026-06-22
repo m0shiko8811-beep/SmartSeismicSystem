@@ -55,10 +55,30 @@ export function writeSU(pd: ParsedFile): Bytes {
   const si = pd.bh?.sampleInt || 2000;
   const tsz = 240 + spt * 4;
   const out = new Uint8Array(trc.length * tsz);
+  // Pull a populated header word, accepting either the SU field name or the
+  // equivalent SEG-Y trace-header name (so SU→SU and SEG-Y→SU both preserve the
+  // geometry SU processing tools depend on). Returns 0 when neither is present.
+  const hw = (h: TraceHeader, ...keys: string[]): number => {
+    for (const k of keys) {
+      const v = h[k];
+      if (typeof v === 'number' && v !== 0) return v;
+    }
+    return 0;
+  };
   let off = 0;
   for (let t = 0; t < trc.length; t++) {
     const tr = trc[t];
-    w32(out, off, t + 1);
+    const h = tr.hdr || {};
+    w32(out, off, t + 1); // tracl (sequential)
+    // Preserve trace geometry/identity at the CWP segy.h byte offsets instead of
+    // zeroing it: fldr@8, ep@16 (shot/source point), cdp@20, cdpt@24, offset@36.
+    if (hw(h, 'ffid', 'fieldRec')) w32(out, off + 8, hw(h, 'ffid', 'fieldRec'));
+    if (hw(h, 'sp', 'srcPt')) w32(out, off + 16, hw(h, 'sp', 'srcPt'));
+    if (hw(h, 'cdp', 'ensemble')) w32(out, off + 20, hw(h, 'cdp', 'ensemble'));
+    if (hw(h, 'cdpTrace', 'trcEns')) w32(out, off + 24, hw(h, 'cdpTrace', 'trcEns'));
+    // trid (byte 28): carry through if present, else 1 = seismic data (segy.h).
+    w16(out, off + 28, hw(h, 'traceId') || 1);
+    if (hw(h, 'offset')) w32(out, off + 36, hw(h, 'offset'));
     w16(out, off + 114, tr.nSamples);
     w16(out, off + 116, si);
     if (tr.samples) {

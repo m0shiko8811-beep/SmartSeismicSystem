@@ -30,18 +30,52 @@ export function parseSEGY(b: Bytes): ParsedFile {
     samplesTrace: r16u(bh, 20),
     dataFmt: r16u(bh, 24),
     revision: r16u(bh, 300),
-    extHdrCnt: r16u(bh, 304),
+    // Byte 3505-3506 is SIGNED in rev2: -1 (0xFFFF) means "a variable number of
+    // extended textual headers, read until the End Text stanza", NOT 65535.
+    extHdrCnt: r16s(bh, 304),
     lineNum: r32s(bh, 4),
     jobId: r32s(bh, 0),
   };
-  r.revision = r.bh.revision === 0x0100 ? 1 : r.bh.revision === 0x0200 ? 2 : 0;
+  // Byte 3501 = major revision, byte 3502 = minor (radix point between the two
+  // bytes). Decode the major byte on its own so a nonzero minor — e.g. rev 2.1 =
+  // 0x0201 — is NOT demoted to rev 0, and any future minor revision is honoured.
+  const revWord = r.bh.revision || 0;
+  const revMajor = (revWord >> 8) & 0xff;
+  r.bh.revMinor = revWord & 0xff;
+  r.revision = revMajor; // 0 → rev 0, 1 → rev 1, 2 → rev 2 (regardless of minor)
 
   let off = 3600;
-  for (let i = 0; i < (r.bh.extHdrCnt || 0) && off + 3200 <= b.length; i++) off += 3200;
+  const extCnt = r.bh.extHdrCnt || 0;
+  if (extCnt < 0) {
+    // Variable count (rev2, -1): skip 3200-byte extended-header blocks until one
+    // contains the End Text stanza '((SEG: EndText))' (case-insensitive), or we
+    // run out of room. The stanza marks the last extended textual header.
+    while (off + 3200 <= b.length) {
+      const block = asciiPrintable(b.slice(off, off + 3200));
+      off += 3200;
+      if (/\(\(\s*SEG\s*:\s*EndText\s*\)\)/i.test(block)) break;
+    }
+  } else {
+    for (let i = 0; i < extCnt && off + 3200 <= b.length; i++) off += 3200;
+  }
 
   const spt = r.bh.samplesTrace || 0;
   const fmt = r.bh.dataFmt || 1;
-  const bps = fmt === 3 ? 2 : fmt === 8 ? 1 : 4;
+  // Bytes-per-sample keyed by the SEG-Y data sample format code (byte 3225-3226).
+  // This drives BOTH the decode switch below AND the trace-walk stride, so a
+  // conformant rev2 file using an 8-/3-/1-byte format is stepped at the true
+  // on-disk record size instead of being mis-walked as 4-byte IEEE.
+  //   1=IBM f32(4) 2=int32(4) 3=int16(2) 4=fixed-gain(4) 5=IEEE f32(4)
+  //   6=IEEE f64(8) 7=int24(3) 8=int8(1) 9=int64(8) 10=uint32(4) 11=uint16(2)
+  //   12=uint64(8) 15=uint24(3) 16=uint8(1)
+  const SEGY_BPS: Record<number, number> = { 1: 4, 2: 4, 3: 2, 4: 4, 5: 4, 6: 8, 7: 3, 8: 1, 9: 8, 10: 4, 11: 2, 12: 8, 15: 3, 16: 1 };
+  // Codes this parser can actually decode to samples. Others (rev2 additions we
+  // don't yet decode) are stepped at the correct width but flagged, not silently
+  // reinterpreted as IEEE f32.
+  const decodable = fmt === 1 || fmt === 2 || fmt === 3 || fmt === 5 || fmt === 8;
+  const bps = SEGY_BPS[fmt] ?? 4;
+  if (!SEGY_BPS[fmt]) r.errors.push(`Unknown SEG-Y data sample format code ${fmt}`);
+  else if (!decodable) r.errors.push(`Unsupported SEG-Y data sample format code ${fmt} (samples not decoded)`);
   let tc = 0;
   while (off < b.length - 240 && tc < MAX_TRACES) {
     if (off + 240 > b.length) break;
@@ -67,15 +101,18 @@ export function parseSEGY(b: Bytes): ParsedFile {
     const dEnd = off + 240 + ns * bps;
     if (dEnd > b.length) break;
     const samples = new Float32Array(ns);
-    for (let i = 0; i < ns; i++) {
-      const p = off + 240 + i * bps;
-      if (fmt === 1) samples[i] = ibm2f(b, p);
-      else if (fmt === 5) samples[i] = getF32(b, p);
-      else if (fmt === 2) samples[i] = getI32(b, p);
-      else if (fmt === 3) samples[i] = getI16(b, p);
-      else if (fmt === 8) samples[i] = b[p] > 127 ? b[p] - 256 : b[p];
-      else samples[i] = getF32(b, p);
+    if (decodable) {
+      for (let i = 0; i < ns; i++) {
+        const p = off + 240 + i * bps;
+        if (fmt === 1) samples[i] = ibm2f(b, p);
+        else if (fmt === 5) samples[i] = getF32(b, p);
+        else if (fmt === 2) samples[i] = getI32(b, p);
+        else if (fmt === 3) samples[i] = getI16(b, p);
+        else samples[i] = b[p] > 127 ? b[p] - 256 : b[p]; // fmt === 8 (int8)
+      }
     }
+    // Non-decodable codes: samples stay zero-filled but the trace IS still walked
+    // at the correct `bps` stride so subsequent trace headers stay aligned.
     const trace: Trace = { hdr, samples, nSamples: ns, dataFmt: fmt };
     r.traces.push(trace);
     off = dEnd;
@@ -123,6 +160,20 @@ export function writeSEGY(pd: ParsedFile, rev: number): Bytes {
   w16(out, bh + 24, 5);
   w16(out, bh + 300, rev === 1 ? 0x0100 : rev === 2 ? 0x0200 : 0);
   w16(out, bh + 302, 1);
+
+  // ── Rev 2 extended / required binary-header fields ──
+  // The legacy 16-bit sample-interval (3217) and samples-per-trace (3221) fields
+  // overflow above 65535; rev2 carries authoritative copies in extended fields,
+  // and a fixed-length flag (3503) that references them. Write them so a rev2
+  // file is internally self-consistent for strict rev2 readers. The parser does
+  // not read these, so round-tripping through parseSEGY is unaffected.
+  if (rev === 2) {
+    const bdv = dv(out);
+    bdv.setFloat64(bh + 80, si, false); // 3281-3288: extended sample interval (IEEE double, µs)
+    bdv.setUint32(bh + 88, spt, false); // 3289-3292: extended number of samples/trace (uint32)
+    bdv.setUint32(bh + 96, 0x01020304, false); // 3297-3300: byte-order constant (big-endian)
+    w16(out, bh + 316, 0); // 3517-3518: number of additional 240-byte trace headers = 0
+  }
 
   let off = 3600;
   for (let t = 0; t < trc.length; t++) {

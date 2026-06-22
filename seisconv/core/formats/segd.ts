@@ -1,7 +1,7 @@
 // seisconv-core — SEG-D parser (Rev 1 / 3, demultiplexed)
 //
-// Ported verbatim from the SeisConv reference. Handles IEEE float (code 0032,
-// 32-bit), 24-bit int (0068), and 20-bit packed (2.5 bytes/sample) data.
+// Handles 32-bit IEEE float (code 8058, plus the legacy SeisConv codes 0032/8032),
+// 24-bit int (0068), and 20-bit packed (2.5 bytes/sample) data.
 // NOTE: not covered by the bundled sample data — validate against real SEG-D
 // before relying on it.
 
@@ -38,7 +38,10 @@ export function parseSEGD(b: Bytes): ParsedFile {
   // Bytes per scan in GH1 bytes 18-20 (BCD). For IEEE float (0032): spt = bps/4.
   const bpsStored = bcd2(b[18]) * 10000 + bcd2(b[19]) * 100 + bcd2(b[20]);
   let bpsBits = 20;
-  if (fmtCode === 32 || fmtCode === 8032) bpsBits = 32;
+  // 8058 = 32-bit IEEE float (the conformant SEG-D code, decoded as IEEE below).
+  // 32/8032 are the legacy SeisConv-internal IEEE codes, kept for backward
+  // compatibility with previously written files (all 4-byte IEEE float here).
+  if (fmtCode === 8058 || fmtCode === 32 || fmtCode === 8032) bpsBits = 32;
   else if (fmtCode === 8068 || fmtCode === 68) bpsBits = 24;
   const bytesPerSamp = bpsBits === 32 ? 4 : bpsBits === 24 ? 3 : 2.5;
   const sptStored = bpsStored > 0 && bytesPerSamp > 0 ? Math.round(bpsStored / bytesPerSamp) : 0;
@@ -135,7 +138,7 @@ export function writeSEGD(pd: ParsedFile, rev3: boolean): Bytes {
   // first trace; keep that for numeric equivalence, but clamp per-trace writes to
   // `spt` (below) so a later, longer trace can't overrun the DataView.
   const spt = trc[0].nSamples;
-  const trD = spt * 4; // 4 bytes/sample (IEEE float32, code 0032)
+  const trD = spt * 4; // 4 bytes/sample (IEEE float32, code 8058)
   const gh2 = rev3 ? 32 : 0; // General Header Block 2 (Rev 3 only)
   const nExt = rev3 ? 1 : 0; // one extended header (Rev 3 only)
   const off0 = 32 + gh2 + 32 + nExt * 32; // GH1 + [GH2] + channel-set + [ext]
@@ -144,8 +147,13 @@ export function writeSEGD(pd: ParsedFile, rev3: boolean): Bytes {
   // ── General Header Block 1 (32 bytes) ──
   out[0] = 0;
   out[1] = 1;
-  out[2] = 0;
-  out[3] = 0x32; // format code 0032 (BCD) = IEEE float32
+  // Data sample format code = 8058 (32-bit IEEE float, demultiplexed) — the real
+  // SEG-D code for IEEE float. The prior code 0032 was non-standard (SEG-D has no
+  // 0032), so a conformant reader (SegDSee / SeisUnix / Sercel) would reject it.
+  // bcd2(0x80)=80, bcd2(0x58)=58 → 8058. The parser still accepts the legacy 0032
+  // so previously-written files keep parsing.
+  out[2] = 0x80;
+  out[3] = 0x58; // format code 8058 (BCD) = 32-bit IEEE float (demux)
   const yr = new Date().getFullYear() % 100;
   out[9] = (Math.floor(yr / 10) << 4) | (yr % 10); // year (BCD)
   const now = new Date();

@@ -604,6 +604,78 @@ test('writeSEGD Rev 3 → detect() = SEG-D, revision 3, re-parses to >0 traces',
   assert.ok(samplesEqual(pf.traces[2].samples, re.traces[2].samples, 100), 'trace-2 samples identical');
 });
 
+// ── SEG standards compliance regressions ───────────────────────────────────
+// Guards the per-format conformance fixes so a future change that reverts them
+// (back to a non-standard byte) is caught here, not by a downstream reader.
+console.log('\n[compliance]');
+
+test('writeSEGD stamps the conformant IEEE-float data sample format code 8058', () => {
+  const out = writeSEGD(mkPF([64, 64]), false);
+  // GH1 bytes 2-3 (BCD): code 8058 = 0x80 0x58. The old non-standard 0032 must
+  // never be emitted again.
+  assert.equal(out[2], 0x80, `GH1 byte2 expected 0x80 (got 0x${out[2].toString(16)})`);
+  assert.equal(out[3], 0x58, `GH1 byte3 expected 0x58 (got 0x${out[3].toString(16)})`);
+});
+
+test('parseSEGD still accepts the legacy 0032 format code (backward compat)', () => {
+  const out = writeSEGD(mkPF([64, 64]), false);
+  out[2] = 0x00;
+  out[3] = 0x32; // downgrade to the legacy SeisConv code
+  const re = parseSEGD(out);
+  assert.equal(re.errors.length, 0, `errors: ${re.errors.join('; ')}`);
+  assert.equal(re.traceCount, 2, 'legacy 0032 still parses to its traces');
+});
+
+test('writeSEG2 places the string-terminator size at FDB byte 8 (spec BccBcc @8)', () => {
+  const pf = mkPF([32, 32]);
+  pf.format = 'SEG-2';
+  const out = writeSEG2(pf);
+  // Pullan 1990 / ObsPy require byte 8 = 1 or 2; byte 11 = line-terminator size.
+  assert.equal(out[8], 1, `FDB byte8 (string-term size) expected 1 (got ${out[8]})`);
+  assert.equal(out[9], 0x00, 'FDB byte9 (string-term char) expected 0x00');
+  assert.equal(out[11], 1, `FDB byte11 (line-term size) expected 1 (got ${out[11]})`);
+  assert.equal(out[12], 0x0a, 'FDB byte12 (line-term char) expected 0x0A');
+});
+
+test('writeSEG2 emits SAMPLE_INTERVAL in SECONDS and round-trips the µs value', () => {
+  const pf = mkPF([32, 32]);
+  pf.format = 'SEG-2';
+  pf.bh.sampleInt = 2000; // µs
+  const out = writeSEG2(pf);
+  const txt = new TextDecoder().decode(out);
+  // 2000 µs → 0.002 s, NOT "2.000000" (ms). A 1000× error in any conformant reader.
+  assert.ok(/SAMPLE_INTERVAL\s+0\.002/.test(txt), 'SAMPLE_INTERVAL must be in seconds (0.002…)');
+  const re = parseSEG2(out);
+  assert.equal(re.bh.sampleInt, 2000, `sampleInt must round-trip to 2000 µs (got ${re.bh.sampleInt})`);
+});
+
+test('SEG-Y revision word decodes the major byte (rev 2.1 = 0x0201 → rev 2)', () => {
+  const out = writeSEGY(mkPF([16, 16]), 2);
+  // Stamp a minor revision (0x0201) directly in the binary header (byte 3501-3502)
+  // and confirm the parser reports major=2, not rev 0.
+  out[3200 + 300] = 0x02;
+  out[3200 + 301] = 0x01;
+  const re = parseSEGY(out);
+  assert.equal(re.revision, 2, 'major revision 2 honoured regardless of nonzero minor');
+  assert.equal(re.bh.revMinor, 1, 'minor revision retained');
+});
+
+test('writeSU preserves trace geometry (fldr/sp/cdp/offset) and defaults trid=1', () => {
+  const traces = [0, 1].map((t) => {
+    const s = new Float32Array(16);
+    return { hdr: { fieldRec: 7, srcPt: 101, ensemble: 555, trcEns: 3, offset: -250, traceId: 0 }, samples: s, nSamples: 16 };
+  });
+  const pf: any = { format: 'SEG-Y', revision: 1, bh: { sampleInt: 2000, samplesTrace: 16 }, traceCount: 2, errors: [], traces };
+  const re = parseSU(writeSU(pf));
+  const h = re.traces[0].hdr;
+  assert.equal(h.ffid, 7, 'fldr preserved');
+  assert.equal(h.sp, 101, 'shot/source point preserved');
+  assert.equal(h.cdp, 555, 'cdp preserved');
+  assert.equal(h.cdpTrace, 3, 'cdp trace preserved');
+  assert.equal(h.offset, -250, 'offset preserved');
+  assert.equal(h.traceId, 1, 'trid defaults to 1 (seismic) when input is 0');
+});
+
 // ── TPIMAGE (tape image) ──────────────────────────────────────────────────────
 console.log('\n[tpimage]');
 test('writeTapeImage wraps a SEG-Y that parseTpimage + detect() recover', () => {
