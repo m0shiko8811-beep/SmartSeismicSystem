@@ -316,7 +316,12 @@ const KEY_BATCH = `${MOD}+B`;
 const TABS = ['conv', 'trace', 'section', 'sps', 'vel', 'workbench'] as const;
 type Tab = (typeof TABS)[number];
 
+// Which tab is showing — drives the universal header "Clear" button (see
+// clearActiveTab / updateHeaderClear). Kept in sync by switchTab.
+let activeTab: Tab = 'conv';
+
 function switchTab(tab: Tab) {
+  activeTab = tab;
   for (const t of TABS) {
     $(`tab-${t}`).classList.toggle('on', t === tab);
     $(`panel-${t}`).style.display = t === tab ? '' : 'none';
@@ -329,6 +334,9 @@ function switchTab(tab: Tab) {
   }
   // The Converter has its own in-panel "Open" button; hide the header one there.
   $opt('openBtn')?.classList.toggle('hidden', tab === 'conv');
+  // The universal "Clear" button stays on EVERY tab (next to Open file); only
+  // its tooltip + enabled state change per tab.
+  updateHeaderClear();
   if (tab === 'trace' && summary) void refreshTrace();
   if (tab === 'section' && summary) void refreshSection();
   if (tab === 'sps' && spsSummary) void refreshSps();
@@ -358,6 +366,7 @@ function renderInfo() {
     $('fileInfo').style.display = 'none';
     clearSummaryPanel();
     updateStatusStrip();
+    updateHeaderClear();
     return;
   }
   $('fileInfo').style.display = '';
@@ -371,6 +380,7 @@ function renderInfo() {
   renderSummaryPanel();
   renderHeaderQc();
   updateStatusStrip();
+  updateHeaderClear();
 }
 
 /** Right-rail File-summary card, populated from the openAndParse summary. */
@@ -970,6 +980,71 @@ async function clearConverter() {
   setText('secLabel', 'Open a file to view the section');
   updateFileNav();       // disable Prev/Next + clear the 'file X / N' label
   renderTraceHeader();   // clear the trace-header table (lastTrace is now null)
+}
+
+// ── Universal "Clear" (header button) ──
+// One Clear button in the header, sitting next to "Open file…", clears the
+// ACTIVE tab's data. The Converter / Trace Inspector / File Viewer all hang off
+// the single open seismic file, so clearing any of them resets that file +
+// every derived view via clearConverter(). The SPS, Velocity and Workbench tabs
+// own independent state and clear only themselves.
+const CLEAR_TIP: Record<Tab, string> = {
+  conv: 'Clear file',
+  trace: 'Clear file',
+  section: 'Clear file',
+  sps: 'Clear SPS',
+  vel: 'Clear picks',
+  workbench: 'Clear workbench',
+  // Future tabs (e.g. 'obslog') add a label here + a case in clearActiveTab().
+};
+
+/** Whether the active tab currently holds anything worth clearing — drives the
+ *  header Clear button's disabled state so it reads as "nothing to clear". */
+function activeTabHasData(tab: Tab): boolean {
+  switch (tab) {
+    case 'conv':
+    case 'trace':
+    case 'section':
+      return !!summary;
+    case 'sps':
+      return !!spsSummary;
+    case 'vel':
+      return !!velResult || velPicks.length > 0;
+    case 'workbench':
+      return wbTraces.length > 0;
+    default:
+      return false;
+  }
+}
+
+/** Clear the data of whichever tab is currently active. */
+function clearActiveTab() {
+  switch (activeTab) {
+    case 'conv':
+    case 'trace':
+    case 'section':
+      void clearConverter();   // shared open file → reset file + all derived views
+      break;
+    case 'sps':
+      void clearSPS();
+      break;
+    case 'vel':
+      clearVelocity();
+      break;
+    case 'workbench':
+      wbClear();
+      break;
+    // Future: case 'obslog': clearObsLog(); break;
+  }
+  updateHeaderClear();
+}
+
+/** Sync the header Clear button's tooltip + disabled state to the active tab. */
+function updateHeaderClear() {
+  const btn = $opt('headerClearBtn') as HTMLButtonElement | null;
+  if (!btn) return;
+  btn.title = CLEAR_TIP[activeTab] ?? 'Clear';
+  btn.disabled = !activeTabHasData(activeTab);
 }
 
 // ── Trace Inspector ──
@@ -1854,6 +1929,7 @@ function wbSetMode(m: 'side' | 'overlay') {
 
 /** Render the collected-trace list (source · trace # · colour swatch + remove). */
 function renderWorkbenchList() {
+  updateHeaderClear();   // workbench contents changed → refresh header Clear state
   const list = $opt('wbList');
   if (!list) return;
   if (!wbTraces.length) {
@@ -2347,6 +2423,7 @@ function spsLabel(s: SpsSummary): string {
 /** Paint the dedicated SPS stats element (counts + line totals). Lives apart
  *  from #spsLabel, which hoverGrid overwrites. Line counts come from geometry. */
 function updateSpsStats() {
+  updateHeaderClear();   // SPS survey loaded/cleared → refresh header Clear state
   const el = $opt('spsStats');
   if (!el) return;
   if (!spsSummary) { el.textContent = ''; return; }
@@ -3153,6 +3230,7 @@ async function computeVelocity() {
     velResult = await api.semblance({ velMin: numVal('velMin') || 1000, velMax: numVal('velMax') || 5000, velStep: numVal('velStep') || 50 });
     $('velLabel').textContent = `${velResult.vels.length} velocities · ${velResult.offNote}`;
     drawVelocity();
+    updateHeaderClear();   // semblance result now present → enable header Clear
   } catch (e) {
     $('velLabel').textContent = 'Failed: ' + errMsg(e);
   }
@@ -3244,6 +3322,7 @@ function onVelClick(e: MouseEvent) {
 }
 
 function renderVelPicks() {
+  updateHeaderClear();   // picks changed → refresh header Clear state
   const el = $('velPicks');
   el.innerHTML = '';
   for (const p of velPicks.slice().sort((a, b) => a.tMs - b.tMs)) {
@@ -3260,6 +3339,17 @@ function renderVelPicks() {
     row.appendChild(document.createElement('span'));
     el.appendChild(row);
   }
+}
+
+/** Clear the velocity tab's own state: drop the semblance result + picks,
+ *  clear the picks list, then repaint the now-empty velocity panel. The open
+ *  seismic file is left untouched (use the Converter clear for that). */
+function clearVelocity() {
+  velResult = null;
+  velPicks = [];
+  renderVelPicks();
+  drawVelocity();
+  $('velLabel').textContent = 'Open a file, then compute a velocity scan.';
 }
 
 async function exportPicks() {
@@ -3298,6 +3388,8 @@ function init() {
   for (const t of TABS) $(`tab-${t}`).addEventListener('click', () => switchTab(t));
   $('openBtn').addEventListener('click', onOpen);
   $('openBtn2').addEventListener('click', onOpen);
+  // Universal header Clear → clears the active tab's data.
+  $opt('headerClearBtn')?.addEventListener('click', clearActiveTab);
 
   // ── Converter: mode switcher ──
   $opt('modeSingle')?.addEventListener('click', () => setConvMode('single'));
