@@ -40,6 +40,11 @@
     "icon": "build/icon.ico",
     "files": [
       "dist/**",
+      "!dist/win-unpacked/**",
+      "!dist/*.exe",
+      "!dist/*.blockmap",
+      "!dist/__uninstaller-nsis-*.exe",
+      "!dist/*.yml",
       "renderer/**",
       "build/**",
       "package.json"
