@@ -4,7 +4,7 @@
 // free-form headers) and Geode's length-prefixed free-form variant.
 // Ported verbatim from the SeisConv reference.
 
-import { dv } from '../binary';
+import { getF32, getF64 } from '../binary';
 import type { Bytes, ParsedFile, Trace, TraceHeader } from '../types';
 
 const ri16 = (buf: Bytes, o: number): number => buf[o] | (buf[o + 1] << 8); // always LE
@@ -136,7 +136,6 @@ export function parseSEG2(b: Bytes): ParsedFile {
     let samples: Float32Array | null = null;
     if (t < 2000) {
       samples = new Float32Array(nSamples);
-      const bdv = dv(b);
       const bpsInt = trDataFmt === 1 ? 2 : trDataFmt === 2 ? 4 : trDataFmt === 5 ? 8 : 4;
       if (trDataFmt === 3) {
         // 20-bit packed (2 samples per 5 bytes)
@@ -152,14 +151,14 @@ export function parseSEG2(b: Bytes): ParsedFile {
         for (let i = 0; i < nSamples; i++) {
           const p = dataStart + i * bpsInt;
           if (p + bpsInt > b.length) break;
-          if (trDataFmt === 4) samples[i] = bdv.getFloat32(p, true);
+          if (trDataFmt === 4) samples[i] = getF32(b, p, true);
           else if (trDataFmt === 1) {
             const v = b[p] | (b[p + 1] << 8);
             samples[i] = v > 32767 ? v - 65536 : v;
           } else if (trDataFmt === 2) {
             samples[i] = b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | ((b[p + 3] << 24) >> 0);
-          } else if (trDataFmt === 5) samples[i] = bdv.getFloat64(p, true);
-          else samples[i] = bdv.getFloat32(p, true);
+          } else if (trDataFmt === 5) samples[i] = getF64(b, p, true);
+          else samples[i] = getF32(b, p, true);
         }
       }
     }

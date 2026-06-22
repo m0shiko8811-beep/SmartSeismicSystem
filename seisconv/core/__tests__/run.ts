@@ -40,6 +40,7 @@ import {
   fft,
   amplitudeSpectrum,
   nextPow2,
+  rIEEE,
 } from '../index';
 import { bytesToBase64, base64ToBytes } from '../base64';
 
@@ -407,6 +408,107 @@ test('amplitudeSpectrum peaks at the input frequency with correct amplitude', ()
   assert.ok(Math.abs(sp.freqs[peakK] - f0) < binHz, `peak at ${sp.freqs[peakK]} Hz, expected ${f0}`);
   assert.ok(Math.abs(max - amp0) < 0.05, `peak amplitude ${max}, expected ~${amp0}`);
   console.log(`      peak ${sp.freqs[peakK].toFixed(1)} Hz (amp ${max.toFixed(3)})`);
+});
+
+// ── Robustness: variable-length traces + truncated/garbage buffers ────────────
+// Regression for the batch-convert crash "Offset is outside the bounds of the
+// DataView": the writers sized the output buffer from the FIRST trace's sample
+// count but wrote each trace's own count, overrunning whenever a later trace was
+// longer than the first. Parsers must also never throw on a truncated buffer.
+console.log('\n[robustness]');
+
+/** Build an in-memory ParsedFile with the given per-trace sample counts (ramps). */
+function mkPF(sampleCounts: number[]): any {
+  const traces = sampleCounts.map((n, t) => {
+    const s = new Float32Array(n);
+    for (let i = 0; i < n; i++) s[i] = (t + 1) * 1000 + i; // distinct, exact-in-float32 values
+    return { hdr: {}, samples: s, nSamples: n, dataFmt: 5 };
+  });
+  return { format: 'SEG-Y', revision: 0, bh: { sampleInt: 2000, samplesTrace: sampleCounts[0] }, traceCount: traces.length, errors: [], traces };
+}
+
+test('writeSEGY does NOT overrun when a later trace is longer than the first', () => {
+  // short first trace (aux/timebreak) followed by full-length data traces — the
+  // exact shape that threw "Offset is outside the bounds of the DataView" before
+  // the fix (buffer sized from trc[0]=10, write loop ran out to 2001).
+  const counts = [10, 2001, 2001, 2001];
+  const pf = mkPF(counts);
+  let out: Uint8Array = new Uint8Array();
+  assert.doesNotThrow(() => { out = writeSEGY(pf, 1); }, 'writeSEGY threw on variable-length traces');
+  // Buffer must be sized for the LONGEST trace (2001), in fixed-stride slots.
+  const maxN = Math.max(...counts);
+  const tsz = 240 + maxN * 4;
+  assert.equal(out.length, 3600 + counts.length * tsz, 'buffer sized for the longest trace');
+  // Each trace's samples must actually be in its slot (read slot 0 directly,
+  // since the short first trace makes header-driven re-parse ambiguous).
+  for (let t = 0; t < counts.length; t++) {
+    const base = 3600 + t * tsz + 240;
+    for (let i = 0; i < counts[t]; i++) {
+      assert.equal(rIEEE(out, base + i * 4), pf.traces[t].samples![i], `trace ${t} sample ${i}`);
+    }
+  }
+});
+
+test('writeSEGY stays bit-identical for uniform traces (longest == first)', () => {
+  const pf = mkPF([100, 100, 100]);
+  const out = writeSEGY(pf, 1);
+  const re = parseSEGY(out);
+  assert.equal(re.traceCount, 3);
+  for (let t = 0; t < 3; t++) {
+    assert.ok(samplesEqual(pf.traces[t].samples, re.traces[t].samples, 100), `trace ${t} identical`);
+  }
+});
+
+test('writeSU does NOT overrun when a later trace is longer than the first', () => {
+  const counts = [5, 300, 300];
+  const pf = mkPF(counts);
+  let su: Uint8Array = new Uint8Array();
+  assert.doesNotThrow(() => { su = writeSU(pf); }, 'writeSU threw on variable-length traces');
+  const maxN = Math.max(...counts);
+  const tsz = 240 + maxN * 4;
+  assert.equal(su.length, counts.length * tsz, 'SU buffer sized for the longest trace');
+  // Verify each trace's samples landed in its fixed-stride slot.
+  for (let t = 0; t < counts.length; t++) {
+    const base = t * tsz + 240;
+    for (let i = 0; i < counts[t]; i++) {
+      assert.equal(rIEEE(su, base + i * 4), pf.traces[t].samples![i], `SU trace ${t} sample ${i}`);
+    }
+  }
+});
+
+test('parseSEGY does NOT throw on a buffer truncated mid-trace (degrades gracefully)', () => {
+  // Make a valid 3-trace SEG-Y, then cut it 50 bytes into the last trace's data.
+  const full = writeSEGY(mkPF([100, 100, 100]), 1);
+  const cut = full.slice(0, full.length - 50);
+  let pf: any;
+  assert.doesNotThrow(() => { pf = parseSEGY(cut); }, 'parseSEGY threw on truncated buffer');
+  assert.ok(Array.isArray(pf.errors), 'returns a ParsedFile with errors[]');
+  assert.ok(pf.traceCount >= 2, `kept the intact traces (got ${pf.traceCount})`);
+});
+
+test('parseSU does NOT throw on a buffer truncated mid-samples', () => {
+  const full = writeSU(mkPF([200, 200]));
+  const cut = full.slice(0, full.length - 123); // chop into the 2nd trace's samples
+  let pf: any;
+  assert.doesNotThrow(() => { pf = parseSU(cut); }, 'parseSU threw on truncated buffer');
+  assert.ok(Array.isArray(pf.errors) && Array.isArray(pf.traces), 'returns a ParsedFile');
+});
+
+test('parseAny does NOT throw on garbage / mis-detection-prone bytes', () => {
+  // (a) random short buffer; (b) a 3600+ byte buffer whose byte0 is not a 'C'
+  // (would-be SEG-D BCD bait) — must still return a ParsedFile, never throw.
+  const garbage = new Uint8Array(64);
+  for (let i = 0; i < garbage.length; i++) garbage[i] = (i * 37 + 11) & 0xff;
+  assert.doesNotThrow(() => {
+    const pf = parseAny(garbage, 'junk.bin');
+    assert.ok(Array.isArray(pf.errors), 'garbage → ParsedFile');
+  }, 'parseAny threw on garbage');
+
+  const big = new Uint8Array(4000); // all-zero header, ns fields = 0 → no valid traces
+  assert.doesNotThrow(() => {
+    const pf = parseAny(big, 'zero.sgy');
+    assert.ok(Array.isArray(pf.traces) && Array.isArray(pf.errors), 'zero-buffer → ParsedFile');
+  }, 'parseAny threw on zero buffer');
 });
 
 // ── Summary ───────────────────────────────────────────────────────────────────

@@ -3,7 +3,7 @@
 // Ported verbatim from the SeisConv reference. Big-endian throughout.
 // Data formats: 1=IBM float, 2=int32, 3=int16, 5=IEEE float32, 8=int8.
 
-import { asciiPrintable, dv, ebcdic, ibm2f, r16s, r16u, r32s, w16, w32 } from '../binary';
+import { asciiPrintable, dv, ebcdic, getF32, getI16, getI32, ibm2f, r16s, r16u, r32s, w16, w32 } from '../binary';
 import type { Bytes, ParsedFile, Trace, TraceHeader } from '../types';
 import { MAX_TRACES } from '../types';
 
@@ -67,15 +67,14 @@ export function parseSEGY(b: Bytes): ParsedFile {
     const dEnd = off + 240 + ns * bps;
     if (dEnd > b.length) break;
     const samples = new Float32Array(ns);
-    const bdv = dv(b);
     for (let i = 0; i < ns; i++) {
       const p = off + 240 + i * bps;
       if (fmt === 1) samples[i] = ibm2f(b, p);
-      else if (fmt === 5) samples[i] = bdv.getFloat32(p, false);
-      else if (fmt === 2) samples[i] = bdv.getInt32(p, false);
-      else if (fmt === 3) samples[i] = bdv.getInt16(p, false);
+      else if (fmt === 5) samples[i] = getF32(b, p);
+      else if (fmt === 2) samples[i] = getI32(b, p);
+      else if (fmt === 3) samples[i] = getI16(b, p);
       else if (fmt === 8) samples[i] = b[p] > 127 ? b[p] - 256 : b[p];
-      else samples[i] = bdv.getFloat32(p, false);
+      else samples[i] = getF32(b, p);
     }
     const trace: Trace = { hdr, samples, nSamples: ns, dataFmt: fmt };
     r.traces.push(trace);
@@ -93,7 +92,11 @@ export function parseSEGY(b: Bytes): ParsedFile {
 export function writeSEGY(pd: ParsedFile, rev: number): Bytes {
   const trc = pd.traces;
   if (!trc || !trc.length) throw new Error('No traces');
-  const spt = Math.min(trc[0].nSamples, 65535); // max 65535 (16-bit SEG-Y field)
+  // SEG-Y is a fixed-record format: every trace slot is the same size. Size it
+  // from the LONGEST trace, not just the first — otherwise a short first trace
+  // (e.g. an aux/timebreak) under-allocates `out` and the per-trace write below
+  // runs past the buffer end ('Offset is outside the bounds of the DataView').
+  const spt = Math.min(trc.reduce((m, t) => Math.max(m, t.nSamples || 0), 0), 65535); // max 65535 (16-bit SEG-Y field)
   const si = pd.bh?.sampleInt || 2000;
   const tsz = 240 + spt * 4;
   const out = new Uint8Array(3600 + trc.length * tsz);
@@ -140,7 +143,9 @@ export function writeSEGY(pd: ParsedFile, rev: number): Bytes {
     if (tr.samples) {
       const odv = dv(out);
       const base = off + 240;
-      const ns2 = Math.min(tr.nSamples, 65535);
+      // Clamp to the allocated slot (spt), never the raw per-trace nSamples — the
+      // slot is sized for the longest trace, so this stays in-bounds for all.
+      const ns2 = Math.min(tr.nSamples, spt);
       for (let i = 0; i < ns2; i++) odv.setFloat32(base + i * 4, tr.samples[i] || 0, false);
     }
     off += tsz;

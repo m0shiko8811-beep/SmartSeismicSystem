@@ -80,6 +80,36 @@ export function dv(b: Bytes): DataView {
   return d;
 }
 
+// ─────────────────── bounds-safe DataView reads ───────────────────
+//
+// DataView.getX throws 'Offset is outside the bounds of the DataView' when the
+// read runs past the buffer end. On a truncated / variable-length / garbage
+// trace that throw aborts the whole parse (and, batched, masquerades as a
+// per-file failure). These wrappers return 0 instead of throwing, so parsers
+// degrade gracefully on a short buffer while staying bit-identical on valid
+// data (an in-range read goes straight through to the native DataView).
+
+/** Big-endian float32; returns 0 if o+4 exceeds the buffer. `le` for little-endian. */
+export function getF32(b: Bytes, o: number, le = false): number {
+  if (o < 0 || o + 4 > b.byteLength) return 0;
+  return dv(b).getFloat32(o, le);
+}
+/** Big-endian float64; returns 0 if o+8 exceeds the buffer. `le` for little-endian. */
+export function getF64(b: Bytes, o: number, le = false): number {
+  if (o < 0 || o + 8 > b.byteLength) return 0;
+  return dv(b).getFloat64(o, le);
+}
+/** Big-endian int32; returns 0 if o+4 exceeds the buffer. `le` for little-endian. */
+export function getI32(b: Bytes, o: number, le = false): number {
+  if (o < 0 || o + 4 > b.byteLength) return 0;
+  return dv(b).getInt32(o, le);
+}
+/** Big-endian int16; returns 0 if o+2 exceeds the buffer. `le` for little-endian. */
+export function getI16(b: Bytes, o: number, le = false): number {
+  if (o < 0 || o + 2 > b.byteLength) return 0;
+  return dv(b).getInt16(o, le);
+}
+
 /** Read a big-endian IEEE-754 float32. */
 export function rIEEE(b: Bytes, o: number): number {
   _d4.setUint8(0, b[o]);

@@ -3,7 +3,7 @@
 // Headerless SEG-Y: 240-byte trace headers, big-endian IEEE float32 samples,
 // traces start at byte 0. Ported verbatim from the SeisConv reference.
 
-import { dv, r16u, r32s, w16, w32 } from '../binary';
+import { dv, getF32, r16u, r32s, w16, w32 } from '../binary';
 import type { Bytes, ParsedFile, Trace, TraceHeader } from '../types';
 import { MAX_SAMPLE_TRACES } from '../types';
 
@@ -25,7 +25,6 @@ export function parseSU(b: Bytes): ParsedFile {
   }
   r.bh = { sampleInt: si, samplesTrace: nSamp, dataFmt: fmt };
   const nTraces = Math.floor(b.length / tSize);
-  const bdv = dv(b);
   for (let i = 0; i < nTraces; i++) {
     const off = i * tSize;
     const hdr: TraceHeader = {
@@ -37,7 +36,7 @@ export function parseSU(b: Bytes): ParsedFile {
     let samples: Float32Array | null = null;
     if (i < MAX_SAMPLE_TRACES) {
       samples = new Float32Array(nSamp);
-      for (let j = 0; j < nSamp; j++) samples[j] = bdv.getFloat32(off + 240 + j * 4, false);
+      for (let j = 0; j < nSamp; j++) samples[j] = getF32(b, off + 240 + j * 4);
     }
     const trace: Trace = { hdr, samples, nSamples: nSamp };
     r.traces.push(trace);
@@ -49,7 +48,10 @@ export function parseSU(b: Bytes): ParsedFile {
 export function writeSU(pd: ParsedFile): Bytes {
   const trc = pd.traces;
   if (!trc || !trc.length) throw new Error('No traces');
-  const spt = trc[0].nSamples;
+  // Fixed-record output: size every slot from the LONGEST trace, not the first,
+  // so a short first trace can't under-allocate `out` and overrun on a later,
+  // longer trace ('Offset is outside the bounds of the DataView').
+  const spt = trc.reduce((m, t) => Math.max(m, t.nSamples || 0), 0);
   const si = pd.bh?.sampleInt || 2000;
   const tsz = 240 + spt * 4;
   const out = new Uint8Array(trc.length * tsz);
@@ -62,7 +64,9 @@ export function writeSU(pd: ParsedFile): Bytes {
     if (tr.samples) {
       const sdv = dv(out);
       const base = off + 240;
-      for (let i = 0; i < tr.nSamples; i++) sdv.setFloat32(base + i * 4, tr.samples[i] || 0, false);
+      // Clamp to the allocated slot (spt) so the write stays in-bounds for all traces.
+      const ns2 = Math.min(tr.nSamples, spt);
+      for (let i = 0; i < ns2; i++) sdv.setFloat32(base + i * 4, tr.samples[i] || 0, false);
     }
     off += tsz;
   }
