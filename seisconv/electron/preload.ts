@@ -58,6 +58,10 @@ export interface BatchOpts {
   files: { name: string; path: string }[];
   format: string;
   outDir: string;
+  /** Output-name template ({name}/{fmt}/{date}/{n}); defaults to `{name}` on the main side. */
+  nameTemplate?: string;
+  /** Date stamp (YYYYMMDD) substituted for the {date} token. */
+  dateStr?: string;
 }
 
 export interface BatchResult {
@@ -129,8 +133,10 @@ const api = {
   pickInputFolder: (): Promise<InputFolder | null> => ipcRenderer.invoke('seisconv:pickInputFolder'),
   /** Pick an output folder; returns the chosen path or null. */
   pickOutputFolder: (): Promise<string | null> => ipcRenderer.invoke('seisconv:pickOutputFolder'),
-  /** Convert the currently-open file to `format` ('segy1' | 'segy0' | 'su') and save via a native dialog. */
-  convertSingle: (format: string): Promise<ConvertResult> => ipcRenderer.invoke('seisconv:convertSingle', format),
+  /** Convert the currently-open file to `format` and save via a native dialog;
+   *  `outBaseName` (no extension) becomes the save dialog's default file name. */
+  convertSingle: (format: string, outBaseName?: string): Promise<ConvertResult> =>
+    ipcRenderer.invoke('seisconv:convertSingle', format, outBaseName),
   /** Convert a list of files to `format`, writing each into outDir; emits progress per file. */
   batchConvert: (opts: BatchOpts): Promise<BatchResult> => ipcRenderer.invoke('seisconv:batchConvert', opts),
   /** Subscribe to batch-convert progress; returns an unsubscribe fn. */

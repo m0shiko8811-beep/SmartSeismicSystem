@@ -649,6 +649,35 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
           </button>
         </div>
 
+        <!-- ============ OUTPUT NAME (shared: single + batch) ============ -->
+        <div class="card" id="outNameCard" style="margin-bottom:16px;">
+          <div class="ch">
+            <h2>Output name</h2>
+            <span class="hint">Name the converted file(s)</span>
+            <div class="right"><span class="pill neutral mono" id="outNameExt">—</span></div>
+          </div>
+          <div class="cb">
+            <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end;">
+              <label class="ctl-lbl" style="flex:1;min-width:240px;flex-direction:column;align-items:stretch;gap:5px;">
+                <span class="eyebrow">Name template</span>
+                <input type="text" id="outNameTpl" class="ctl" style="width:100%;font-family:var(--mono);" value="{name}_{fmt}_{date}" spellcheck="false">
+              </label>
+              <label class="ctl-lbl" style="flex-direction:column;align-items:stretch;gap:5px;">
+                <span class="eyebrow">Date</span>
+                <input type="date" id="outNameDate" class="ctl">
+              </label>
+            </div>
+            <div class="muted" style="margin-top:10px;">
+              Tokens —
+              <span class="kbd">{name}</span> input file base name ·
+              <span class="kbd">{fmt}</span> output format id ·
+              <span class="kbd">{date}</span> date (YYYYMMDD) ·
+              <span class="kbd">{n}</span> 1-based index (batch only).
+            </div>
+            <div class="status" id="outNamePreview" style="margin-top:8px;"></div>
+          </div>
+        </div>
+
         <!-- ============ SINGLE-FILE MODE ============ -->
         <div id="convSingle">
           <div class="drop">
@@ -674,7 +703,7 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
                 <div class="ch">
                   <h2>Convert to</h2>
                   <span class="hint">Pick one output format</span>
-                  <div class="right"><span class="pill teal">9 formats</span></div>
+                  <div class="right"><span class="pill teal">8 formats</span></div>
                 </div>
                 <div class="cb">
                   <div class="chips" id="fmtChips">
@@ -685,7 +714,6 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
                     <button class="chip" data-fmt="seg2"><span class="nm">SEG-2 / .dat</span><span class="ex">.dat</span></button>
                     <button class="chip" data-fmt="segd1"><span class="nm">SEG-D Rev 1</span><span class="ex">.segd</span></button>
                     <button class="chip" data-fmt="segd3"><span class="nm">SEG-D Rev 3</span><span class="ex">.segd</span></button>
-                    <button class="chip" data-fmt="tpimage"><span class="nm">Tape Image</span><span class="ex">.tim</span></button>
                     <button class="chip" data-fmt="csv"><span class="nm">CSV / ASCII</span><span class="ex">.csv</span></button>
                   </div>
 
@@ -793,7 +821,7 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
                     <button class="chip" data-fmt="seg2"><span class="nm">SEG-2 / .dat</span><span class="ex">.dat</span></button>
                     <button class="chip" data-fmt="segd1"><span class="nm">SEG-D Rev 1</span><span class="ex">.segd</span></button>
                     <button class="chip" data-fmt="segd3"><span class="nm">SEG-D Rev 3</span><span class="ex">.segd</span></button>
-                    <button class="chip" data-fmt="tpimage"><span class="nm">Tape Image</span><span class="ex">.tim</span></button>
+                    <button class="chip" data-fmt="tpimage"><span class="nm">Tape Image</span><span class="ex">.tpimage</span></button>
                     <button class="chip" data-fmt="csv"><span class="nm">CSV / ASCII</span><span class="ex">.csv</span></button>
                   </div>
                 </div>
@@ -984,7 +1012,7 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
           <tr><td>SEG-2 / .dat</td><td><span class="mono">.dat</span></td><td>SEG-2 engineering format (e.g. Geode land recorders).</td></tr>
           <tr><td>SEG-D Rev 1</td><td><span class="mono">.segd</span></td><td>Field acquisition format, revision 1.</td></tr>
           <tr><td>SEG-D Rev 3</td><td><span class="mono">.segd</span></td><td>Field acquisition format, revision 3.</td></tr>
-          <tr><td>Tape Image</td><td><span class="mono">.tim</span></td><td>Raw tape-image container.</td></tr>
+          <tr><td>Tape Image</td><td><span class="mono">.tpimage</span></td><td>Raw tape-image container. Available in folder (batch) mode only.</td></tr>
           <tr><td>CSV / ASCII</td><td><span class="mono">.csv</span></td><td>Plain numeric export for spreadsheets / scripts.</td></tr>
         </tbody>
       </table>

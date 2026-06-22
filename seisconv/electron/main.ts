@@ -136,24 +136,51 @@ ipcMain.handle('seisconv:pickOutputFolder', async () => {
   return res.filePaths[0];
 });
 
-// Convert the CURRENTLY-OPEN file to `format` and save via a native dialog.
-ipcMain.handle('seisconv:convertSingle', async (_e, format: string) => {
+// Strip characters illegal in file names so a templated base is always safe.
+function sanitizeBaseName(s: string): string {
+  return s.replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim() || 'output';
+}
+
+// Apply the output-name template for one file → a safe base name (no extension).
+// Tokens: {name} input base, {fmt} writer id, {date} stamp, {n} 1-based index.
+function applyNameTemplate(
+  tpl: string,
+  vars: { name: string; fmt: string; date: string; n?: number },
+): string {
+  const out = (tpl || '{name}')
+    .replace(/\{name\}/g, vars.name)
+    .replace(/\{fmt\}/g, vars.fmt)
+    .replace(/\{date\}/g, vars.date)
+    .replace(/\{n\}/g, vars.n != null ? String(vars.n) : '');
+  return sanitizeBaseName(out);
+}
+
+// Convert the CURRENTLY-OPEN file to `format` and save via a native dialog. The
+// renderer passes the templated `outBaseName` (no extension) as the default name.
+ipcMain.handle('seisconv:convertSingle', async (_e, format: string, outBaseName?: string) => {
   const r = await callWorker<{ ok: boolean; bytes?: ArrayBuffer; ext?: string; error?: string }>({ type: 'convert', format });
   if (!r.ok || !r.bytes) return { ok: false, error: r.error ?? 'conversion failed' };
   if (!win) return { ok: false, error: 'no window' };
-  const base = lastOpenedPath ? path.basename(lastOpenedPath).replace(/\.[^.]+$/, '') : 'output';
+  const fallback = lastOpenedPath ? path.basename(lastOpenedPath).replace(/\.[^.]+$/, '') : 'output';
+  const base = outBaseName && outBaseName.trim() ? sanitizeBaseName(outBaseName) : fallback;
   const save = await dialog.showSaveDialog(win, { defaultPath: `${base}.${r.ext}`, filters: SEISMIC_FILTERS });
   if (save.canceled || !save.filePath) return { ok: false, canceled: true };
   await writeFile(save.filePath, Buffer.from(r.bytes));
   return { ok: true, path: save.filePath };
 });
 
-// Convert a list of files to `format`, writing <basename>.<ext> into outDir.
+// Convert a list of files to `format`, writing each into outDir under a name
+// derived from the output-name template ({name}/{fmt}/{date}/{n}) + writer ext.
 // Emits a per-file progress event; honors cancel between files.
 ipcMain.handle(
   'seisconv:batchConvert',
-  async (_e, opts: { files: { name: string; path: string }[]; format: string; outDir: string }) => {
+  async (
+    _e,
+    opts: { files: { name: string; path: string }[]; format: string; outDir: string; nameTemplate?: string; dateStr?: string },
+  ) => {
     const files = opts?.files ?? [];
+    const tpl = opts?.nameTemplate || '{name}';
+    const dateStr = opts?.dateStr || '';
     const total = files.length;
     const results: { name: string; ok: boolean; error?: string }[] = [];
     let done = 0;
@@ -177,7 +204,8 @@ ipcMain.handle(
       try {
         const r = await callWorker<{ ok: boolean; bytes?: ArrayBuffer; ext?: string; error?: string }>({ type: 'convertPath', path: f.path, format: opts.format });
         if (!r.ok || !r.bytes) throw new Error(r.error ?? 'conversion failed');
-        const base = f.name.replace(/\.[^.]+$/, '');
+        const inputBase = f.name.replace(/\.[^.]+$/, '');
+        const base = applyNameTemplate(tpl, { name: inputBase, fmt: opts.format, date: dateStr, n: index });
         await writeFile(path.join(opts.outDir, `${base}.${r.ext}`), Buffer.from(r.bytes));
         done++;
         results.push({ name: f.name, ok: true });
@@ -256,7 +284,7 @@ ipcMain.handle('seisconv:exportText', async (_e, args: { name: string; text: str
 });
 
 app.whenReady().then(() => {
-  Menu.setApplicationMenu(Menu.buildFromTemplate([{ role: 'fileMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' }]));
+  Menu.setApplicationMenu(null);
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

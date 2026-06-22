@@ -63,13 +63,15 @@ declare global {
       getTrace(i: number): Promise<TraceData>;
       getSection(o?: SectionOpts): Promise<SectionData>;
       // Single-file conversion of the currently-open file (save dialog).
-      convertSingle(format: string): Promise<ConvResult>;
+      // `outBaseName` (no extension) becomes the dialog's default file name.
+      convertSingle(format: string, outBaseName?: string): Promise<ConvResult>;
       // Folder picker → enumerated seismic files; null if cancelled / none.
       pickInputFolder(): Promise<PickFolderResult>;
       // Destination-folder picker; null if cancelled.
       pickOutputFolder(): Promise<string | null>;
       // Batch-convert a set of files into outDir, emitting per-file progress.
-      batchConvert(opts: { files: FolderFile[]; format: string; outDir: string }): Promise<BatchSummary>;
+      // Names each output via `nameTemplate` ({name}/{fmt}/{date}/{n}) + `dateStr`.
+      batchConvert(opts: { files: FolderFile[]; format: string; outDir: string; nameTemplate?: string; dateStr?: string }): Promise<BatchSummary>;
       // Subscribe to per-file conversion progress; returns an unsubscribe fn.
       onConvertProgress(cb: (p: ConvProgress) => void): () => void;
       // Signal a running batch to stop.
@@ -193,6 +195,8 @@ function switchTab(tab: Tab) {
     const de = $opt('tabDesc'); if (de) de.textContent = meta.desc;
     const cr = $opt('crumbTab'); if (cr) cr.textContent = meta.title;
   }
+  // The Converter has its own in-panel "Open" button; hide the header one there.
+  $opt('openBtn')?.classList.toggle('hidden', tab === 'conv');
   if (tab === 'trace' && summary) void refreshTrace();
   if (tab === 'section' && summary) void refreshSection();
   if (tab === 'sps' && spsSummary) void refreshSps();
@@ -351,6 +355,7 @@ async function onOpen() {
     summary = s;
     traceIndex = 0;
     renderInfo();
+    updateNamePreview();
     setStatus('convStatus', '');
     setState(s.errors.length ? 'ok' : 'ok', s.errors.length ? `Loaded · ${s.errors.length} flag${s.errors.length > 1 ? 's' : ''}` : 'Loaded');
     if ($('panel-trace').style.display !== 'none') void refreshTrace();
@@ -372,6 +377,75 @@ const FMT_LABEL: Record<string, string> = {
 };
 function fmtLabel(f: string): string { return FMT_LABEL[f] || f.toUpperCase(); }
 
+// Output extension per writer id (mirrors core/formats/registry.ts writers; used
+// for the output-name preview — the backend is the source of truth on write).
+const FMT_EXT: Record<string, string> = {
+  segy1: 'sgy', segy0: 'sgy', segy2: 'sgy',
+  su: 'su', seg2: 'dat', segd1: 'segd',
+  segd3: 'segd', tpimage: 'tpimage', csv: 'csv',
+};
+function fmtExt(f: string): string { return FMT_EXT[f] || 'bin'; }
+
+// ── Output-name templating ──────────────────────────────────────────────────
+// A small token engine shared by single + batch. Tokens: {name} input base,
+// {fmt} writer id, {date} YYYYMMDD stamp, {n} 1-based index (batch only).
+
+/** Strip the final extension from a file name → its base. */
+function fileBase(name: string): string { return name.replace(/\.[^.]+$/, ''); }
+
+/** Strip characters illegal in file names so a templated base is always safe. */
+function sanitizeName(s: string): string {
+  return s.replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim() || 'output';
+}
+
+/** Read the date input as a YYYYMMDD stamp; falls back to today if empty/invalid. */
+function dateStamp(): string {
+  const raw = ($opt('outNameDate') as HTMLInputElement | null)?.value || '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw.replace(/-/g, '');
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`;
+}
+
+/** Current template string (default if the field is empty). */
+function nameTemplate(): string {
+  const raw = ($opt('outNameTpl') as HTMLInputElement | null)?.value || '';
+  return raw.trim() || '{name}_{fmt}_{date}';
+}
+
+/** Apply the template for one file → a safe base name (no extension). */
+function applyNameTemplate(tpl: string, vars: { name: string; fmt: string; date: string; n?: number }): string {
+  const out = tpl
+    .replace(/\{name\}/g, vars.name)
+    .replace(/\{fmt\}/g, vars.fmt)
+    .replace(/\{date\}/g, vars.date)
+    .replace(/\{n\}/g, vars.n != null ? String(vars.n) : '');
+  return sanitizeName(out);
+}
+
+/** Refresh the live filename preview for the active mode. */
+function updateNamePreview() {
+  const ext = fmtExt(outFormat);
+  setText('outNameExt', '.' + ext);
+  const tpl = nameTemplate();
+  const date = dateStamp();
+  const prev = $opt('outNamePreview');
+  if (!prev) return;
+  if (convMode === 'batch') {
+    const sample = batchFiles[0]?.name;
+    const base = sample ? fileBase(sample) : 'example';
+    const out = applyNameTemplate(tpl, { name: base, fmt: outFormat, date, n: 1 });
+    prev.textContent = batchFiles.length
+      ? `Preview (file 1 of ${batchFiles.length}) — ${out}.${ext}`
+      : `Preview — ${out}.${ext}`;
+  } else {
+    const base = summary ? fileBase(summary.name) : 'example';
+    const out = applyNameTemplate(tpl, { name: base, fmt: outFormat, date });
+    prev.textContent = `Preview — ${out}.${ext}`;
+  }
+  prev.className = 'status';
+}
+
 /** Switch the Converter between single-file and folder-batch modes. */
 function setConvMode(m: ConvMode) {
   if (batchRunning) return; // don't tear the UI out from under a running batch
@@ -382,6 +456,10 @@ function setConvMode(m: ConvMode) {
   $opt('modeBatch')?.setAttribute('aria-pressed', String(m === 'batch'));
   $opt('convSingle')?.classList.toggle('hidden', m !== 'single');
   $opt('convBatch')?.classList.toggle('hidden', m !== 'batch');
+  // Tape Image is a batch-only writer; if it was picked in batch, fall back to a
+  // valid single-mode format when switching to single so the chip stays in sync.
+  if (m === 'single' && outFormat === 'tpimage') selectFormat('segy1');
+  updateNamePreview();
 }
 
 /** Mirror the chosen output format onto both chip groups + the shared state. */
@@ -392,6 +470,7 @@ function selectFormat(fmt: string) {
     if (!g) continue;
     for (const b of g.querySelectorAll('button')) b.classList.toggle('sel', b.getAttribute('data-fmt') === fmt);
   }
+  updateNamePreview();
 }
 
 // ── Single-file convert ──
@@ -402,7 +481,8 @@ async function onConvert() {
   setState('busy', 'Converting…');
   ($('convertBtn') as HTMLButtonElement).disabled = true;
   try {
-    const r = await api.convertSingle(outFormat);
+    const outBase = applyNameTemplate(nameTemplate(), { name: fileBase(summary.name), fmt: outFormat, date: dateStamp() });
+    const r = await api.convertSingle(outFormat, outBase);
     if (r.ok) { setStatus('convStatus', '✓ Saved ' + r.path, 'ok'); setState('ok', 'Saved'); }
     else if (r.canceled) { setStatus('convStatus', ''); updateStatusStrip(); }
     else { setStatus('convStatus', 'Conversion failed: ' + (r.error || 'unknown'), 'err'); setState('err', 'Convert failed'); }
@@ -435,6 +515,7 @@ async function pickBatchFolder() {
     setText('batchCount', String(res.files.length));
     setText('batchDir', res.dir);
     setText('wizFolderSub', `${res.files.length} seismic file${res.files.length === 1 ? '' : 's'} in this folder.`);
+    updateNamePreview();
     $('batchFileList').innerHTML = '';
     setStatus('batchStatus', res.files.length ? '' : 'No seismic files in that folder.', res.files.length ? '' : 'err');
     refreshWizard();
@@ -482,7 +563,7 @@ async function runBatch() {
   setStatus('batchStatus', '');
   setState('busy', `Converting 0 / ${batchFiles.length}`);
   try {
-    const r = await api.batchConvert({ files: batchFiles, format: outFormat, outDir: batchOutDir });
+    const r = await api.batchConvert({ files: batchFiles, format: outFormat, outDir: batchOutDir, nameTemplate: nameTemplate(), dateStr: dateStamp() });
     finishBatch(r);
   } catch (e) {
     setStatus('batchStatus', 'Batch failed: ' + errMsg(e), 'err');
@@ -639,6 +720,7 @@ async function clearConverter() {
   const fill = $opt('batchProgFill');
   if (fill) (fill as HTMLElement).style.width = '0%';
   refreshWizard();
+  updateNamePreview();
   setState('idle', 'Cleared');
   // labels back on the empty Trace / Section views
   setText('traceLabel', 'Open a file to inspect traces');
@@ -1448,6 +1530,16 @@ function init() {
   };
   $opt('fmtChips')?.addEventListener('click', onChip);
   $opt('fmtChipsBatch')?.addEventListener('click', onChip);
+
+  // ── Converter: output-name controls (template + date → live preview) ──
+  const dateEl = $opt('outNameDate') as HTMLInputElement | null;
+  if (dateEl && !dateEl.value) {
+    const d = new Date();
+    const p = (n: number) => String(n).padStart(2, '0');
+    dateEl.value = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  }
+  $opt('outNameTpl')?.addEventListener('input', updateNamePreview);
+  $opt('outNameDate')?.addEventListener('input', updateNamePreview);
 
   // ── Converter: single-file ──
   $('convertBtn').addEventListener('click', onConvert);
