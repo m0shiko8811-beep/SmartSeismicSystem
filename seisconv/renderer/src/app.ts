@@ -6,6 +6,7 @@ import { normFactorPercentile } from '../../core/render/model';
 import { getColor, colorViridis } from '../../core/render/colormaps';
 import { EPSG_DB } from '../../core/sps/reproject';
 import { amplitudeSpectrum } from '../../core/dsp/fft';
+import { crossCorrelate, difference } from '../../core/dsp/correlate';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 
@@ -88,6 +89,10 @@ declare global {
       // Single-file conversion of the currently-open file (save dialog).
       // `outBaseName` (no extension) becomes the dialog's default file name.
       convertSingle(format: string, outBaseName?: string): Promise<ConvResult>;
+      // Trace Workbench EXPORT: write the collected traces out as a seismic file
+      // in `format` (save dialog). `sampleInt` (µs) stamps the synthetic file;
+      // `baseName` (no extension) seeds the dialog's default name.
+      convertTraces(args: { traces: { samples: Float32Array; nSamples: number; sampleInt?: number }[]; sampleInt?: number; format: string; baseName?: string }): Promise<ConvResult>;
       // Folder picker → enumerated seismic files; null if cancelled / none.
       pickInputFolder(): Promise<PickFolderResult>;
       // Destination-folder picker; null if cancelled.
@@ -322,7 +327,7 @@ function switchTab(tab: Tab) {
   if (tab === 'section' && summary) void refreshSection();
   if (tab === 'sps' && spsSummary) void refreshSps();
   if (tab === 'vel' && velResult) drawVelocity();
-  if (tab === 'workbench') drawWorkbench();
+  if (tab === 'workbench') { drawWorkbench(); wbUpdateAnalysis(); }
 }
 
 function fmtRate(si: number | null) {
@@ -1740,6 +1745,8 @@ function wbAddTrace(sourceName: string, traceIndex: number, samples: Float32Arra
   wbFit(); // new extent ⇒ refit the shared window so the addition is visible
   renderWorkbenchList();
   drawWorkbench();
+  wbUpdateAnalysis();
+  wbUpdateExport();
 }
 
 /** Remove one trace by id; refit + redraw (clears the view when empty). */
@@ -1748,14 +1755,21 @@ function wbRemove(id: number) {
   wbFit();
   renderWorkbenchList();
   drawWorkbench();
+  wbUpdateAnalysis();
+  wbUpdateExport();
 }
 
 /** Drop the whole collection. */
 function wbClear() {
   wbTraces = [];
   wbView.init = false;
+  wbSelA = -1;
+  wbSelB = -1;
   renderWorkbenchList();
   drawWorkbench();
+  wbUpdateAnalysis();
+  wbUpdateExport();
+  setStatus('wbExportStatus', '');
   setStatus('wbStatus', '');
 }
 
@@ -1937,6 +1951,246 @@ function drawWorkbench() {
   if (lab) lab.textContent = `${wbTraces.length} trace${wbTraces.length === 1 ? '' : 's'} · ${wbMode === 'side' ? 'side-by-side' : 'overlay'} · ${s0}–${s1} samples`;
 }
 
+// ── Trace Workbench · ANALYSIS (cross-correlation + difference + stats) ──
+// Pick any two collected traces (A, B) and compare them numerically:
+//  • normalized cross-correlation curve (r vs lag) with the peak marked,
+//  • the difference trace A − B (drawn with the shared wiggle renderer),
+//  • RMS amplitudes + B/A gain ratio.
+// All compute is client-side (the samples already live in wbTraces) via the pure
+// crossCorrelate/difference core ops — no worker round-trip.
+
+let wbSelA = 0; // chosen A trace id (−1 ⇒ none)
+let wbSelB = 0; // chosen B trace id (−1 ⇒ none)
+
+/** Find a collected trace by id (null when absent). */
+function wbTraceById(id: number): WbTrace | null {
+  return wbTraces.find((t) => t.id === id) ?? null;
+}
+
+/** (Re)populate the A/B <select>s from the collection, preserving valid picks
+ *  and defaulting to the first two distinct traces. */
+function wbFillAnalysisSelects() {
+  const selA = $opt('wbSelA') as HTMLSelectElement | null;
+  const selB = $opt('wbSelB') as HTMLSelectElement | null;
+  if (!selA || !selB) return;
+  const opts = wbTraces
+    .map((t) => `<option value="${t.id}">${t.sourceName} #${t.traceIndex + 1}</option>`)
+    .join('');
+  // Default picks: keep prior choices if still present, else first / second trace.
+  if (!wbTraceById(wbSelA)) wbSelA = wbTraces[0]?.id ?? -1;
+  if (!wbTraceById(wbSelB) || (wbTraces.length > 1 && wbSelB === wbSelA)) {
+    wbSelB = wbTraces.find((t) => t.id !== wbSelA)?.id ?? wbTraces[0]?.id ?? -1;
+  }
+  selA.innerHTML = opts;
+  selB.innerHTML = opts;
+  if (wbSelA >= 0) selA.value = String(wbSelA);
+  if (wbSelB >= 0) selB.value = String(wbSelB);
+}
+
+/** Plot a normalized cross-correlation curve (r vs lag ms) with the peak marked. */
+function wbDrawCorr(cc: { lags: Float32Array; corr: Float32Array; bestLagMs: number; bestCoef: number }) {
+  const cv = $opt('wbCorrCanvas') as HTMLCanvasElement | null;
+  if (!cv) return;
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth || 800;
+  const H = cv.clientHeight || 160;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  const ctx = cv.getContext('2d')!;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#0d1f33';
+  ctx.fillRect(0, 0, W, H);
+
+  const ML = 44, MR = 12, MT = 10, MB = 22;
+  const pw = W - ML - MR, ph = H - MT - MB;
+  ctx.strokeStyle = '#214564';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(ML, MT, pw, ph);
+
+  const n = cc.corr.length;
+  if (n < 2) return;
+  const lagMin = cc.lags[0], lagMax = cc.lags[n - 1];
+  const lagSpan = lagMax - lagMin || 1;
+  const xAt = (lagMs: number) => ML + ((lagMs - lagMin) / lagSpan) * pw;
+  // r axis is [-1,1]; y grows downward, 0 in the middle.
+  const yAt = (r: number) => MT + (1 - (r + 1) / 2) * ph;
+
+  // grid: zero-lag vertical, r=0 horizontal, ±1 frame already drawn.
+  ctx.strokeStyle = '#173049';
+  ctx.beginPath(); ctx.moveTo(ML, yAt(0)); ctx.lineTo(ML + pw, yAt(0)); ctx.stroke();
+  if (lagMin <= 0 && lagMax >= 0) {
+    const xz = xAt(0);
+    ctx.strokeStyle = '#264a68';
+    ctx.beginPath(); ctx.moveTo(xz, MT); ctx.lineTo(xz, MT + ph); ctx.stroke();
+  }
+
+  // axis labels (lag ms across, r down)
+  ctx.fillStyle = '#7e93ac';
+  ctx.font = '10px Consolas, monospace';
+  ctx.textAlign = 'center';
+  for (let k = 0; k <= 4; k++) {
+    const lag = lagMin + (lagSpan * k) / 4;
+    ctx.fillText(lag.toFixed(0), ML + (pw * k) / 4, MT + ph + 14);
+  }
+  ctx.textAlign = 'right';
+  ctx.fillText('+1', ML - 6, yAt(1) + 3);
+  ctx.fillText(' 0', ML - 6, yAt(0) + 3);
+  ctx.fillText('-1', ML - 6, yAt(-1) + 3);
+  ctx.textAlign = 'left';
+
+  // correlation curve
+  ctx.strokeStyle = '#34dbd0';
+  ctx.lineWidth = 1.25;
+  ctx.beginPath();
+  for (let i = 0; i < n; i++) {
+    const x = xAt(cc.lags[i]);
+    const y = yAt(Math.max(-1, Math.min(1, cc.corr[i])));
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // peak marker
+  const px = xAt(cc.bestLagMs);
+  const py = yAt(Math.max(-1, Math.min(1, cc.bestCoef)));
+  ctx.fillStyle = '#ffb454';
+  ctx.beginPath(); ctx.arc(px, py, 3.5, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#ffb454';
+  ctx.setLineDash([3, 3]);
+  ctx.beginPath(); ctx.moveTo(px, MT); ctx.lineTo(px, MT + ph); ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+/** Draw the difference trace A − B in its own canvas (reuses wbDrawWiggle). */
+function wbDrawDiff(diff: Float32Array, sampleInt: number) {
+  const cv = $opt('wbDiffCanvas') as HTMLCanvasElement | null;
+  if (!cv) return;
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth || 800;
+  const H = cv.clientHeight || 200;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  const ctx = cv.getContext('2d')!;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#0d1f33';
+  ctx.fillRect(0, 0, W, H);
+
+  const ML = 60, MR = 14, MT = 14, MB = 26;
+  const pw = W - ML - MR, ph = H - MT - MB;
+  ctx.strokeStyle = '#214564';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(ML, MT, pw, ph);
+
+  const n = diff.length;
+  if (n < 1) return;
+  const s0 = 0, s1 = n;
+  const denom = s1 - s0 > 1 ? s1 - s0 - 1 : 1;
+
+  // time axis (ms down) — same labelling style as the main workbench canvas.
+  ctx.fillStyle = '#7e93ac';
+  ctx.font = '10px Consolas, monospace';
+  const msPerSample = (sampleInt || 0) / 1000;
+  for (let k = 0; k <= 5; k++) {
+    const y = MT + (ph * k) / 5;
+    const sampleAt = s0 + (denom * k) / 5;
+    ctx.fillText((sampleAt * msPerSample).toFixed(0) + ' ms', 6, y + 3);
+    ctx.strokeStyle = '#173049';
+    ctx.beginPath(); ctx.moveTo(ML, y); ctx.lineTo(ML + pw, y); ctx.stroke();
+  }
+
+  const cx = ML + pw / 2;
+  ctx.strokeStyle = '#264a68';
+  ctx.beginPath(); ctx.moveTo(cx, MT); ctx.lineTo(cx, MT + ph); ctx.stroke();
+
+  const nf = normFactorPercentile(diff, 0.95) || 1;
+  const dtrace: WbTrace = { id: -1, sourceName: 'A−B', traceIndex: 0, samples: diff, sampleInt, nSamples: n, color: '#ff6e9c' };
+  wbDrawWiggle(ctx, dtrace, cx, pw / 2, MT, ph, s0, s1, nf, '#ff6e9c');
+}
+
+/** Recompute + redraw the whole ANALYSIS section from the current A/B picks.
+ *  Hides itself behind a placeholder when fewer than two traces are collected. */
+function wbUpdateAnalysis() {
+  const pick = $opt('wbAnalysisPick');
+  const body = $opt('wbAnalysisBody');
+  const empty = $opt('wbAnalysisEmpty');
+  const readout = $opt('wbCorrReadout');
+  const stats = $opt('wbStats');
+
+  if (wbTraces.length < 2) {
+    if (pick) (pick as HTMLElement).style.display = 'none';
+    if (body) (body as HTMLElement).style.display = 'none';
+    if (empty) (empty as HTMLElement).style.display = '';
+    if (readout) readout.textContent = '—';
+    if (stats) stats.textContent = '';
+    return;
+  }
+
+  wbFillAnalysisSelects();
+  if (pick) (pick as HTMLElement).style.display = '';
+  if (body) (body as HTMLElement).style.display = '';
+  if (empty) (empty as HTMLElement).style.display = 'none';
+
+  const a = wbTraceById(wbSelA);
+  const b = wbTraceById(wbSelB);
+  if (!a || !b) return;
+
+  const cc = crossCorrelate(a.samples, b.samples, a.sampleInt);
+  const df = difference(a.samples, b.samples);
+
+  wbDrawCorr(cc);
+  wbDrawDiff(df.diff, a.sampleInt);
+
+  if (readout) readout.textContent = `best lag = ${cc.bestLagMs.toFixed(2)} ms · r = ${cc.bestCoef.toFixed(3)}`;
+  if (stats) {
+    stats.textContent =
+      `RMS A=${df.rmsA.toPrecision(4)} · RMS B=${df.rmsB.toPrecision(4)} · ` +
+      `RMS(A−B)=${df.rmsDiff.toPrecision(4)} · gain B/A=${df.gainRatio.toFixed(3)}`;
+  }
+}
+
+// ── Trace Workbench · EXPORT ──
+// Write the collected traces out as ONE seismic file in the chosen writer format.
+// Mirrors the Converter's SAVE flow: the worker assembles a synthetic ParsedFile
+// from the samples and runs the writer; main shows the native Save dialog. The
+// button is disabled while the collection is empty; a note appears when the
+// collected traces carry DIFFERENT sample intervals (the output uses the first).
+
+/** Sync the EXPORT controls to the collection: enable/disable the button and
+ *  show the mixed-sample-interval note when traces disagree on dt. */
+function wbUpdateExport() {
+  const btn = $opt('wbExportBtn') as HTMLButtonElement | null;
+  if (btn) btn.disabled = wbTraces.length === 0;
+  const note = $opt('wbExportSiNote');
+  if (note) {
+    const first = wbTraces[0]?.sampleInt;
+    const mixed = wbTraces.length > 1 && wbTraces.some((t) => t.sampleInt !== first);
+    (note as HTMLElement).style.display = mixed ? '' : 'none';
+  }
+}
+
+/** Export the collected traces as a single seismic file in the chosen format. */
+async function wbExport() {
+  if (!wbTraces.length) return;
+  const fmt = ($opt('wbExportFmt') as HTMLSelectElement | null)?.value || 'segy1';
+  const btn = $opt('wbExportBtn') as HTMLButtonElement | null;
+  if (btn) btn.disabled = true;
+  setStatus('wbExportStatus', 'Writing…');
+  try {
+    const r = await api.convertTraces({
+      traces: wbTraces.map((t) => ({ samples: t.samples, nSamples: t.nSamples, sampleInt: t.sampleInt })),
+      sampleInt: wbTraces[0]?.sampleInt,
+      format: fmt,
+      baseName: 'workbench',
+    });
+    if (r.ok) setStatus('wbExportStatus', '✓ Saved ' + r.path, 'ok');
+    else if (r.canceled) setStatus('wbExportStatus', '');
+    else setStatus('wbExportStatus', 'Export failed: ' + (r.error || 'unknown'), 'err');
+  } catch (e) {
+    setStatus('wbExportStatus', 'Export failed: ' + errMsg(e), 'err');
+  } finally {
+    wbUpdateExport(); // re-enable per current collection state
+  }
+}
+
 /** Attach wheel-zoom / drag-pan / dblclick-fit to the workbench canvas (once). */
 function workbenchInteractions() {
   const cv = $opt('wbCanvas') as HTMLCanvasElement | null;
@@ -1978,7 +2232,20 @@ function workbenchInteractions() {
   $opt('wbZoomIn')?.addEventListener('click', () => wbZoomButton(1 / 1.4));
   $opt('wbZoomOut')?.addEventListener('click', () => wbZoomButton(1.4));
   $opt('wbZoomFit')?.addEventListener('click', () => { wbFit(); drawWorkbench(); });
+  // ANALYSIS A/B pickers → recompute on change.
+  $opt('wbSelA')?.addEventListener('change', (e) => {
+    wbSelA = parseInt((e.target as HTMLSelectElement).value, 10);
+    wbUpdateAnalysis();
+  });
+  $opt('wbSelB')?.addEventListener('change', (e) => {
+    wbSelB = parseInt((e.target as HTMLSelectElement).value, 10);
+    wbUpdateAnalysis();
+  });
+  // EXPORT: write the collected traces out as one seismic file.
+  $opt('wbExportBtn')?.addEventListener('click', () => void wbExport());
   renderWorkbenchList();
+  wbUpdateAnalysis();
+  wbUpdateExport();
 }
 
 // ── SPS 2.1 (survey geometry) ──

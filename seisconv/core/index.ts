@@ -24,6 +24,7 @@ export * from './formats/tapeimage';
 export * from './dsp/interpolate';
 export * from './dsp/agc';
 export * from './dsp/fft';
+export * from './dsp/correlate';
 export * from './dsp/semblance';
 export * from './render/colormaps';
 export * from './render/model';

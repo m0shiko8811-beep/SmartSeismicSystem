@@ -249,6 +249,12 @@ const api = {
    *  `outBaseName` (no extension) becomes the save dialog's default file name. */
   convertSingle: (format: string, outBaseName?: string): Promise<ConvertResult> =>
     ipcRenderer.invoke('seisconv:convertSingle', format, outBaseName),
+  /** Trace Workbench EXPORT: write the collected traces out as a seismic file in
+   *  `format` and save via a native dialog. `sampleInt` (µs) is stamped on the
+   *  synthetic file (the collection's first trace); `baseName` (no extension)
+   *  seeds the dialog's default name. */
+  convertTraces: (args: { traces: { samples: Float32Array; nSamples: number; sampleInt?: number }[]; sampleInt?: number; format: string; baseName?: string }): Promise<ConvertResult> =>
+    ipcRenderer.invoke('seisconv:convertTraces', args),
   /** Convert a list of files to `format`, writing each into outDir; emits progress per file. */
   batchConvert: (opts: BatchOpts): Promise<BatchResult> => ipcRenderer.invoke('seisconv:batchConvert', opts),
   /** Subscribe to batch-convert progress; returns an unsubscribe fn. */

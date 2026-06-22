@@ -1167,6 +1167,37 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
         <div class="status" id="wbStatus" style="margin:2px 0 8px;"></div>
         <canvas id="wbCanvas" class="canvas"></canvas>
 
+        <!-- ANALYSIS: cross-correlation + difference + stats for any two traces -->
+        <div class="card" id="wbAnalysisCard" style="margin-top:16px;">
+          <div class="ch">
+            <h2>Analysis</h2>
+            <span class="hint">Cross-correlation, difference &amp; RMS stats for any two collected traces</span>
+          </div>
+          <div class="cb" style="padding-top:6px;padding-bottom:10px;">
+            <!-- A/B pickers (populated from the collected traces) -->
+            <div class="sec-bar" id="wbAnalysisPick" style="display:none;">
+              <label class="ctl-lbl">A <select id="wbSelA" class="numin" style="width:auto;min-width:160px;"></select></label>
+              <label class="ctl-lbl">B <select id="wbSelB" class="numin" style="width:auto;min-width:160px;"></select></label>
+              <span style="flex:1"></span>
+              <span class="trace-label" id="wbCorrReadout">—</span>
+            </div>
+
+            <!-- Placeholder until ≥2 traces are collected -->
+            <div class="hdr-empty" id="wbAnalysisEmpty">Collect at least two traces to analyse.</div>
+
+            <!-- Cross-correlation curve + difference wiggle -->
+            <div id="wbAnalysisBody" style="display:none;">
+              <div class="hint" style="margin:8px 0 4px;">Cross-correlation (r vs lag, 0-lag centred; peak marked)</div>
+              <canvas id="wbCorrCanvas" class="canvas" style="height:160px;"></canvas>
+
+              <div class="hint" style="margin:14px 0 4px;">Difference trace (A &minus; B)</div>
+              <canvas id="wbDiffCanvas" class="canvas" style="height:200px;"></canvas>
+
+              <div class="status" id="wbStats" style="margin:8px 0 0;"></div>
+            </div>
+          </div>
+        </div>
+
         <!-- Collected-trace list + clear-all -->
         <div class="card" id="wbListCard" style="margin-top:16px;">
           <div class="ch">
@@ -1178,6 +1209,33 @@ main.main{grid-area:main;overflow:hidden;display:flex;flex-direction:column;min-
             <div class="wb-list" id="wbList">
               <div class="hdr-empty">No traces collected yet.</div>
             </div>
+          </div>
+        </div>
+
+        <!-- EXPORT: write the collected traces out as one seismic file -->
+        <div class="card" id="wbExportCard" style="margin-top:16px;">
+          <div class="ch">
+            <h2>Export</h2>
+            <span class="hint">Save the collected traces as a single seismic file</span>
+          </div>
+          <div class="cb" style="padding-top:6px;padding-bottom:10px;">
+            <div class="sec-bar">
+              <label class="ctl-lbl">Format
+                <select id="wbExportFmt" class="numin" style="width:auto;min-width:150px;">
+                  <option value="segy1">SEG-Y Rev1</option>
+                  <option value="segy0">SEG-Y Rev0</option>
+                  <option value="segy2">SEG-Y Rev2</option>
+                  <option value="su">Seismic Unix</option>
+                  <option value="seg2">SEG-2 / .dat</option>
+                  <option value="segd1">SEG-D Rev1</option>
+                  <option value="segd3">SEG-D Rev3</option>
+                  <option value="csv">CSV / ASCII</option>
+                </select>
+              </label>
+              <button class="btn sm" id="wbExportBtn" disabled>Export…</button>
+            </div>
+            <div class="hint" id="wbExportSiNote" style="display:none;margin:8px 0 0;color:#ffb454;">Collected traces have different sample intervals — the output uses the first trace's interval.</div>
+            <div class="status" id="wbExportStatus" style="margin:8px 0 0;"></div>
           </div>
         </div>
       </section>

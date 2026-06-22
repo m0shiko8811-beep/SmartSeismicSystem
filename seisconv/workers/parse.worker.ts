@@ -21,7 +21,7 @@ let currentSPSFiles: { name: string; text: string; type: 'S' | 'R' | 'X' | 'mixe
 
 interface Req {
   id: number;
-  type: 'open' | 'trace' | 'extractTrace' | 'section' | 'convert' | 'convertPath' | 'reset' | 'openSPS' | 'spsGeometry' | 'spsXrefLines' | 'spsFold' | 'spsQC' | 'spsPointDetail' | 'spsReproject' | 'spsExport' | 'semblance';
+  type: 'open' | 'trace' | 'extractTrace' | 'section' | 'convert' | 'convertPath' | 'convertTraces' | 'reset' | 'openSPS' | 'spsGeometry' | 'spsXrefLines' | 'spsFold' | 'spsQC' | 'spsPointDetail' | 'spsReproject' | 'spsExport' | 'semblance';
   path?: string;
   paths?: string[];
   qc?: QCParams;
@@ -40,6 +40,10 @@ interface Req {
   velStep?: number;
   index?: number;
   format?: string;
+  // convertTraces (Trace Workbench EXPORT): the collected traces + the sample
+  // interval (µs) to stamp on the synthetic file (the collection's first trace).
+  traces?: { samples: Float32Array; nSamples: number; hdr?: Record<string, number | string> }[];
+  sampleInt?: number;
   maxTraces?: number;
   maxSamples?: number;
   // Optional visible sub-window for the section view (full-data indices). When
@@ -673,6 +677,35 @@ port.on('message', (req: Req) => {
         },
         [samples.buffer],
       );
+      return;
+    }
+
+    // Trace Workbench EXPORT: assemble a synthetic ParsedFile from the collected
+    // traces and run it through the chosen writer — same SAVE flow as `convert`,
+    // but the data comes from the request, not the persistently-open file. No
+    // open file is required, so it sits above the `!current` guard. The writers
+    // size the record from the LONGEST trace and clamp, so mixed-length traces
+    // are safe; the sample interval defaults inside the writers (→ 2000 µs) when
+    // the collection carried none.
+    if (type === 'convertTraces') {
+      const writer = getWriter(req.format!);
+      if (!writer) {
+        port.postMessage({ id, ok: false, error: `unknown output format: ${req.format}` });
+        return;
+      }
+      const inTraces = req.traces ?? [];
+      const pf: ParsedFile = {
+        format: 'SEG-Y',
+        revision: 1,
+        textHeader: '',
+        bh: { sampleInt: req.sampleInt },
+        traces: inTraces.map((t) => ({ hdr: t.hdr ?? {}, samples: t.samples, nSamples: t.nSamples })),
+        traceCount: inTraces.length,
+        errors: [],
+      };
+      const out = writer.write(pf);
+      const ab = out.buffer.slice(out.byteOffset, out.byteOffset + out.byteLength) as ArrayBuffer;
+      port.postMessage({ id, ok: true, bytes: ab, ext: writer.ext }, [ab]);
       return;
     }
 

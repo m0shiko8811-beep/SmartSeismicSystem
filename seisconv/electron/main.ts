@@ -284,6 +284,33 @@ ipcMain.handle('seisconv:convertSingle', async (_e, format: string, outBaseName?
   return { ok: true, path: save.filePath };
 });
 
+// Trace Workbench EXPORT: write the collected traces out as a seismic file in
+// `format`. The worker assembles a synthetic ParsedFile from the passed traces +
+// sample interval and runs the writer; we save the returned bytes via the SAME
+// native dialog flow as convertSingle. `baseName` (no extension) seeds the
+// dialog's default file name.
+ipcMain.handle(
+  'seisconv:convertTraces',
+  async (
+    _e,
+    args: { traces: { samples: Float32Array; nSamples: number; sampleInt?: number }[]; sampleInt?: number; format: string; baseName?: string },
+  ) => {
+    const r = await callWorker<{ ok: boolean; bytes?: ArrayBuffer; ext?: string; error?: string }>({
+      type: 'convertTraces',
+      format: args.format,
+      sampleInt: args.sampleInt,
+      traces: args.traces,
+    });
+    if (!r.ok || !r.bytes) return { ok: false, error: r.error ?? 'conversion failed' };
+    if (!win) return { ok: false, error: 'no window' };
+    const base = args.baseName && args.baseName.trim() ? sanitizeBaseName(args.baseName) : 'workbench';
+    const save = await dialog.showSaveDialog(win, { defaultPath: `${base}.${r.ext}`, filters: SEISMIC_FILTERS });
+    if (save.canceled || !save.filePath) return { ok: false, canceled: true };
+    await writeFile(save.filePath, Buffer.from(r.bytes));
+    return { ok: true, path: save.filePath };
+  },
+);
+
 // Convert a list of files to `format`, writing each into outDir under a name
 // derived from the output-name template ({name}/{fmt}/{date}/{n}) + writer ext.
 // Emits a per-file progress event; honors cancel between files.
