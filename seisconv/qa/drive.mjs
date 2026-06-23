@@ -20,17 +20,16 @@
 // dist/main.js + renderer/dist/app.js, and that `playwright` is installed.
 
 import { _electron as electron } from 'playwright';
-import { fileURLToPath } from 'node:url';
-import { dirname, join, resolve } from 'node:path';
-import { mkdirSync, existsSync } from 'node:fs';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const APP_DIR = resolve(__dirname, '..');        // the seisconv/ root (package.json "main"=dist/main.js)
-const SHOTS = join(__dirname, 'shots');
-mkdirSync(SHOTS, { recursive: true });
+import { join } from 'node:path';
+import { existsSync } from 'node:fs';
+import {
+  sleep, mockDialogs, gotoTab, openFile,
+  APP_DIR, SHOTS, SEGY,
+} from './harness.mjs';
 
 // ── Test files (override via env) ──────────────────────────────────────────
-const SEGY = process.env.SEISCONV_QA_SEGY || 'D:\\Projects\\SeisconvApp\\Data_Games\\00000186_SegY_Rev2.segy';
+// SEGY comes from the shared harness (same default). LE/SPS are exercised only
+// by this full driver, so they stay local.
 const LE   = process.env.SEISCONV_QA_LE   || 'F:\\YAGUR_2026\\YAGUR_2026\\SINGLE_IMAGE_1\\SEGY_Rev_2\\00000035.sgy';
 const SPS  = (process.env.SEISCONV_QA_SPS || [
   'D:\\Projects\\SeisconvApp\\SPS_Games\\NodesCheck20.s01',
@@ -40,18 +39,6 @@ const SPS  = (process.env.SEISCONV_QA_SPS || [
 
 // Dark scientific background painted under every plot canvas (see index.html .canvas).
 const CANVAS_BG = { r: 0x0d, g: 0x1f, b: 0x33 };
-
-// ── tiny helpers ────────────────────────────────────────────────────────────
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-/** Point the MAIN-process open dialog at `paths` and make the save dialog cancel
- *  (so write flows complete the conversion path but never touch the filesystem). */
-async function mockDialogs(app, paths) {
-  await app.evaluate(async ({ dialog }, p) => {
-    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: p });
-    dialog.showSaveDialog = async () => ({ canceled: true });
-  }, paths);
-}
 
 /** Read the named <canvas> back as pixels in the renderer and decide if it is
  *  "blank" — i.e. every sampled pixel equals the dark plot background (within a
@@ -87,43 +74,9 @@ async function canvasBlank(win, id, bg) {
   }, { id, bg });
 }
 
-/** Click a rail tab and wait for its panel to become visible. */
-async function gotoTab(win, tabId, panelId) {
-  await win.click('#' + tabId);
-  await win.waitForFunction((pid) => {
-    const el = document.getElementById(pid);
-    return el && getComputedStyle(el).display !== 'none';
-  }, panelId, { timeout: 5000 });
-  await sleep(250); // let the tab's draw settle
-}
-
-/** Open a file via the Open button and wait for the worker summary to populate
- *  (#fsTraces leaves its "—" placeholder). Returns the trace count text.
- *  The header #openBtn is HIDDEN while the Converter tab is active (app.ts line
- *  336), where the in-panel #openBtn2 ("Pick a seismic file…") is the live button;
- *  both call the same onOpen handler. Click whichever is visible. */
-async function openFile(app, win, path) {
-  await mockDialogs(app, [path]);
-  const onConv = await win.evaluate(() => {
-    const p = document.getElementById('panel-conv');
-    return p && getComputedStyle(p).display !== 'none';
-  });
-  const openSel = onConv ? '#openBtn2' : '#openBtn';
-  const base = path.replace(/\\/g, '/').split('/').pop();
-  await win.click(openSel);
-  // Wait until the LOADED-FILE NAME reflects THIS file — not just until #fsTraces
-  // is non-"—". On a re-open the summary already holds the previous file's values,
-  // so keying on the name (not the placeholder) avoids reading stale data before
-  // the async worker parse of the new file lands.
-  await win.waitForFunction((b) => {
-    const t = document.getElementById('fsTraces');
-    const name = (document.getElementById('singleFoundName')?.textContent
-              || document.getElementById('fiName')?.textContent || '').trim();
-    const summaryReady = t && t.textContent.trim() !== '' && t.textContent.trim() !== '—';
-    return summaryReady && name.includes(b);
-  }, base, { timeout: 30000 });
-  return (await win.textContent('#fsTraces'))?.trim();
-}
+// gotoTab + openFile (and sleep, mockDialogs) come from ./harness.mjs. Note the
+// shared openFile already switches to the Converter tab and clicks the right
+// open button (#openBtn2 / #openBtn) itself — step 1 below must NOT re-click it.
 
 // ── run ──────────────────────────────────────────────────────────────────────
 const results = [];   // { tab, pass, notes[], errors[], shot }

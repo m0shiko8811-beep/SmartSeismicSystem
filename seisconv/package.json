@@ -17,6 +17,7 @@
     "qc:realdata": "tsx scripts/realdata-qc.ts",
     "qc:positioning": "tsx scripts/positioning-qc.ts",
     "qa": "node qa/drive.mjs",
+    "verify": "node qa/verify.mjs",
     "typecheck": "tsc --noEmit",
     "dist": "npm run build && electron-builder"
   },
