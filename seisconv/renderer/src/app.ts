@@ -1206,7 +1206,7 @@ async function onConvert() {
   try {
     const outBase = applyNameTemplate(nameTemplate(), { name: fileBase(summary.name), fmt: outFormat, date: dateStamp() });
     const r = await api.convertSingle(outFormat, outBase);
-    if (r.ok) { setStatus('convStatus', '✓ Saved ' + r.path, 'ok'); setState('ok', 'Saved'); }
+    if (r.ok) { setStatus('convStatus', '✓ Saved ' + r.path, 'ok'); setState('ok', 'Saved'); audit('convert', `${fmtLabel(outFormat)} → ${r.path}`, 'conv'); }
     else if (r.canceled) { setStatus('convStatus', ''); updateStatusStrip(); }
     else { setStatus('convStatus', 'Conversion failed: ' + (r.error || 'unknown'), 'err'); setState('err', 'Convert failed'); }
   } catch (e) {
@@ -1368,6 +1368,7 @@ function finishBatch(r: BatchSummary) {
   batchRunning = false;
   setBatchControlsRunning(false);
   refreshWizard();
+  if (r.done > 0) audit('convert', `batch ${fmtLabel(outFormat)} — ${r.done} converted, ${r.failed} failed → ${batchOutDir}`, 'conv');
   const processed = r.done + r.failed;
   const fill = $opt('batchProgFill');
   const pct = r.canceled ? (r.total > 0 ? (processed / r.total) * 100 : 0) : 100;
@@ -1498,28 +1499,37 @@ function activeTabHasData(tab: Tab): boolean {
   }
 }
 
-/** Clear the data of whichever tab is currently active. */
+/** Clear the data of whichever tab is currently active. The data-dropping tabs
+ *  (Velocity / Workbench / Observer Log) snapshot their in-memory state to a
+ *  backup first so the user can roll back, and every clear is audited. */
 function clearActiveTab() {
   switch (activeTab) {
     case 'conv':
     case 'trace':
     case 'section':
       void clearConverter();   // shared open file → reset file + all derived views
+      audit('clear', 'cleared open file + derived views', 'conv');
       break;
     case 'sps':
       void clearSPS();
+      audit('clear', 'cleared SPS survey', 'sps');
       break;
     case 'vel':
+      if (velPicks.length) snapshotBackup('vel', velPicks, `${velPicks.length} velocity picks (before Clear)`);
+      audit('clear', `cleared velocity (${velPicks.length} pick${velPicks.length === 1 ? '' : 's'})`, 'vel');
       clearVelocity();
       break;
     case 'spectrum':
       clearSpectrum();
+      audit('clear', 'cleared spectrum view', 'spectrum');
       break;
     case 'workbench':
+      if (wbTraces.length) snapshotBackup('workbench', wbTraces, `${wbTraces.length} traces (before Clear)`);
+      audit('clear', `cleared workbench (${wbTraces.length} trace${wbTraces.length === 1 ? '' : 's'})`, 'workbench');
       wbClear();
       break;
     case 'obslog':
-      clearLogRows();
+      void clearLogRows();   // own confirm + snapshot + audit
       break;
   }
   updateHeaderClear();
@@ -2937,14 +2947,37 @@ function wbAddTrace(sourceName: string, traceIndex: number, samples: Float32Arra
   wbUpdateExport();
 }
 
-/** Remove one trace by id; refit + redraw (clears the view when empty). */
-function wbRemove(id: number) {
-  wbTraces = wbTraces.filter((t) => t.id !== id);
+/** Remove one trace by id; refit + redraw (clears the view when empty).
+ *  Provenance: confirm + audit + undo (re-inserts at the original position). */
+async function wbRemove(id: number) {
+  const pos = wbTraces.findIndex((t) => t.id === id);
+  if (pos < 0) return;
+  const saved = wbTraces[pos];
+  const what = `${saved.sourceName} · trace ${saved.traceIndex + 1}`;
+  if (!(await confirmDelete(`Remove ${what} from the workbench?`))) return;
+  // Re-find by id in case the list changed while the dialog was open.
+  const at = wbTraces.findIndex((t) => t.id === id);
+  if (at < 0) return;
+  wbTraces.splice(at, 1);
   wbFit();
   renderWorkbenchList();
   drawWorkbench();
   wbUpdateAnalysis();
   wbUpdateExport();
+  audit('delete', `trace ${what}`, 'workbench');
+  let undone = false;
+  undoToast(`Removed ${what}`, () => {
+    if (undone) return;
+    undone = true;
+    const ins = Math.min(at, wbTraces.length);
+    wbTraces.splice(ins, 0, saved);
+    wbFit();
+    renderWorkbenchList();
+    drawWorkbench();
+    wbUpdateAnalysis();
+    wbUpdateExport();
+    audit('undo-delete', `trace ${what}`, 'workbench');
+  });
 }
 
 /** Drop the whole collection. */
@@ -4650,7 +4683,7 @@ async function exportReprojected() {
   $('spsExportStatus').textContent = 'Reprojecting…';
   try {
     const r = await api.spsReproject(code);
-    if (r.ok) $('spsExportStatus').textContent = '✓ Saved ' + r.path;
+    if (r.ok) { $('spsExportStatus').textContent = '✓ Saved ' + r.path; audit('export', `SPS reprojected (EPSG:${code}) → ${r.path}`, 'sps'); }
     else if (r.canceled) $('spsExportStatus').textContent = '';
     else $('spsExportStatus').textContent = 'Failed: ' + (r.error || 'unknown');
   } catch (e) {
@@ -4683,7 +4716,7 @@ async function exportSPS(kind: 'kml' | 'geojson' | 'csv' | 'qcreport' | 'p111' |
   $('spsExpStatus').textContent = 'Exporting…';
   try {
     const r = await api.spsExport({ kind, qcParams: kind === 'qcreport' ? currentQCParams() : undefined });
-    if (r.ok) $('spsExpStatus').textContent = '✓ Saved ' + r.path;
+    if (r.ok) { $('spsExpStatus').textContent = '✓ Saved ' + r.path; audit('export', `SPS ${kind} → ${r.path}`, 'sps'); }
     else if (r.canceled) $('spsExpStatus').textContent = '';
     else $('spsExpStatus').textContent = 'Failed: ' + (r.error || 'unknown');
   } catch (e) {
@@ -4967,9 +5000,33 @@ function paintSpsHdrRaw() {
     const del = document.createElement('button');
     del.type = 'button'; del.className = 'sps-hdr-raw-del'; del.title = 'Remove record'; del.setAttribute('aria-label', 'Remove record');
     del.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>';
-    del.addEventListener('click', () => { spsHdrRawDraft.splice(i, 1); paintSpsHdrRaw(); });
+    del.addEventListener('click', () => { void spsHdrRemoveRaw(i); });
     row.appendChild(code); row.appendChild(val); row.appendChild(del);
     host.appendChild(row);
+  });
+}
+/** Confirmed, audited, undoable delete of an SPS raw header-record draft entry.
+ *  The draft only commits to disk on Apply, so this audits the draft edit and
+ *  restores at the original position on undo. */
+async function spsHdrRemoveRaw(i: number) {
+  const saved = spsHdrRawDraft[i];
+  if (!saved) return;
+  const what = `SPS header record ${saved.code || '(blank)'}`;
+  if (!(await confirmDelete(`Remove ${what} from the draft? (applies on Apply)`))) return;
+  // Re-find by identity — the draft may have changed while the dialog was open.
+  const pos = spsHdrRawDraft.indexOf(saved);
+  if (pos < 0) return;
+  spsHdrRawDraft.splice(pos, 1);
+  paintSpsHdrRaw();
+  audit('delete', what + ' (draft)', 'sps');
+  let undone = false;
+  undoToast(`Removed ${what}`, () => {
+    if (undone) return;
+    undone = true;
+    const at = Math.min(pos, spsHdrRawDraft.length);
+    spsHdrRawDraft.splice(at, 0, saved);
+    paintSpsHdrRaw();
+    audit('undo-delete', what + ' (draft)', 'sps');
   });
 }
 function spsHdrAddRaw() {
@@ -5127,11 +5184,17 @@ async function applySpsHeaders() {
   if (!req) return;
   // Attach the CRS form (label-only) when the CRS tab is active.
   if (spsHdrCrsTabActive()) req.crs = readCrsForm();
+  // Snapshot the raw-record draft before it commits to the files, so the
+  // edited/added/removed records can be restored.
+  if (spsHdrRawDraft.length) {
+    snapshotBackup('sps-draft', spsHdrRawDraft, `SPS header draft (${spsHdrRawDraft.length} records, before Apply)`);
+  }
   $('spsHdrStatus').textContent = 'Applying…';
   try {
     const r = await api.spsApplyHeaders(req as Parameters<typeof api.spsApplyHeaders>[0]);
     if (!r || !r.ok) { $('spsHdrStatus').textContent = 'Failed: ' + (r?.error || 'unknown'); return; }
     $('spsHdrStatus').textContent = '✓ Applied';
+    audit('apply', `SPS headers applied (${req.edits.length} edited, ${req.adds.length} added, ${req.removes.length} removed)`, 'sps');
     // Refresh the header view from the returned list…
     if (spsHdrState) spsHdrState.headers = r.headers;
     // …and re-pull the full state (projection / files may have changed).
@@ -5173,7 +5236,7 @@ async function exportSpsCorrected() {
   $('spsHdrStatus').textContent = 'Saving…';
   try {
     const r = await api.spsSaveCorrected();
-    if (r.ok) $('spsHdrStatus').textContent = '✓ Saved ' + r.path;
+    if (r.ok) { $('spsHdrStatus').textContent = '✓ Saved ' + r.path; audit('export', 'SPS corrected → ' + r.path, 'sps'); }
     else if (r.canceled) $('spsHdrStatus').textContent = '';
     else $('spsHdrStatus').textContent = 'Failed: ' + (r.error || 'unknown');
   } catch (e) {
@@ -5415,10 +5478,39 @@ function onVelClick(e: MouseEvent) {
     const y = MT + ((p.tMs - tLo) / tSpan) * ph;
     return Math.hypot(px - x, py - y) < 12;
   });
-  if (near >= 0) velPicks.splice(near, 1);
-  else velPicks.push({ v, tMs });
+  if (near >= 0) {
+    // Removing an existing pick is a delete → confirm + undo (provenance).
+    void velRemovePick(near);
+  } else {
+    velPicks.push({ v, tMs });
+    drawVelocity();
+    renderVelPicks();
+  }
+}
+
+/** Confirmed, audited, undoable removal of velocity pick at index `idx`. */
+async function velRemovePick(idx: number) {
+  const saved = velPicks[idx];
+  if (!saved) return;
+  const what = `velocity pick ${saved.v} m/s @ ${saved.tMs} ms`;
+  if (!(await confirmDelete(`Delete ${what}?`))) return;
+  // The array may have shifted while the dialog was open; re-find by identity.
+  const pos = velPicks.indexOf(saved);
+  if (pos < 0) return;
+  velPicks.splice(pos, 1);
   drawVelocity();
   renderVelPicks();
+  audit('delete', what, 'vel');
+  let undone = false;
+  undoToast(`Deleted ${what}`, () => {
+    if (undone) return;
+    undone = true;
+    const at = Math.min(pos, velPicks.length);
+    velPicks.splice(at, 0, saved);
+    drawVelocity();
+    renderVelPicks();
+    audit('undo-delete', what, 'vel');
+  });
 }
 
 function renderVelPicks() {
@@ -5462,7 +5554,8 @@ async function exportPicks() {
   const csv = 't_ms,v_ms\n' + velPicks.slice().sort((a, b) => a.tMs - b.tMs).map((p) => `${p.tMs},${p.v}`).join('\n') + '\n';
   try {
     const r = await api.exportText('velocity_picks.csv', csv);
-    $('velLabel').textContent = r.ok ? '✓ Saved ' + r.path : r.canceled ? '' : 'Failed: ' + (r.error || 'unknown');
+    if (r.ok) { $('velLabel').textContent = '✓ Saved ' + r.path; audit('export', `velocity picks (${velPicks.length}) → ${r.path}`, 'vel'); }
+    else $('velLabel').textContent = r.canceled ? '' : 'Failed: ' + (r.error || 'unknown');
   } catch (e) {
     $('velLabel').textContent = 'Failed: ' + errMsg(e);
   }
@@ -6406,13 +6499,20 @@ function loadLogState() {
   } catch { /* ignore corrupt state */ }
 }
 
-/** Clear only the log RECORDS (rows), keeping the configured columns + header. */
-function clearLogRows() {
+/** Clear only the log RECORDS (rows), keeping the configured columns + header.
+ *  Snapshots the whole log first (so a Restore can bring the records back) and
+ *  audits the clear. Uses the in-app confirm (window.confirm is unreliable in a
+ *  sandboxed Electron renderer). */
+async function clearLogRows() {
   if (logRows.length === 0) return;
-  if (!confirm('Clear all log records? The column configuration and project header are kept.')) return;
+  if (!(await confirmDelete('Clear all log records? The column configuration and project header are kept.'))) return;
+  snapshotBackup('obslog', { meta: logMeta, columns: logColumns, rows: logRows }, `${logRows.length} records (before Clear)`);
+  const n = logRows.length;
   logRows = [];
   saveLog();
   renderLog();
+  audit('clear', `cleared observer-log records (${n} row${n === 1 ? '' : 's'})`, 'obslog');
+  updateHeaderClear();
 }
 
 // ── File persistence: save / reload the whole log as JSON ──────────────────────
@@ -6432,7 +6532,7 @@ async function saveLogJson() {
   const payload = JSON.stringify({ meta: logMeta, columns: logColumns, rows: logRows }, null, 2);
   try {
     const r = await api.exportText('observer-log.json', payload);
-    if (r?.ok) setLogExportStatus('Saved log JSON.');
+    if (r?.ok) { setLogExportStatus('Saved log JSON.'); audit('export', `observer-log JSON (${logRows.length} records) → ${r.path}`, 'obslog'); }
   } catch { /* ignore — dialog cancelled / write error */ }
 }
 
@@ -6446,6 +6546,11 @@ async function reloadLogJson() {
     setText('ologGridLabel', 'That file has no columns — not a valid Observer Log.');
     return;
   }
+  // Reloading REPLACES the in-memory log wholesale — snapshot the current state
+  // first (if any) so the user can roll back to what was on screen.
+  if (logColumns.length || logRows.length) {
+    snapshotBackup('obslog', { meta: logMeta, columns: logColumns, rows: logRows }, `${logRows.length} records (before Reload)`);
+  }
   logMeta = (data.meta && typeof data.meta === 'object') ? data.meta : {};
   logColumns = data.columns;
   logRows = Array.isArray(data.rows) ? data.rows : [];
@@ -6454,6 +6559,7 @@ async function reloadLogJson() {
   renderLog();      // logConfigured() is now true → grid is shown, wizard skipped
   updateHeaderClear();
   setLogExportStatus('Reloaded log JSON.');
+  audit('reconfigure', `reloaded observer-log from file (${logRows.length} records, ${logColumns.length} columns)`, 'obslog');
 }
 
 // ── Tabular exports (CSV / XLSX / ODS / Report) ────────────────────────────────
@@ -6504,7 +6610,7 @@ async function exportLogCsv() {
   const text = '﻿' + buildLogCsv();
   try {
     const r = await api.exportText('observer-log.csv', text);
-    if (r?.ok) setLogExportStatus('Exported CSV.');
+    if (r?.ok) { setLogExportStatus('Exported CSV.'); audit('export', `observer-log CSV (${logRows.length} records) → ${r.path}`, 'obslog'); }
   } catch { /* ignore */ }
 }
 
@@ -6529,7 +6635,7 @@ async function exportLogXlsx() {
   try {
     const bytes = await buildXlsx(buildLogSheets(), new JSZip());
     const r = await api.exportBinary('observer-log.xlsx', bytes);
-    if (r?.ok) setLogExportStatus('Exported Excel (.xlsx).');
+    if (r?.ok) { setLogExportStatus('Exported Excel (.xlsx).'); audit('export', `observer-log XLSX (${logRows.length} records) → ${r.path}`, 'obslog'); }
   } catch { setText('ologGridLabel', 'Excel export failed.'); }
 }
 
@@ -6539,7 +6645,7 @@ async function exportLogOds() {
   try {
     const bytes = await buildOds(buildLogSheets(), new JSZip());
     const r = await api.exportBinary('observer-log.ods', bytes);
-    if (r?.ok) setLogExportStatus('Exported LibreOffice (.ods).');
+    if (r?.ok) { setLogExportStatus('Exported LibreOffice (.ods).'); audit('export', `observer-log ODS (${logRows.length} records) → ${r.path}`, 'obslog'); }
   } catch { setText('ologGridLabel', 'ODS export failed.'); }
 }
 
@@ -6616,7 +6722,7 @@ async function exportLogReport() {
   if (logRows.length === 0) return;
   try {
     const r = await api.exportText('observer-log-report.html', buildLogReportHtml());
-    if (r?.ok) setLogExportStatus('Exported report (HTML).');
+    if (r?.ok) { setLogExportStatus('Exported report (HTML).'); audit('export', `observer-log report (${logRows.length} records) → ${r.path}`, 'obslog'); }
   } catch { /* ignore */ }
 }
 
@@ -7071,7 +7177,7 @@ async function importRowsFromSps(): Promise<void> {
     }
     rows.push(r);
   }
-  if (logRows.length > 0 && !confirm(`Replace the ${logRows.length} current record${logRows.length === 1 ? '' : 's'} with ${rows.length} rows imported from SPS?`)) {
+  if (logRows.length > 0 && !(await confirmDelete(`Replace the ${logRows.length} current record${logRows.length === 1 ? '' : 's'} with ${rows.length} rows imported from SPS?`))) {
     setText('ologGridLabel', `${logRows.length} record${logRows.length === 1 ? '' : 's'} · ${logColumns.length} columns`);
     return;
   }
@@ -7381,9 +7487,9 @@ function asTemplate(o: unknown, fallbackName: string): LogTemplate | null {
 /** Apply a template's columns/roles/meta-defaults/srcType/timeSource onto the log.
  *  Confirms before replacing columns when rows already exist. Reconciles rows so
  *  existing records survive (values kept for matching keys). */
-function applyTemplate(t: LogTemplate): void {
+async function applyTemplate(t: LogTemplate): Promise<void> {
   if (logColumns.length > 0 && logRows.length > 0 &&
-      !confirm(`Apply template “${t.name}”? It replaces the current ${logColumns.length} columns; existing record values are kept only for matching columns.`)) {
+      !(await confirmDelete(`Apply template “${t.name}”? It replaces the current ${logColumns.length} columns; existing record values are kept only for matching columns.`))) {
     return;
   }
   logMeta = { ...t.meta };
@@ -7427,13 +7533,13 @@ function refreshTemplateSelect(): void {
 }
 
 /** 'Save as template' — prompt for a name, store the current config. */
-function saveCurrentTemplate(): void {
+async function saveCurrentTemplate(): Promise<void> {
   if (logColumns.length === 0) { setLogExportStatus('Build the log first.'); return; }
   const suggested = (logMeta['project'] ?? '').trim() || 'Template';
-  const name = (prompt('Save current configuration as template — name:', suggested) ?? '').trim();
+  const name = (await promptInput('Save current configuration as template — name:', suggested, 'Save template') ?? '').trim();
   if (!name) return;
   const map = loadTemplates();
-  if (map[name] && !confirm(`A template named “${name}” exists — overwrite it?`)) return;
+  if (map[name] && !(await confirmDelete(`A template named “${name}” exists — overwrite it?`))) return;
   map[name] = currentTemplate(name);
   saveTemplates(map);
   refreshTemplateSelect();
@@ -7443,7 +7549,7 @@ function saveCurrentTemplate(): void {
 }
 
 /** 'Load' — apply the selected template. */
-function loadSelectedTemplate(): void {
+async function loadSelectedTemplate(): Promise<void> {
   const sel = $opt('ologTplSelect') as HTMLSelectElement | null;
   const name = sel?.value ?? '';
   if (!name) return;
@@ -7451,15 +7557,15 @@ function loadSelectedTemplate(): void {
   const t = map[name];
   if (!t) { refreshTemplateSelect(); return; }
   const norm = asTemplate(t, name);
-  if (norm) applyTemplate(norm);
+  if (norm) await applyTemplate(norm);
 }
 
 /** 'Delete' — remove the selected template. */
-function deleteSelectedTemplate(): void {
+async function deleteSelectedTemplate(): Promise<void> {
   const sel = $opt('ologTplSelect') as HTMLSelectElement | null;
   const name = sel?.value ?? '';
   if (!name) return;
-  if (!confirm(`Delete template “${name}”?`)) return;
+  if (!(await confirmDelete(`Delete template “${name}”?`))) return;
   const map = loadTemplates();
   delete map[name];
   saveTemplates(map);
@@ -7492,7 +7598,7 @@ async function importTemplateJson(): Promise<void> {
   if (!t) { setLogExportStatus('That file is not a valid Observer Log template.'); return; }
   const map = loadTemplates();
   let name = t.name;
-  if (map[name] && !confirm(`A template named “${name}” exists — overwrite it?`)) {
+  if (map[name] && !(await confirmDelete(`A template named “${name}” exists — overwrite it?`))) {
     // Pick a non-clashing name rather than clobber.
     let n = 2; while (map[`${t.name} (${n})`]) n++;
     name = `${t.name} (${n})`;
@@ -7503,7 +7609,7 @@ async function importTemplateJson(): Promise<void> {
   refreshTemplateSelect();
   const sel = $opt('ologTplSelect') as HTMLSelectElement | null;
   if (sel) { sel.value = name; refreshTemplateSelect(); }
-  applyTemplate(t);
+  await applyTemplate(t);
 }
 
 /** Build one <tr> for record index `i`, with editable cells + per-row actions.
@@ -7527,10 +7633,37 @@ function buildLogRowEl(i: number): HTMLTableRowElement {
   wrap.appendChild(rowBtn('+', 'Insert row above', () => { logRows.splice(i, 0, blankLogRow()); saveLog(); renderLog(); }));
   wrap.appendChild(rowBtn('↑', 'Move up', () => moveLogRow(i, -1)));
   wrap.appendChild(rowBtn('↓', 'Move down', () => moveLogRow(i, 1)));
-  wrap.appendChild(rowBtn('✕', 'Delete row', () => { logRows.splice(i, 1); saveLog(); renderLog(); updateHeaderClear(); }));
+  wrap.appendChild(rowBtn('✕', 'Delete row', () => { void logDeleteRow(i); }));
   act.appendChild(wrap);
   tr.appendChild(act);
   return tr;
+}
+
+/** Confirmed, audited, undoable delete of observer-log row at index `i`.
+ *  Restores the row at its original position on undo. */
+async function logDeleteRow(i: number) {
+  if (i < 0 || i >= logRows.length) return;
+  const saved = logRows[i];
+  if (!(await confirmDelete(`Delete observer-log record ${i + 1}?`))) return;
+  // Re-check by identity in case the list changed while the dialog was open.
+  const pos = logRows.indexOf(saved);
+  if (pos < 0) return;
+  logRows.splice(pos, 1);
+  saveLog();
+  renderLog();
+  updateHeaderClear();
+  audit('delete', `observer-log record (row ${pos + 1})`, 'obslog');
+  let undone = false;
+  undoToast(`Deleted record ${pos + 1}`, () => {
+    if (undone) return;
+    undone = true;
+    const at = Math.min(pos, logRows.length);
+    logRows.splice(at, 0, saved);
+    saveLog();
+    renderLog();
+    updateHeaderClear();
+    audit('undo-delete', `observer-log record (row ${at + 1})`, 'obslog');
+  });
 }
 
 /** Build a single editable <td> for row `i`, column `c`, dispatching on the
@@ -7787,9 +7920,9 @@ function initObsLog() {
   // Templates (save / load / delete / export / import named configurations).
   refreshTemplateSelect();
   $opt('ologTplSelect')?.addEventListener('change', refreshTemplateSelect);
-  $opt('ologTplSave')?.addEventListener('click', saveCurrentTemplate);
-  $opt('ologTplLoad')?.addEventListener('click', loadSelectedTemplate);
-  $opt('ologTplDelete')?.addEventListener('click', deleteSelectedTemplate);
+  $opt('ologTplSave')?.addEventListener('click', () => void saveCurrentTemplate());
+  $opt('ologTplLoad')?.addEventListener('click', () => void loadSelectedTemplate());
+  $opt('ologTplDelete')?.addEventListener('click', () => void deleteSelectedTemplate());
   $opt('ologTplExport')?.addEventListener('click', () => void exportSelectedTemplate());
   $opt('ologTplImport')?.addEventListener('click', () => void importTemplateJson());
   // SPS link: bulk 'Import sources from SPS' (live lookup is wired via the hook).
@@ -7883,6 +8016,415 @@ function initWindowControls() {
   api?.onWinMaximized?.((m) => $opt('winMax')?.classList.toggle('maximized', m));
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// PROVENANCE FOUNDATION — signature identity · audit log · confirm + undo
+// ════════════════════════════════════════════════════════════════════════════
+// All renderer-side. Timestamps use effectiveNow() (NTP-corrected when the
+// Observer Log time-source is set to NTP) so audit entries honour a trusted clock.
+
+// ── 1. Signature identity ──────────────────────────────────────────────────────
+const SIG_KEY = 'seisconv.signature';
+let signatureName = '';
+function loadSignature() {
+  try { const s = localStorage.getItem(SIG_KEY); if (typeof s === 'string') signatureName = s.trim(); }
+  catch { /* ignore */ }
+}
+function getSignature(): string { return signatureName; }
+function setSignature(name: string) {
+  signatureName = (name || '').trim();
+  try { localStorage.setItem(SIG_KEY, signatureName); } catch { /* ignore quota */ }
+  syncSignatureUi();
+}
+/** Pending callback to run once the user signs via the modal (used by ensureSignature). */
+let sigResolve: (() => void) | null = null;
+/** Open the Audit/Identity modal focused on the signature field; resolves when a
+ *  non-empty name is saved (or the modal is closed). Never uses window.prompt. */
+function ensureSignature(): Promise<void> {
+  if (getSignature()) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    sigResolve = resolve;
+    openAudit();
+    const inp = $opt('auditSigInput') as HTMLInputElement | null;
+    if (inp) { inp.focus(); setText('auditSigStatus', 'Enter your name so changes are attributable.'); }
+  });
+}
+function syncSignatureUi() {
+  const inp = $opt('auditSigInput') as HTMLInputElement | null;
+  if (inp && document.activeElement !== inp) inp.value = getSignature();
+}
+
+// ── 2. Audit log ───────────────────────────────────────────────────────────────
+interface AuditEntry { ts: string; user: string; tab?: string; action: string; detail: string; }
+const AUDIT_KEY = 'seisconv.auditlog';
+const AUDIT_MAX = 5000;
+let auditEntries: AuditEntry[] = [];
+function loadAuditLog() {
+  try {
+    const s = localStorage.getItem(AUDIT_KEY);
+    if (!s) return;
+    const o = JSON.parse(s);
+    if (Array.isArray(o)) auditEntries = o.filter((e): e is AuditEntry => !!e && typeof e.action === 'string');
+  } catch { /* ignore corrupt state */ }
+}
+function persistAuditLog() {
+  try { localStorage.setItem(AUDIT_KEY, JSON.stringify(auditEntries)); } catch { /* ignore quota */ }
+}
+function getAuditLog(): AuditEntry[] { return auditEntries.slice(); }
+/** Append an audit entry. Signs the user first if they have not yet (fire-and-forget
+ *  ensureSignature so the modal prompts; the entry records '(unsigned)' if still unset). */
+function audit(action: string, detail: string, tab?: string) {
+  if (!getSignature()) void ensureSignature();
+  const entry: AuditEntry = {
+    ts: effectiveNow().toISOString(),
+    user: getSignature() || '(unsigned)',
+    tab,
+    action,
+    detail,
+  };
+  auditEntries.push(entry);
+  // Cap to the newest AUDIT_MAX entries.
+  if (auditEntries.length > AUDIT_MAX) auditEntries.splice(0, auditEntries.length - AUDIT_MAX);
+  persistAuditLog();
+  if (auditOpen()) renderAuditList();
+}
+function clearAuditLog() {
+  auditEntries = [];
+  persistAuditLog();
+  if (auditOpen()) renderAuditList();
+}
+function auditCsvCell(s: string): string {
+  // RFC-4180-ish: quote and double internal quotes when the cell contains special chars.
+  return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+function exportAuditCsv(): string {
+  const head = 'timestamp,user,tab,action,detail\n';
+  const body = auditEntries.map((e) =>
+    [e.ts, e.user, e.tab || '', e.action, e.detail].map((c) => auditCsvCell(String(c ?? ''))).join(',')
+  ).join('\n');
+  return head + body + (body ? '\n' : '');
+}
+function exportAuditJson(): string {
+  return JSON.stringify(auditEntries, null, 2);
+}
+
+// ── 2b. Backups / snapshots ──────────────────────────────────────────────────────
+// "Everything should have a backup": before a destructive in-app mutation we
+// snapshot the affected in-memory state to localStorage under
+// 'seisconv.backup.<kind>'. We keep the newest BACKUP_MAX snapshots per kind so a
+// user can roll back. File-producing ops (conversions / exports) write NEW files
+// via Save dialogs and are non-destructive, so they are only audited — not snapshotted.
+type BackupKind = 'obslog' | 'workbench' | 'vel' | 'sps-draft';
+interface BackupSnap { ts: string; label: string; data: unknown; }
+const BACKUP_PREFIX = 'seisconv.backup.';
+const BACKUP_MAX = 5;
+const BACKUP_KINDS: { kind: BackupKind; tab: Tab; title: string }[] = [
+  { kind: 'obslog', tab: 'obslog', title: 'Observer Log' },
+  { kind: 'workbench', tab: 'workbench', title: 'Trace Workbench' },
+  { kind: 'vel', tab: 'vel', title: 'Velocity picks' },
+  { kind: 'sps-draft', tab: 'sps', title: 'SPS header draft' },
+];
+function backupKey(kind: BackupKind): string { return BACKUP_PREFIX + kind; }
+function loadBackups(kind: BackupKind): BackupSnap[] {
+  try {
+    const s = localStorage.getItem(backupKey(kind));
+    if (!s) return [];
+    const o = JSON.parse(s);
+    if (Array.isArray(o)) return o.filter((e): e is BackupSnap => !!e && typeof e.ts === 'string');
+  } catch { /* ignore corrupt state */ }
+  return [];
+}
+/** Snapshot the current in-memory state for a kind. `data` must be JSON-clonable;
+ *  we deep-clone via JSON so later mutations to the live arrays do not bleed in. */
+function snapshotBackup(kind: BackupKind, data: unknown, label: string) {
+  let clone: unknown;
+  try { clone = JSON.parse(JSON.stringify(data)); } catch { return; /* not clonable — skip */ }
+  const list = loadBackups(kind);
+  list.push({ ts: effectiveNow().toISOString(), label, data: clone });
+  // Keep only the newest BACKUP_MAX.
+  while (list.length > BACKUP_MAX) list.shift();
+  try { localStorage.setItem(backupKey(kind), JSON.stringify(list)); } catch { /* ignore quota */ }
+  if (auditOpen()) renderBackupList();
+}
+/** Restore the most recent snapshot for a kind into live state + re-render.
+ *  Returns true on success. Each kind owns its own re-hydration. */
+function restoreLastBackup(kind: BackupKind): boolean {
+  const list = loadBackups(kind);
+  const snap = list[list.length - 1];
+  if (!snap) return false;
+  try {
+    switch (kind) {
+      case 'obslog': {
+        const d = snap.data as { meta?: unknown; columns?: unknown; rows?: unknown };
+        if (Array.isArray(d.columns) && d.columns.length) {
+          logMeta = (d.meta && typeof d.meta === 'object') ? d.meta as typeof logMeta : {};
+          logColumns = d.columns as typeof logColumns;
+          logRows = Array.isArray(d.rows) ? d.rows as typeof logRows : [];
+          ensureColRoles();
+          saveLog();
+          renderLog();
+          updateHeaderClear();
+        }
+        break;
+      }
+      case 'workbench': {
+        if (Array.isArray(snap.data)) {
+          wbTraces = snap.data as typeof wbTraces;
+          wbView.init = false;
+          wbFit();
+          renderWorkbenchList();
+          drawWorkbench();
+          wbUpdateAnalysis();
+          wbUpdateExport();
+          updateHeaderClear();
+        }
+        break;
+      }
+      case 'vel': {
+        if (Array.isArray(snap.data)) {
+          velPicks = snap.data as typeof velPicks;
+          drawVelocity();
+          renderVelPicks();
+          updateHeaderClear();
+        }
+        break;
+      }
+      case 'sps-draft': {
+        if (Array.isArray(snap.data)) {
+          spsHdrRawDraft = snap.data as typeof spsHdrRawDraft;
+          paintSpsHdrRaw();
+        }
+        break;
+      }
+    }
+  } catch { return false; }
+  audit('restore', `restored "${snap.label}" snapshot`, kind === 'sps-draft' ? 'sps' : kind);
+  return true;
+}
+
+// ── 3a. Confirm-delete modal ────────────────────────────────────────────────────
+let confirmResolve: ((ok: boolean) => void) | null = null;
+function confirmOpen(): boolean { return !!$opt('confirmBack')?.classList.contains('open'); }
+function closeConfirm(ok: boolean) {
+  $opt('confirmBack')?.classList.remove('open');
+  const r = confirmResolve;
+  confirmResolve = null;
+  if (r) r(ok);
+}
+/** In-app confirm dialog (Cancel / Delete). Resolves true on Delete, false otherwise.
+ *  Replaces window.confirm, which is unreliable in a sandboxed Electron renderer. */
+function confirmDelete(message: string): Promise<boolean> {
+  // If a previous confirm is somehow still open, resolve it false first.
+  if (confirmResolve) closeConfirm(false);
+  return new Promise<boolean>((resolve) => {
+    confirmResolve = resolve;
+    setText('confirmMsg', message);
+    $opt('confirmBack')?.classList.add('open');
+    ($opt('confirmOk') as HTMLButtonElement | null)?.focus();
+  });
+}
+
+// ── 3a-bis. Prompt (text-input) modal ───────────────────────────────────────────
+let promptResolve: ((value: string | null) => void) | null = null;
+function closePrompt(value: string | null) {
+  $opt('promptBack')?.classList.remove('open');
+  const r = promptResolve;
+  promptResolve = null;
+  if (r) r(value);
+}
+/** In-app text-input dialog (Cancel / OK). Resolves to the trimmed string on OK,
+ *  or null on Cancel/close. Replaces window.prompt, which is unreliable in a
+ *  sandboxed Electron renderer. */
+function promptInput(message: string, defaultValue = '', title = 'Enter a value'): Promise<string | null> {
+  // If a previous prompt is somehow still open, resolve it null first.
+  if (promptResolve) closePrompt(null);
+  return new Promise<string | null>((resolve) => {
+    promptResolve = resolve;
+    setText('promptTitle', title);
+    setText('promptMsg', message);
+    const inp = $opt('promptInput') as HTMLInputElement | null;
+    if (inp) { inp.value = defaultValue; }
+    $opt('promptBack')?.classList.add('open');
+    if (inp) { inp.focus(); inp.select(); }
+  });
+}
+
+// ── 3b. Undo snackbar ───────────────────────────────────────────────────────────
+let undoTimer: number | null = null;
+let undoFn: (() => void) | null = null;
+let undoUsed = false;
+function hideUndoToast() {
+  if (undoTimer != null) { window.clearTimeout(undoTimer); undoTimer = null; }
+  undoFn = null;
+  $opt('undoToast')?.classList.remove('show');
+}
+/** Transient snackbar with an Undo button. onUndo runs at most once (double-undo
+ *  guarded). Auto-dismisses after ~8s. */
+function undoToast(message: string, onUndo: () => void) {
+  hideUndoToast();
+  undoUsed = false;
+  undoFn = onUndo;
+  setText('undoToastMsg', message);
+  const btn = $opt('undoToastBtn') as HTMLButtonElement | null;
+  if (btn) btn.disabled = false;
+  $opt('undoToast')?.classList.add('show');
+  undoTimer = window.setTimeout(hideUndoToast, 8000);
+}
+function triggerUndo() {
+  if (undoUsed) return;            // guard double-undo
+  const fn = undoFn;
+  if (!fn) return;
+  undoUsed = true;
+  const btn = $opt('undoToastBtn') as HTMLButtonElement | null;
+  if (btn) btn.disabled = true;
+  hideUndoToast();
+  fn();
+}
+
+// ── 4. Audit / Identity modal ───────────────────────────────────────────────────
+function auditOpen(): boolean { return !!$opt('auditBack')?.classList.contains('open'); }
+function openAudit() {
+  syncSignatureUi();
+  renderAuditList();
+  renderBackupList();
+  $opt('auditBack')?.classList.add('open');
+}
+/** Render the per-kind backup rows in the Audit modal: each shows how many
+ *  snapshots exist + when the newest was taken, with a Restore button. */
+function renderBackupList() {
+  const host = $opt('auditBackups');
+  if (!host) return;
+  host.innerHTML = '';
+  for (const { kind, title } of BACKUP_KINDS) {
+    const list = loadBackups(kind);
+    const row = document.createElement('div');
+    row.className = 'backup-row';
+    const name = document.createElement('span'); name.className = 'bk-name'; name.textContent = title;
+    const meta = document.createElement('span'); meta.className = 'bk-meta';
+    if (list.length) {
+      const last = list[list.length - 1];
+      let when = last.ts;
+      try { const d = new Date(last.ts); if (!isNaN(d.getTime())) when = d.toLocaleString(); } catch { /* keep raw */ }
+      meta.textContent = `${list.length} snapshot${list.length === 1 ? '' : 's'} · last ${when}`;
+      meta.title = last.label;
+    } else {
+      meta.textContent = 'No backups yet';
+      meta.classList.add('bk-none');
+    }
+    const btn = document.createElement('button');
+    btn.className = 'btn sm'; btn.type = 'button'; btn.textContent = 'Restore last';
+    btn.disabled = list.length === 0;
+    btn.addEventListener('click', () => {
+      const ok = restoreLastBackup(kind);
+      setText('auditSigStatus', ok ? `✓ Restored ${title} backup` : `No ${title} backup to restore`);
+      renderBackupList();
+    });
+    row.append(name, meta, btn);
+    host.appendChild(row);
+  }
+}
+function closeAudit() {
+  $opt('auditBack')?.classList.remove('open');
+  // If a sign-in was awaited, resolve it now (signed or not) so callers proceed.
+  const r = sigResolve; sigResolve = null;
+  if (r) r();
+}
+function renderAuditList() {
+  const host = $opt('auditList');
+  if (!host) return;
+  setText('auditCount', `${auditEntries.length} entr${auditEntries.length === 1 ? 'y' : 'ies'}`);
+  host.innerHTML = '';
+  if (!auditEntries.length) {
+    const empty = document.createElement('div');
+    empty.className = 'audit-empty';
+    empty.textContent = 'No audit entries yet. Deletes and applied changes will appear here.';
+    host.appendChild(empty);
+    return;
+  }
+  // Newest first.
+  for (let i = auditEntries.length - 1; i >= 0; i--) {
+    const e = auditEntries[i];
+    const row = document.createElement('div');
+    row.className = 'audit-entry';
+    const ts = document.createElement('span'); ts.className = 'ae-ts';
+    // Local-friendly compact timestamp; full ISO in the tooltip.
+    let label = e.ts;
+    try { const d = new Date(e.ts); if (!isNaN(d.getTime())) label = d.toLocaleString(); } catch { /* keep raw */ }
+    ts.textContent = label; ts.title = e.ts;
+    const user = document.createElement('span'); user.className = 'ae-user'; user.textContent = e.user || '(unsigned)';
+    const act = document.createElement('span'); act.className = 'ae-act'; act.textContent = e.action;
+    const det = document.createElement('span'); det.className = 'ae-detail';
+    det.textContent = e.detail || '';
+    if (e.tab) { const t = document.createElement('span'); t.className = 'ae-tab'; t.textContent = '  [' + e.tab + ']'; det.appendChild(t); }
+    row.append(ts, user, act, det);
+    host.appendChild(row);
+  }
+}
+async function exportAuditFile(kind: 'csv' | 'json') {
+  if (!auditEntries.length) { setText('auditSigStatus', 'Audit log is empty.'); return; }
+  const payload = kind === 'csv' ? exportAuditCsv() : exportAuditJson();
+  const fname = kind === 'csv' ? 'seisconv-audit.csv' : 'seisconv-audit.json';
+  try {
+    const r = await api.exportText(fname, payload);
+    setText('auditSigStatus', r.ok ? '✓ Saved ' + r.path : r.canceled ? '' : 'Failed: ' + (r.error || 'unknown'));
+  } catch (e) {
+    setText('auditSigStatus', 'Failed: ' + errMsg(e));
+  }
+}
+/** Wire the provenance UI (header button, confirm modal, undo toast, audit modal). */
+function initProvenance() {
+  loadSignature();
+  loadAuditLog();
+  // Header Audit button.
+  $opt('auditBtn')?.addEventListener('click', openAudit);
+  // Confirm modal.
+  $opt('confirmOk')?.addEventListener('click', () => closeConfirm(true));
+  $opt('confirmCancel')?.addEventListener('click', () => closeConfirm(false));
+  $opt('confirmClose')?.addEventListener('click', () => closeConfirm(false));
+  $opt('confirmBack')?.addEventListener('click', (e) => { if (e.target === $opt('confirmBack')) closeConfirm(false); });
+  // Prompt (text-input) modal.
+  const promptCommit = () => {
+    const inp = $opt('promptInput') as HTMLInputElement | null;
+    closePrompt((inp?.value ?? '').trim());
+  };
+  $opt('promptOk')?.addEventListener('click', promptCommit);
+  $opt('promptCancel')?.addEventListener('click', () => closePrompt(null));
+  $opt('promptClose')?.addEventListener('click', () => closePrompt(null));
+  $opt('promptBack')?.addEventListener('click', (e) => { if (e.target === $opt('promptBack')) closePrompt(null); });
+  $opt('promptInput')?.addEventListener('keydown', (e) => {
+    const k = (e as KeyboardEvent).key;
+    if (k === 'Enter') promptCommit();
+    else if (k === 'Escape') closePrompt(null);
+  });
+  // Undo toast.
+  $opt('undoToastBtn')?.addEventListener('click', triggerUndo);
+  $opt('undoToastClose')?.addEventListener('click', hideUndoToast);
+  // Audit / Identity modal.
+  $opt('auditClose')?.addEventListener('click', closeAudit);
+  $opt('auditBack')?.addEventListener('click', (e) => { if (e.target === $opt('auditBack')) closeAudit(); });
+  const saveSig = () => {
+    const inp = $opt('auditSigInput') as HTMLInputElement | null;
+    const name = (inp?.value || '').trim();
+    if (!name) { setText('auditSigStatus', 'Enter a name first.'); return; }
+    setSignature(name);
+    setText('auditSigStatus', '✓ Signed as ' + name);
+    // If a change was waiting on a signature, resolve it now and close.
+    const r = sigResolve; sigResolve = null;
+    if (r) { r(); $opt('auditBack')?.classList.remove('open'); }
+  };
+  $opt('auditSigSave')?.addEventListener('click', saveSig);
+  $opt('auditSigInput')?.addEventListener('keydown', (e) => { if ((e as KeyboardEvent).key === 'Enter') saveSig(); });
+  $opt('auditExportCsv')?.addEventListener('click', () => void exportAuditFile('csv'));
+  $opt('auditExportJson')?.addEventListener('click', () => void exportAuditFile('json'));
+  $opt('auditClearBtn')?.addEventListener('click', async () => {
+    if (!auditEntries.length) return;
+    if (await confirmDelete('Clear the entire audit log? This cannot be undone.')) {
+      clearAuditLog();
+      setText('auditSigStatus', 'Audit log cleared.');
+    }
+  });
+  syncSignatureUi();
+}
+
 // ── Wire up ──
 function init() {
   initTheme();
@@ -7893,6 +8435,8 @@ function init() {
   $('openBtn2').addEventListener('click', onOpen);
   // Universal header Clear → clears the active tab's data.
   $opt('headerClearBtn')?.addEventListener('click', clearActiveTab);
+  // Provenance foundation: signature identity · audit log · confirm + undo.
+  initProvenance();
 
   // ── Converter: mode switcher ──
   $opt('modeSingle')?.addEventListener('click', () => setConvMode('single'));
@@ -8052,9 +8596,13 @@ function init() {
 
 /** App-wide keyboard shortcuts. */
 function onKeyDown(e: KeyboardEvent) {
-  // Esc closes whichever overlay is open (Header editor first, then the manual).
+  // Esc closes whichever overlay is open (confirm dialog is the most modal, then
+  // the audit modal / SPS header editor / manual; finally it dismisses the undo toast).
+  if (e.key === 'Escape' && confirmOpen()) { closeConfirm(false); return; }
+  if (e.key === 'Escape' && auditOpen()) { closeAudit(); return; }
   if (e.key === 'Escape' && spsHeadersOpen()) { closeSpsHeaders(); return; }
   if (e.key === 'Escape' && manualOpen()) { closeManual(); return; }
+  if (e.key === 'Escape' && $opt('undoToast')?.classList.contains('show')) { hideUndoToast(); return; }
   // App-wide UI zoom (browser-style): Ctrl/Cmd + '='/'+' in, Ctrl/Cmd + '-' out,
   // Ctrl/Cmd + '0' reset. Handled before the typing-in-a-field guard so it works
   // with any element focused, just like a browser.

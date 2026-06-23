@@ -619,6 +619,12 @@ table.olog-grid tr.olog-rowsel td{background:var(--teal-tint-2);}
   background:rgba(13,31,51,.46);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);padding:24px;
 }
 .modal-back.open{display:flex;}
+/* The confirm + prompt dialogs can open ON TOP of another open modal (e.g. the
+   audit log's "Clear log" confirm). All .modal-back share z-index 2000, and with
+   equal z-index the later-in-DOM modal wins the paint order — which would hide
+   the confirm/prompt card behind the modal that opened it. Raise them above. */
+#confirmBack{z-index:2100;}
+#promptBack{z-index:2110;}
 .modal{
   background:var(--card);border:1px solid var(--hair);border-radius:var(--radius);
   box-shadow:var(--shadow-pop);width:min(760px,100%);max-height:86vh;display:flex;flex-direction:column;
@@ -644,6 +650,59 @@ table.olog-grid tr.olog-rowsel td{background:var(--teal-tint-2);}
 .modal .mbody .fmt-tbl td{padding:5px 8px;border-bottom:1px solid var(--hair-soft);color:var(--ink-2);}
 .modal .mbody .fmt-tbl td:first-child{font-weight:700;color:var(--ink);}
 .modal .mbody .fmt-tbl td .mono{font-family:var(--mono);color:var(--teal-deep);}
+
+/* ---- Provenance: confirm-delete modal (a compact .modal variant) ---- */
+.confirm-modal{width:min(420px,100%);}
+.confirm-modal .mbody{font-size:13px;color:var(--ink-2);line-height:1.5;}
+.confirm-modal .mh.confirm-foot{border-bottom:none;border-top:1px solid var(--hair-soft);}
+.confirm-modal .mh.confirm-foot{display:flex;align-items:center;gap:10px;padding:14px 20px;}
+
+/* ---- Provenance: Undo snackbar (transient, bottom-centre) ---- */
+.undo-toast{
+  position:fixed;left:50%;bottom:26px;transform:translateX(-50%) translateY(12px);
+  z-index:2200;display:none;align-items:center;gap:14px;
+  background:var(--card);border:1px solid var(--hair);border-radius:11px;
+  box-shadow:var(--shadow-pop);padding:11px 14px 11px 16px;font-size:13px;color:var(--ink);
+  opacity:0;transition:opacity .18s ease,transform .18s ease;max-width:min(560px,92vw);
+}
+.undo-toast.show{display:flex;opacity:1;transform:translateX(-50%) translateY(0);}
+.undo-toast .ut-msg{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.undo-toast .ut-undo{
+  flex:none;border:1px solid var(--teal);background:transparent;color:var(--teal-deep);
+  font-weight:800;font-size:12px;cursor:pointer;border-radius:8px;padding:5px 11px;
+}
+.undo-toast .ut-undo:hover{background:rgba(15,179,171,.12);}
+.undo-toast .ut-undo:disabled{opacity:.45;cursor:default;}
+.undo-toast .ut-x{
+  flex:none;border:none;background:transparent;color:var(--ink-3);cursor:pointer;
+  width:22px;height:22px;border-radius:6px;display:grid;place-items:center;
+}
+.undo-toast .ut-x:hover{color:var(--ink);background:var(--surface);}
+
+/* ---- Provenance: Audit / Identity modal ---- */
+.audit-modal{width:min(820px,100%);}
+.audit-id-row{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid var(--hair-soft);}
+.audit-id-row label{font-size:12px;color:var(--ink-3);font-weight:700;}
+.audit-id-row input{flex:1;min-width:160px;}
+.audit-tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px;}
+.audit-tools .trace-label{margin-left:auto;}
+.audit-list{display:flex;flex-direction:column;gap:0;max-height:46vh;overflow:auto;border:1px solid var(--hair-soft);border-radius:9px;}
+.audit-empty{padding:18px;text-align:center;color:var(--ink-3);font-size:12.5px;}
+.audit-entry{display:grid;grid-template-columns:148px 78px 90px 1fr;gap:10px;align-items:baseline;padding:7px 12px;border-bottom:1px solid var(--hair-soft);font-size:12px;}
+.audit-entry:last-child{border-bottom:none;}
+.audit-entry .ae-ts{font-family:var(--mono);color:var(--ink-3);font-size:11px;white-space:nowrap;}
+.audit-entry .ae-user{font-weight:700;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.audit-entry .ae-act{font-family:var(--mono);color:var(--teal-deep);text-transform:uppercase;font-size:10.5px;letter-spacing:.4px;}
+.audit-entry .ae-detail{color:var(--ink-2);}
+.audit-entry .ae-detail .ae-tab{color:var(--ink-3);font-size:11px;}
+.audit-backups{margin-top:14px;padding-top:12px;border-top:1px solid var(--hair-soft);}
+.audit-bk-head{font-size:12px;font-weight:800;color:var(--ink-2);margin-bottom:8px;}
+.audit-bk-head .audit-bk-sub{font-weight:500;color:var(--ink-3);}
+.backup-list{display:flex;flex-direction:column;gap:6px;}
+.backup-row{display:flex;align-items:center;gap:10px;padding:7px 10px;background:var(--surface);border:1px solid var(--hair);border-radius:8px;}
+.backup-row .bk-name{font-weight:700;color:var(--ink);font-size:12.5px;flex:none;min-width:130px;}
+.backup-row .bk-meta{flex:1;font-size:11.5px;color:var(--ink-2);font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.backup-row .bk-meta.bk-none{color:var(--ink-3);font-style:italic;font-family:inherit;}
 
 /* ---- Context-sensitive Help: two-pane body (nav + content) ---- */
 .modal .mbody.help-split{display:grid;grid-template-columns:178px 1fr;gap:0;padding:0;overflow:hidden;}
@@ -893,6 +952,10 @@ table.olog-grid tr.olog-rowsel td{background:var(--teal-tint-2);}
     </div>
 
     <div class="right">
+      <button class="btn sm ghost" id="auditBtn" title="Audit log & signature" aria-label="Audit log and signature">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 13l2 2 4-4"/></svg>
+        Audit
+      </button>
       <button class="btn sm ghost" id="helpBtn" title="Help / Manual" aria-label="Help">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 0 1 4.4 1.6c0 1.6-2.4 2-2.4 3.4" stroke-linecap="round"/><circle cx="12" cy="17" r=".7" fill="currentColor"/></svg>
         Help
@@ -1810,6 +1873,88 @@ table.olog-grid tr.olog-rowsel td{background:var(--teal-tint-2);}
       <nav class="help-nav" id="manualNav" aria-label="Help topics"></nav>
       <!-- Selected topic's content; injected by app.ts renderManual() -->
       <div class="help-content" id="manualContent"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================ CONFIRM-DELETE MODAL ============================ -->
+<div class="modal-back" id="confirmBack" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+  <div class="modal confirm-modal">
+    <div class="mh">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--red)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a1.8 1.8 0 0 0 1.6 2.7h17.2A1.8 1.8 0 0 0 22.2 18L13.7 3.9a1.8 1.8 0 0 0-3.1 0Z"/><path d="M12 9v4M12 17h.01"/></svg>
+      <h2 id="confirmTitle">Confirm</h2>
+      <button class="mclose" id="confirmClose" title="Close" aria-label="Close">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="mbody" id="confirmMsg">Are you sure?</div>
+    <div class="mh confirm-foot">
+      <span style="flex:1"></span>
+      <button class="btn sm" id="confirmCancel" type="button">Cancel</button>
+      <button class="btn sm" id="confirmOk" type="button" style="background:var(--red);border-color:var(--red);color:#fff;">Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================ PROMPT (TEXT-INPUT) MODAL ============================ -->
+<div class="modal-back" id="promptBack" role="dialog" aria-modal="true" aria-labelledby="promptTitle">
+  <div class="modal confirm-modal">
+    <div class="mh">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--teal-deep)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+      <h2 id="promptTitle">Enter a value</h2>
+      <button class="mclose" id="promptClose" title="Close" aria-label="Close">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="mbody">
+      <label for="promptInput" id="promptMsg" style="display:block;margin-bottom:8px;">Value</label>
+      <input class="ctl" id="promptInput" type="text" autocomplete="off" style="width:100%;" />
+    </div>
+    <div class="mh confirm-foot">
+      <span style="flex:1"></span>
+      <button class="btn sm" id="promptCancel" type="button">Cancel</button>
+      <button class="btn btn-primary sm" id="promptOk" type="button">OK</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================ UNDO SNACKBAR ============================ -->
+<div class="undo-toast" id="undoToast" role="status" aria-live="polite">
+  <span class="ut-msg" id="undoToastMsg"></span>
+  <button class="ut-undo" id="undoToastBtn" type="button">Undo</button>
+  <button class="ut-x" id="undoToastClose" type="button" title="Dismiss" aria-label="Dismiss">
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+  </button>
+</div>
+
+<!-- ============================ AUDIT / IDENTITY MODAL ============================ -->
+<div class="modal-back" id="auditBack" role="dialog" aria-modal="true" aria-labelledby="auditTitle">
+  <div class="modal audit-modal">
+    <div class="mh">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--teal-deep)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 13l2 2 4-4"/></svg>
+      <h2 id="auditTitle">Audit log &amp; signature</h2>
+      <button class="mclose" id="auditClose" title="Close" aria-label="Close">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="mbody">
+      <div class="audit-id-row">
+        <label for="auditSigInput">Signature</label>
+        <input class="ctl" id="auditSigInput" type="text" placeholder="Your name (stamped on every change)" autocomplete="off" />
+        <button class="btn sm" id="auditSigSave" type="button">Save</button>
+        <span class="trace-label" id="auditSigStatus"></span>
+      </div>
+      <div class="audit-tools">
+        <button class="btn sm" id="auditExportCsv" type="button">Export CSV</button>
+        <button class="btn sm" id="auditExportJson" type="button">Export JSON</button>
+        <button class="btn sm" id="auditClearBtn" type="button">Clear log</button>
+        <span class="trace-label" id="auditCount"></span>
+      </div>
+      <div class="audit-list" id="auditList"></div>
+      <div class="audit-backups">
+        <div class="audit-bk-head">Backups <span class="audit-bk-sub">— snapshots taken before destructive changes; restore the most recent</span></div>
+        <div class="backup-list" id="auditBackups"></div>
+      </div>
     </div>
   </div>
 </div>
