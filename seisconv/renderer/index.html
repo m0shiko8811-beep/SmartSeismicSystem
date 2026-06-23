@@ -1513,7 +1513,12 @@ table.olog-grid tr.olog-rowsel td{background:var(--teal-tint-2);}
       <section id="panel-workbench" style="display:none;">
         <div class="sec-bar">
           <button class="btn sm" id="wbPickBtn">Pick file…</button>
-          <label class="ctl-lbl">Trace # <input type="number" id="wbIndex" class="numin" value="0" min="0" step="1"></label>
+          <span class="seg" title="Step through traces of the picked file to preview before adding">
+            <button class="segbtn" id="wbPrevBtn" title="Previous trace">&lsaquo;</button>
+            <label class="ctl-lbl" style="padding:0 6px;">Trace # <input type="number" id="wbIndex" class="numin" value="0" min="0" step="1"></label>
+            <button class="segbtn" id="wbNextBtn" title="Next trace">&rsaquo;</button>
+          </span>
+          <button class="btn sm" id="wbAddPreviewBtn" title="Add the previewed trace to the collection" disabled>Add this trace</button>
           <button class="btn sm" id="wbAddOpenBtn" title="Add the current trace from the open file">Add open trace</button>
           <span style="flex:1"></span>
           <span class="seg" title="Compare traces side-by-side or overlaid on one axis">
@@ -1529,6 +1534,19 @@ table.olog-grid tr.olog-rowsel td{background:var(--teal-tint-2);}
           <span class="trace-label" id="wbLabel">Pick traces to compare</span>
         </div>
         <div class="status" id="wbStatus" style="margin:2px 0 8px;"></div>
+
+        <!-- PREVIEW: navigate the picked file's traces and SEE the signal before
+             committing it to the collection. Hidden until a file is picked. -->
+        <div class="card" id="wbPreviewCard" style="display:none;margin-bottom:14px;">
+          <div class="ch">
+            <h2>Preview</h2>
+            <span class="hint" id="wbPreviewLabel">Pick a file, step traces, then “Add this trace”.</span>
+          </div>
+          <div class="cb" style="padding-top:6px;padding-bottom:8px;">
+            <canvas id="wbPreviewCanvas" class="canvas" style="height:240px;"></canvas>
+          </div>
+        </div>
+
         <canvas id="wbCanvas" class="canvas"></canvas>
 
         <!-- ANALYSIS: cross-correlation + difference + stats for any two traces -->

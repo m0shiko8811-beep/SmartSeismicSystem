@@ -700,6 +700,14 @@ let wbManualX = false;
 let wbAxisRange: AxisRangeHandle | null = null;
 // Distinct, theme-friendly colours cycled across collected traces.
 const WB_COLORS = ['#34dbd0', '#ffb454', '#7aa2ff', '#ff6e9c', '#9be564', '#c792ea', '#f78c6c', '#56d4ff'];
+// ── Workbench PREVIEW state ──
+// The picked file (path + total trace count) plus the currently-previewed trace,
+// so the user can step through traces and SEE the signal before committing one to
+// the collection. `wbPreview` is null until a file is picked / extract succeeds.
+let wbPickedPath: string | null = null;
+let wbPickedCount = 0;
+let wbPreview: ExtractedTrace | null = null;
+let wbPreviewBusy = false;
 
 // ── Observer Log state ──
 // A wizard-configured, per-shot field log. `logColumns` is the live column set
@@ -1813,6 +1821,40 @@ function drawTrace(cv: HTMLCanvasElement, t: TraceData) {
     ctx.lineTo(ML + pw, y);
     ctx.stroke();
   }
+
+  // amplitude (X) axis ticks — make the horizontal swing readable. Three ticks:
+  // left edge / centre / right edge, showing the ACTUAL sample amplitude at that
+  // x. In auto mode the plotted swing is the normalized window ±nf (left=-nf,
+  // right=+nf, centre≈0); in manual mode the plot width spans [aMin,aMax]. SEG-Y/
+  // SEG-D samples are dimensionless, so the caption says 'Amplitude' — no unit.
+  // All values are guarded finite before formatting so no NaN reaches the canvas.
+  const ampLeft = useAmp ? aMin : -nf;
+  const ampRight = useAmp ? aMin + aSpan : nf;
+  const ampMid = (ampLeft + ampRight) / 2;
+  const fmtAmp = (v: number) => {
+    if (!Number.isFinite(v)) return '—';
+    if (v === 0) return '0';
+    const a = Math.abs(v);
+    if (a >= 1e5 || a < 1e-3) return v.toExponential(1);
+    return v.toPrecision(3);
+  };
+  const ampTicks: Array<{ x: number; v: number; align: CanvasTextAlign }> = [
+    { x: ML + 2, v: ampLeft, align: 'left' },
+    { x: ML + pw / 2, v: ampMid, align: 'center' },
+    { x: ML + pw - 2, v: ampRight, align: 'right' },
+  ];
+  ctx.fillStyle = '#7e93ac';
+  ctx.font = '10px Consolas, monospace';
+  ctx.textAlign = 'left';
+  for (const tk of ampTicks) {
+    ctx.textAlign = tk.align;
+    ctx.fillText(fmtAmp(tk.v), tk.x, MT + 11);
+  }
+  // Honest axis caption (dimensionless sample value — NOT a physical unit).
+  ctx.fillStyle = '#5f7793';
+  ctx.textAlign = 'center';
+  ctx.fillText('Amplitude (sample value)', ML + pw / 2, MT + ph - 4);
+  ctx.textAlign = 'left';
 }
 
 /** A frequency-domain spectrum: parallel freqs/amp arrays + the Nyquist edge.
@@ -2725,19 +2767,153 @@ function wbZoomButton(factor: number) {
 }
 
 /** Pick a file (no parse), then add the chosen trace # to the collection. */
-async function wbPickAndAdd() {
+/** Pick a file, remember it, and PREVIEW its current-index trace (does NOT add).
+ *  The user then steps traces (Prev/Next/#) and commits one via 'Add this trace'. */
+async function wbPickFile() {
   try {
     const path = await api.pickTraceFile();
-    if (!path) return;
+    if (!path) return; // cancelled — keep any existing preview intact
+    wbPickedPath = path;
+    wbPickedCount = 0; // learned from the first extract (ExtractedTrace.traceCount)
     const idxIn = $opt('wbIndex') as HTMLInputElement | null;
-    const index = Math.max(0, (parseInt(idxIn?.value || '0', 10) || 0));
-    setStatus('wbStatus', 'Reading trace…');
-    const tr = await api.extractTrace(path, index);
-    wbAddTrace(tr.name, tr.index, tr.samples, tr.sampleInt, tr.nSamples);
-    setStatus('wbStatus', `Added ${tr.name} · trace ${tr.index + 1} (of ${tr.traceCount})`, 'ok');
+    const index = Math.max(0, parseInt(idxIn?.value || '0', 10) || 0);
+    await wbLoadPreview(index);
   } catch (e) {
-    setStatus('wbStatus', 'Add failed: ' + errMsg(e), 'err');
+    setStatus('wbStatus', 'Pick failed: ' + errMsg(e), 'err');
   }
+}
+
+/** Extract + draw the preview for trace `index` of the picked file. Clamps the
+ *  index to [0, traceCount-1] once the count is known; guards extract failures. */
+async function wbLoadPreview(index: number) {
+  if (!wbPickedPath || wbPreviewBusy) return;
+  // Clamp against the known count (first load doesn't know it yet → clamp >=0).
+  const hi = wbPickedCount > 0 ? wbPickedCount - 1 : Number.MAX_SAFE_INTEGER;
+  const idx = Math.max(0, Math.min(hi, Number.isFinite(index) ? index : 0));
+  wbPreviewBusy = true;
+  setStatus('wbStatus', 'Reading trace…');
+  try {
+    const tr = await api.extractTrace(wbPickedPath, idx);
+    wbPreview = tr;
+    wbPickedCount = Math.max(1, tr.traceCount || 1);
+    wbSetIndexInput(tr.index);
+    wbRenderPreview();
+    setStatus('wbStatus', `Previewing ${tr.name} · trace ${tr.index + 1} of ${wbPickedCount}`, 'ok');
+  } catch (e) {
+    wbPreview = null;
+    wbRenderPreview();
+    setStatus('wbStatus', 'Read failed: ' + errMsg(e), 'err');
+  } finally {
+    wbPreviewBusy = false;
+  }
+}
+
+/** Reflect a (clamped) trace index back into the #wbIndex input + max attr. */
+function wbSetIndexInput(index: number) {
+  const idxIn = $opt('wbIndex') as HTMLInputElement | null;
+  if (!idxIn) return;
+  idxIn.value = String(index);
+  if (wbPickedCount > 0) idxIn.max = String(wbPickedCount - 1);
+}
+
+/** Step the previewed trace by ±1 (or load the value typed in #wbIndex). */
+function wbStepPreview(delta: number) {
+  if (!wbPickedPath) { setStatus('wbStatus', 'Pick a file first.', 'err'); return; }
+  const cur = wbPreview ? wbPreview.index : 0;
+  void wbLoadPreview(cur + delta);
+}
+
+/** Add the currently-previewed trace to the collection. */
+function wbAddPreview() {
+  if (!wbPreview) { setStatus('wbStatus', 'Pick a file and preview a trace first.', 'err'); return; }
+  const tr = wbPreview;
+  wbAddTrace(tr.name, tr.index, tr.samples.slice(), tr.sampleInt, tr.nSamples);
+  setStatus('wbStatus', `Added ${tr.name} · trace ${tr.index + 1} (of ${wbPickedCount})`, 'ok');
+}
+
+/** Draw the preview canvas + sync the preview card visibility / Add-button. */
+function wbRenderPreview() {
+  const card = $opt('wbPreviewCard');
+  const addBtn = $opt('wbAddPreviewBtn') as HTMLButtonElement | null;
+  const lbl = $opt('wbPreviewLabel');
+  const cv = $opt('wbPreviewCanvas') as HTMLCanvasElement | null;
+  const have = !!wbPreview;
+  if (card) card.style.display = wbPickedPath ? '' : 'none';
+  if (addBtn) addBtn.disabled = !have;
+  if (lbl) {
+    lbl.textContent = have
+      ? `${wbPreview!.name} · trace ${wbPreview!.index + 1} of ${wbPickedCount} · ${wbPreview!.nSamples} samples`
+      : (wbPickedPath ? 'Could not read this trace — try another index.' : 'Pick a file, step traces, then “Add this trace”.');
+  }
+  if (cv) {
+    if (wbPreview) {
+      const t: TraceData = {
+        index: wbPreview.index, nSamples: wbPreview.nSamples, sampleInt: wbPreview.sampleInt,
+        hdr: wbPreview.hdr, samples: wbPreview.samples,
+      };
+      drawPreviewTrace(cv, t, '#34dbd0');
+    } else {
+      // Clear to the canvas background so a failed read shows an empty plot.
+      const dpr = window.devicePixelRatio || 1;
+      const W = cv.clientWidth || 800, H = cv.clientHeight || 240;
+      cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+      const ctx = cv.getContext('2d'); if (ctx) { ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.fillStyle = '#0d1f33'; ctx.fillRect(0, 0, W, H); }
+    }
+  }
+}
+
+/** Self-contained single-trace wiggle for the preview canvas. Mirrors drawTrace's
+ *  layout (95th-pct auto-normalized amplitude + ms time axis) but owns its own
+ *  window (full trace) so it never disturbs the Inspector's shared traceView.
+ *  Every numeric is guarded so NaN can't reach the canvas. */
+function drawPreviewTrace(cv: HTMLCanvasElement, t: TraceData, color: string) {
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth || 800, H = cv.clientHeight || 240;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  const ctx = cv.getContext('2d'); if (!ctx) return;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#0d1f33';
+  ctx.fillRect(0, 0, W, H);
+  const n = t.nSamples;
+  if (!n || !t.samples.length) return;
+  const ML = 60, MR = 14, MT = 14, MB = 26;
+  const pw = W - ML - MR, ph = H - MT - MB;
+  if (pw < 4 || ph < 4) return;
+  const cx = ML + pw / 2;
+  const nf = normFactorPercentile(t.samples.subarray(0, n), 0.95) || 1;
+  const safeNf = Number.isFinite(nf) && nf > 0 ? nf : 1;
+  const xOfAmp = (raw: number) => {
+    const r = Number.isFinite(raw) ? raw : 0;
+    const v = Math.max(-1, Math.min(1, r / safeNf));
+    return cx + v * (pw / 2 - 2);
+  };
+  ctx.strokeStyle = '#214564'; ctx.lineWidth = 1;
+  ctx.strokeRect(ML, MT, pw, ph);
+  ctx.beginPath(); ctx.moveTo(cx, MT); ctx.lineTo(cx, MT + ph);
+  ctx.strokeStyle = '#264a68'; ctx.stroke();
+  ctx.beginPath();
+  ctx.strokeStyle = color; ctx.lineWidth = 1;
+  const denom = n > 1 ? n - 1 : 1;
+  for (let i = 0; i < n; i++) {
+    const x = xOfAmp(t.samples[i]);
+    const y = MT + (i / denom) * ph;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  // time axis (ms down)
+  ctx.fillStyle = '#7e93ac'; ctx.font = '10px Consolas, monospace';
+  const msPerSample = (Number.isFinite(t.sampleInt) ? t.sampleInt : 0) / 1000;
+  for (let k = 0; k <= 5; k++) {
+    const y = MT + (ph * k) / 5;
+    const sampleAt = (denom * k) / 5;
+    ctx.fillText((sampleAt * msPerSample).toFixed(0) + ' ms', 6, y + 3);
+    ctx.strokeStyle = '#173049';
+    ctx.beginPath(); ctx.moveTo(ML, y); ctx.lineTo(ML + pw, y); ctx.stroke();
+  }
+  // amplitude caption (dimensionless sample value)
+  ctx.fillStyle = '#5f7793'; ctx.textAlign = 'center';
+  ctx.fillText('Amplitude (sample value)', ML + pw / 2, MT + ph - 4);
+  ctx.textAlign = 'left';
 }
 
 /** Add the currently-open file's current trace (Trace Inspector selection). */
@@ -3316,7 +3492,15 @@ function workbenchInteractions() {
     if (!active()) return;
     wbAxisRange?.clear(); wbAmp = null; wbFit(); drawWorkbench();
   });
-  $opt('wbPickBtn')?.addEventListener('click', () => void wbPickAndAdd());
+  $opt('wbPickBtn')?.addEventListener('click', () => void wbPickFile());
+  $opt('wbPrevBtn')?.addEventListener('click', () => wbStepPreview(-1));
+  $opt('wbNextBtn')?.addEventListener('click', () => wbStepPreview(1));
+  $opt('wbAddPreviewBtn')?.addEventListener('click', wbAddPreview);
+  $opt('wbIndex')?.addEventListener('change', () => {
+    if (!wbPickedPath) return;
+    const idxIn = $opt('wbIndex') as HTMLInputElement | null;
+    void wbLoadPreview(parseInt(idxIn?.value || '0', 10) || 0);
+  });
   $opt('wbAddOpenBtn')?.addEventListener('click', wbAddOpenTrace);
   $opt('wbClearBtn')?.addEventListener('click', wbClear);
   $opt('wbModeSide')?.addEventListener('click', () => wbSetMode('side'));
