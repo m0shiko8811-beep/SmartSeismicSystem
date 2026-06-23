@@ -459,7 +459,7 @@ export function mergeSPSData(a: SPSData, b: SPSData): SPSData {
   const hseen = new Set<string>();
   const headers: SPSHeader[] = [];
   for (const h of [...a.headers, ...b.headers]) {
-    const k = h.raw && h.raw.length ? h.raw : `${h.code} ${h.val}`;
+    const k = h.raw && h.raw.length ? h.raw : `${h.code}␟${h.val}`;
     if (!hseen.has(k)) { hseen.add(k); headers.push(h); }
   }
   return {

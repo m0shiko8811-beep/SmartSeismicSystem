@@ -335,7 +335,7 @@ const TAB_META: Record<string, { title: string; desc: string }> = {
   conv: { title: 'Converter', desc: 'Read SEG-Y · SEG-D · SEG-2 / .dat · SU off the UI thread, then export to any supported format.' },
   trace: { title: 'Trace Inspector', desc: 'Step through individual traces; inspect the waveform or amplitude spectrum.' },
   section: { title: 'File Viewer', desc: 'Render the full record as a variable-density / wiggle section with gain and AGC.' },
-  sps: { title: 'SPS 2.1', desc: 'Plot source/receiver geometry on a survey grid or real basemap; QC and reproject.' },
+  sps: { title: 'SPS', desc: 'Plot source/receiver geometry on a survey grid or real basemap; QC and reproject. Reads SPS, SEG-P1, IOGP P1/11, P6/11, coord-CSV.' },
   vel: { title: 'Velocity', desc: 'Compute an NMO semblance panel and pick a stacking-velocity function.' },
   spectrum: { title: 'Spectrum', desc: 'Amplitude spectrum · spectrogram · F-K analysis' },
   workbench: { title: 'Trace Workbench', desc: 'Collect individual traces from any file and compare them side-by-side or overlaid, zoomed in lock-step.' },
@@ -4210,38 +4210,94 @@ function renderSpsHeaders() {
   renderSpsHdrRaw();
 }
 
-/** VIEW tab: grouped read-only table of every H-record. */
+/** VIEW tab: grouped, EDITABLE table — one row per H-code per section.
+ *  For each code we collapse the (possibly several, across the shared S/R/X
+ *  files) matching H-records into a single editable value: the DISTINCT,
+ *  NON-EMPTY values are gathered, so empties and exact duplicates never show as
+ *  stray ",value" / "N/A,N/A" artifacts. One distinct value ⇒ clean value;
+ *  several genuinely-different values ⇒ first + a subtle "(differs)" hint. The
+ *  field edits flow into the Raw draft (keyed by code) so Apply works here too.
+ *  The RAW tab still lists every individual record untouched. */
 function renderSpsHdrView() {
   const host = $('spsHdrGroups');
   host.innerHTML = '';
   const rows = spsHdrState?.headers || [];
   if (!rows.length) { host.innerHTML = '<div class="sps-hdr-empty">No H-records in this survey.</div>'; return; }
+  // Bucket header indices into their display section, preserving first-seen code
+  // order. "used" tracks which got a home so the rest fall into "Other".
   const used = new Set<number>();
-  const groups: { title: string; rows: SpsHeaderRow[] }[] = SPS_HDR_GROUPS.map((g) => ({ title: g.title, rows: [] }));
+  const groups: { title: string; codes: string[]; desc: Record<string, string> }[] =
+    SPS_HDR_GROUPS.map((g) => ({ title: g.title, codes: [], desc: {} }));
+  const pushCode = (g: { codes: string[]; desc: Record<string, string> }, code: string, desc: string) => {
+    if (!g.codes.includes(code)) g.codes.push(code);
+    if (desc && !g.desc[code]) g.desc[code] = desc;
+  };
   rows.forEach((r, i) => {
     const gi = SPS_HDR_GROUPS.findIndex((g) => g.match(r.code));
-    if (gi >= 0) { groups[gi].rows.push(r); used.add(i); }
+    if (gi >= 0) { pushCode(groups[gi], r.code, r.desc || ''); used.add(i); }
   });
-  const other = rows.filter((_, i) => !used.has(i));
-  if (other.length) groups.push({ title: 'Other', rows: other });
-  for (const g of groups) {
-    if (!g.rows.length) continue;
+  const otherGrp = { title: 'Other', codes: [] as string[], desc: {} as Record<string, string> };
+  rows.forEach((r, i) => { if (!used.has(i)) pushCode(otherGrp, r.code, r.desc || ''); });
+  const allGroups = otherGrp.codes.length ? [...groups, otherGrp] : groups;
+
+  for (const g of allGroups) {
+    if (!g.codes.length) continue;
     const box = document.createElement('div');
     box.className = 'sps-hdr-grp';
     const h = document.createElement('h4');
     h.textContent = g.title;
     box.appendChild(h);
-    for (const r of g.rows) {
+    for (const code of g.codes) {
+      // Distinct, non-empty values for this code across every matching record.
+      const distinct: string[] = [];
+      for (const r of rows) {
+        if (r.code !== code) continue;
+        const v = (r.val || '').trim();
+        if (v && !distinct.includes(v)) distinct.push(v);
+      }
+      const differs = distinct.length > 1;
+      const value = distinct[0] || '';
+
       const row = document.createElement('div');
       row.className = 'row';
-      const c = document.createElement('span'); c.className = 'c'; c.textContent = r.code;
-      const d = document.createElement('span'); d.className = 'd'; d.textContent = r.desc || '';
-      const v = document.createElement('span'); v.className = 'v'; v.textContent = r.val || '—';
-      row.appendChild(c); row.appendChild(d); row.appendChild(v);
+      const c = document.createElement('span'); c.className = 'c'; c.textContent = code;
+      const d = document.createElement('span'); d.className = 'd'; d.textContent = g.desc[code] || '';
+      const vWrap = document.createElement('span'); vWrap.className = 'v';
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'ctl sps-hdr-vin';
+      input.value = value;
+      input.placeholder = '—';
+      input.title = differs ? `Values differ across files: ${distinct.join(' | ')}` : (g.desc[code] || '');
+      // Edits propagate to every Raw-draft record sharing this code (the same
+      // draft + apply mechanism the Raw tab uses), so Apply picks them up.
+      input.addEventListener('input', () => { setStructuredHdrVal(code, input.value); });
+      vWrap.appendChild(input);
+      if (differs) {
+        const hint = document.createElement('span');
+        hint.className = 'sps-hdr-differs';
+        hint.textContent = '(differs)';
+        hint.title = `Values differ across files: ${distinct.join(' | ')}`;
+        vWrap.appendChild(hint);
+      }
+      row.appendChild(c); row.appendChild(d); row.appendChild(vWrap);
       box.appendChild(row);
     }
     host.appendChild(box);
   }
+}
+
+/** Write a structured-view edit for `code` into the Raw draft so Apply emits it.
+ *  Updates every existing draft record carrying this code to the new value
+ *  (collapsing siblings); if none exists yet, appends a new draft record. */
+function setStructuredHdrVal(code: string, val: string) {
+  let hit = false;
+  for (const rec of spsHdrRawDraft) {
+    if (rec.code === code) { rec.val = val; hit = true; }
+  }
+  if (!hit) spsHdrRawDraft.push({ code, val, desc: '', orig: false, origCode: null, origVal: null });
+  // Keep the Raw tab in sync if it's already painted.
+  paintSpsHdrRaw();
 }
 
 /** CRS tab: prefill the form from the parsed projection (or show the stamp-CRS prompt). */
@@ -4365,10 +4421,10 @@ function buildApplyRequest(): {
   // Original records the user deleted from the draft → remove by code+value so
   // only that specific record is dropped (not every sibling sharing its code).
   const draftIds = new Set(
-    spsHdrRawDraft.filter((r) => r.origVal != null && r.origCode != null).map((r) => r.origCode + ' ' + r.origVal),
+    spsHdrRawDraft.filter((r) => r.origVal != null && r.origCode != null).map((r) => r.origCode + '␟' + r.origVal),
   );
   for (const h of st.headers) {
-    if (!draftIds.has(h.code + ' ' + h.val)) removes.push({ code: h.code, oldVal: h.val });
+    if (!draftIds.has(h.code + '␟' + h.val)) removes.push({ code: h.code, oldVal: h.val });
   }
 
   // Admin fields → map to H01/H02/H03/H04. A field overrides whatever the Raw
