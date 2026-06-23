@@ -570,8 +570,16 @@ const traceView = { s0: 0, s1: 0, fullS: 0, init: false };
 // [ampMin,ampMax] (raw sample units) across the plot width instead. Guarded so a
 // blank/invalid box reverts to auto — never feeds NaN to the canvas.
 let traceAmpRange: { min: number; max: number } | null = null;
+// Whether the trace's X (time) axis is currently pinned by a manual box pair. Used
+// so editing ONLY the Amp (Y) boxes leaves an existing wheel/button zoom intact —
+// we refit the time axis only on the manual→auto X transition, never on an Amp edit.
+let traceManualX = false;
 // Manual X (time) / Y (amplitude) range control group for the Trace Inspector.
 let traceAxisRange: AxisRangeHandle | null = null;
+// Tracks whether the LAST applied X (time) pair was a manual override, so editing
+// only the Amp (Y) boxes never silently discards a live wheel/button time zoom: we
+// refit the time axis only on the manual→auto transition, not on every Amp edit.
+let tracePrevManualX = false;
 let outFormat = 'segy1';
 let lastSection: SectionData | null = null;
 // Section data-zoom view-state: the visible window in FULL-data indices
@@ -686,6 +694,9 @@ const wbView = { s0: 0, s1: 0, fullS: 0, init: false };
 // mapping to ±wbAmp instead of the auto ±1 full-swing. null ⇒ auto. Guarded so a
 // blank/invalid box reverts that axis to auto (never feeds NaN to the canvas).
 let wbAmp: { min: number; max: number } | null = null;
+// Whether the workbench's X (time) axis is pinned by a manual box pair. Lets an
+// Amp-only edit leave the shared wbView zoom intact (refit only on manual→auto X).
+let wbManualX = false;
 let wbAxisRange: AxisRangeHandle | null = null;
 // Distinct, theme-friendly colours cycled across collected traces.
 const WB_COLORS = ['#34dbd0', '#ffb454', '#7aa2ff', '#ff6e9c', '#9be564', '#c792ea', '#f78c6c', '#56d4ff'];
@@ -1978,32 +1989,46 @@ interface AxisRangeOptions {
 }
 
 /** A live handle returned by axisRangeControls(): read the current overrides or
- *  push fresh auto-fit bounds into the (empty) boxes as placeholders. */
+ *  push the live effective extent into the boxes so the user always sees (and the
+ *  native steppers increment from) the current range. */
 interface AxisRangeHandle {
-  /** Current parsed overrides (each axis null when blank / invalid). */
+  /** Current parsed overrides (each axis null when untouched / invalid). Only an
+   *  axis the user actually edited counts as an override; an axis still showing
+   *  the synced auto extent reads back as null = auto. */
   value(): AxisRangeValue;
-  /** Show the live auto-fit extent as input placeholders (only when blank), so
-   *  the user sees the current range without it counting as an override. */
+  /** Reflect the live effective extent (auto-fit or current zoom window) into the
+   *  boxes. Updates the real `.value` of every edge the user has NOT edited (so the
+   *  number is visible and the spinner steps from it); user-edited edges are left
+   *  intact. Despite the legacy name it no longer touches `placeholder`. */
   setPlaceholders(xMin: number, xMax: number, yMin: number, yMax: number): void;
-  /** Clear all four boxes and revert to auto (does NOT fire onChange). */
+  /** Clear all four boxes + edited flags and revert to auto (does NOT fire onChange). */
   clear(): void;
-}
-
-/** Parse one min/max input pair into an AxisRange, applying the guard rules:
- *  empty, NaN, or min>=max ⇒ null (that axis stays auto; never feeds NaN to a draw). */
-function parseAxisPair(lo: HTMLInputElement, hi: HTMLInputElement): AxisRange {
-  const a = lo.value.trim(), b = hi.value.trim();
-  if (a === '' || b === '') return null;
-  const min = Number(a), max = Number(b);
-  if (!Number.isFinite(min) || !Number.isFinite(max) || min >= max) return null;
-  return { min, max };
 }
 
 /** Build the reusable X/Y manual-range control group inside `host` and return a
  *  handle. All numeric guarding lives here so callers only ever see finite,
- *  ordered ranges (or null = auto). */
+ *  ordered ranges (or null = auto).
+ *
+ *  Each input always SHOWS the current effective range (kept in sync via
+ *  setPlaceholders after every fit / zoom / file change) so the native up/down
+ *  steppers increment from the live value rather than from 0. An edge is treated
+ *  as a manual override only once the user actually edits it ("dirty"); an edge
+ *  still showing the synced extent reads back as auto. When the user edits only
+ *  one edge of a pair, the partner edge is seeded from the value currently shown
+ *  in its box, so a single-field edit still applies instead of being discarded. */
 function axisRangeControls(host: HTMLElement, opts: AxisRangeOptions): AxisRangeHandle {
   host.classList.add('axrange');
+  // Per-input "the user typed/stepped this" flag. Synced extent values do NOT set
+  // it (so they stay auto); real user input does.
+  const dirty = new WeakSet<HTMLInputElement>();
+  // Last extent pushed in via setPlaceholders, kept per-edge. readPair seeds an
+  // UN-edited partner edge from this stored extent rather than from the box's live
+  // `.value`: after a wheel-zoom the box shows the transient zoom window, and a lone
+  // native-stepper edit on the OTHER edge would otherwise capture that zoom as a
+  // manual override. Seeding the partner from the synced extent (the same number the
+  // box was last set to, not whatever a stepper nudged it to) keeps a single-edge
+  // edit applying without pinning a stale value the user never touched.
+  const ext = new WeakMap<HTMLInputElement, number>();
   const mk = (ph: string, step: string) => {
     const el = document.createElement('input');
     el.type = 'number';
@@ -2025,45 +2050,91 @@ function axisRangeControls(host: HTMLElement, opts: AxisRangeOptions): AxisRange
   auto.title = 'Clear the manual ranges and revert to auto-fit';
   host.append(xLab, xLo, sep1, xHi, yLab, yLo, sep2, yHi, auto);
 
+  /** A finite number parsed from a box, or null when blank / garbage. */
+  const num = (el: HTMLInputElement): number | null => {
+    const s = el.value.trim();
+    if (s === '') return null;
+    const n = Number(s);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  // Parse one axis pair, honouring the override + seeding rules:
+  //  - Neither edge edited ⇒ null (axis stays auto, even though both boxes show
+  //    the synced extent).
+  //  - At least one edge edited ⇒ build a pair, seeding any un-edited edge from
+  //    the value currently shown in its box (the live extent), so a lone edit
+  //    still applies. The result is guarded (finite, min<max) and otherwise null.
+  // Value of an edge for range-building: the user's typed value when dirty, else
+  // the stored synced extent (NOT the box's current `.value`, which a stepper may
+  // have nudged off the synced extent — see `ext`). Falls back to the box value
+  // when no extent was ever synced.
+  const edgeVal = (el: HTMLInputElement): number | null => {
+    if (dirty.has(el)) return num(el);
+    const e = ext.get(el);
+    return e !== undefined && Number.isFinite(e) ? e : num(el);
+  };
+  const readPair = (lo: HTMLInputElement, hi: HTMLInputElement): AxisRange => {
+    if (!dirty.has(lo) && !dirty.has(hi)) return null;
+    const a = edgeVal(lo), b = edgeVal(hi);
+    if (a === null || b === null) return null; // a seeded edge can never be NaN here
+    if (a >= b) return null;                   // inverted / zero-width ⇒ stay auto
+    return { min: a, max: b };
+  };
+
   const read = (): AxisRangeValue => {
-    const x = parseAxisPair(xLo, xHi), y = parseAxisPair(yLo, yHi);
+    const x = readPair(xLo, xHi), y = readPair(yLo, yHi);
     return {
       xMin: x ? x.min : null, xMax: x ? x.max : null,
       yMin: y ? y.min : null, yMax: y ? y.max : null,
     };
   };
-  // A pair needs BOTH edges to take effect (parseAxisPair returns null otherwise),
-  // so a lone value is silently discarded. Flag such an incomplete pair on both
-  // its boxes so the user gets feedback that their typed value was not applied,
-  // instead of the axis quietly staying auto. Pure visual; no draw/NaN impact.
+  // An edited pair whose two edges don't form a valid range (one edge blank, or
+  // min>=max) is flagged on both boxes so the user sees their value was not yet
+  // applied. Pure visual; readPair already kept it off the canvas.
   const flagIncomplete = () => {
     const mark = (lo: HTMLInputElement, hi: HTMLInputElement) => {
-      const a = lo.value.trim() !== '', b = hi.value.trim() !== '';
-      const incomplete = a !== b; // exactly one edge filled
-      lo.classList.toggle('axin-incomplete', incomplete);
-      hi.classList.toggle('axin-incomplete', incomplete);
+      const edited = dirty.has(lo) || dirty.has(hi);
+      const valid = readPair(lo, hi) !== null;
+      const bad = edited && !valid;
+      lo.classList.toggle('axin-incomplete', bad);
+      hi.classList.toggle('axin-incomplete', bad);
     };
     mark(xLo, xHi); mark(yLo, yHi);
   };
   const fire = () => { flagIncomplete(); opts.onChange(read()); };
+  // Live: mark the touched edge dirty (or, if the user emptied it, drop the flag
+  // so it cleanly reverts to the synced auto extent), then redraw on every input
+  // (typing / stepper), not just on commit, so editing feels immediate.
+  const onUserEdit = (el: HTMLInputElement) => {
+    if (el.value.trim() === '') dirty.delete(el); else dirty.add(el);
+    fire();
+  };
   for (const el of [xLo, xHi, yLo, yHi]) {
-    el.addEventListener('change', fire);
-    el.addEventListener('input', flagIncomplete); // live feedback while typing
-    el.addEventListener('keydown', (e) => { if ((e as KeyboardEvent).key === 'Enter') { e.preventDefault(); fire(); } });
+    el.addEventListener('input', () => onUserEdit(el));
+    el.addEventListener('change', () => onUserEdit(el));
+    el.addEventListener('keydown', (e) => { if ((e as KeyboardEvent).key === 'Enter') { e.preventDefault(); onUserEdit(el); } });
   }
   const clearBoxes = () => {
-    xLo.value = xHi.value = yLo.value = yHi.value = '';
-    for (const el of [xLo, xHi, yLo, yHi]) el.classList.remove('axin-incomplete');
+    for (const el of [xLo, xHi, yLo, yHi]) { dirty.delete(el); el.value = ''; el.classList.remove('axin-incomplete'); }
   };
   auto.addEventListener('click', () => { clearBoxes(); fire(); });
 
   return {
     value: read,
     setPlaceholders(xMin, xMax, yMin, yMax) {
-      // Only as placeholders, and only while the box is blank, so showing the
-      // current extent never silently becomes an override.
+      // Show the live extent in every edge the user hasn't edited, as the real
+      // `.value` so it is visible and the native stepper increments from it.
+      // Edited (dirty) edges keep whatever the user typed.
       const put = (el: HTMLInputElement, v: number) => {
-        if (el.value.trim() === '') el.placeholder = Number.isFinite(v) ? String(Math.round(v * 100) / 100) : el.placeholder;
+        if (!Number.isFinite(v)) return;
+        // Round to a tidy step: integer axes to whole numbers, else 2 decimals.
+        const r = el.step === '1' ? Math.round(v) : Math.round(v * 100) / 100;
+        // Record the synced extent for EVERY edge (even dirty ones) so readPair can
+        // seed an un-edited partner from it rather than from a stepper-nudged box.
+        ext.set(el, r);
+        if (dirty.has(el)) return; // keep the user's typed value visible
+        const s = String(r);
+        if (el.value !== s) el.value = s;
       };
       put(xLo, xMin); put(xHi, xMax); put(yLo, yMin); put(yHi, yMax);
     },
@@ -2514,9 +2585,13 @@ function applyTraceAxisRange() {
       traceView.s1 = s1;
       traceClamp();
     }
-  } else {
-    // X reverted to auto ⇒ fit the whole trace's time axis.
+    traceManualX = true;
+  } else if (traceManualX) {
+    // X transitioned from a manual pin back to auto ⇒ fit the whole time axis.
+    // (A blank X pair while no manual pin was active means the user only touched
+    //  the Amp boxes — leave any existing wheel/button zoom untouched.)
     traceFit(t);
+    traceManualX = false;
   }
   // Y axis = amplitude (raw sample units); null ⇒ auto-normalized.
   traceAmpRange = (v.yMin !== null && v.yMax !== null) ? { min: v.yMin, max: v.yMax } : null;
@@ -2936,8 +3011,12 @@ function applyWbAxisRange() {
     if (Number.isFinite(s0) && Number.isFinite(s1) && s1 > s0) {
       wbView.s0 = s0; wbView.s1 = s1; wbClamp();
     }
-  } else {
-    wbFit(); // X reverted to auto ⇒ fit the whole time extent
+    wbManualX = true;
+  } else if (wbManualX) {
+    // X transitioned from a manual pin back to auto ⇒ fit the whole time extent.
+    // A blank X pair with no prior manual pin ⇒ Amp-only edit; leave wbView zoom as-is.
+    wbFit();
+    wbManualX = false;
   }
   // Y = amplitude (raw units); null ⇒ auto per-trace/shared normalization.
   wbAmp = (v.yMin !== null && v.yMax !== null) ? { min: v.yMin, max: v.yMax } : null;
@@ -3360,8 +3439,11 @@ function jumpGridTo(x: number, y: number) {
   const cv = $('spsCanvas') as HTMLCanvasElement;
   if (!gridView.init) gridFit();
   const W = cv.clientWidth || 900, H = cv.clientHeight || 500;
-  gridView.ox = W / 2 - x * gridView.sc;
-  gridView.oy = H / 2 + y * gridView.sc;
+  // Center the ROTATED projection of the point (so it lands mid-canvas at any
+  // bearing); the highlight ring stores the true E/N and re-rotates when drawn.
+  const r = rotWorld(x, y);
+  gridView.ox = W / 2 - r.e * gridView.sc;
+  gridView.oy = H / 2 + r.n * gridView.sc;
   gridHighlight = { x, y };
   drawSurveyGrid();
 }
@@ -3409,7 +3491,12 @@ async function loadSPS() {
       return;
     }
     spsSummary = s;
-    setSpsExportEnabled(true);
+    // Only enable the point exports (KML/GeoJSON/CSV/P1·11/coord-CSV/QC) when the
+    // survey actually has points. A P6/11 bin-grid-only load succeeds but leaves
+    // the S/R point list empty, and exporting an empty SPSData over those buttons
+    // would produce hollow files — gate on points existing, not on load success.
+    setSpsExportEnabled((s.sources ?? 0) + (s.receivers ?? 0) > 0);
+    setRotateCtlEnabled(true); // a survey is loaded → rotation works in both views
     spsGeom = null;
     spsSpider = null;
     spsFold = null;
@@ -3449,6 +3536,7 @@ async function clearSPS() {
   gridHighlight = null;
   invalidateSpsSourceCache();   // Observer Log: drop the cached source list
   setSpsExportEnabled(false);
+  setRotateCtlEnabled(false); // no survey loaded → rotation N/A in either view
   clearInspector();
   $('qcResults').textContent = '';
   $('spsLabel').textContent = 'Load S/R/X files to plot the survey';
@@ -3504,7 +3592,7 @@ async function refreshSps() {
     $('viewMap').classList.remove('on');
     ($('spsCanvas') as HTMLElement).style.display = 'block';
     $('spsMap').style.display = 'none';
-    setRotateCtlEnabled(false); // back on the grid → rotation N/A
+    setRotateCtlEnabled(true); // grid view also honours the shared bearing now
     $('spsLabel').textContent = 'Real map needs a projected CRS in the SPS header — showing Survey grid.';
   }
   const wantGeo = spsView === 'map';
@@ -3659,7 +3747,7 @@ function binGridGuides(g: BinGridInfo): { e: number; n: number }[][] {
 /** Draw the bin-grid frame onto the offline survey-grid canvas using the SAME
  *  X()/Yf() transforms as the points, so it tracks pan/zoom. Projected-E/N grid
  *  view only (the canvas is in projected space when geo=false). */
-function drawBinGridOverlay(ctx: CanvasRenderingContext2D, X: (e: number) => number, Yf: (n: number) => number) {
+function drawBinGridOverlay(ctx: CanvasRenderingContext2D, X: (e: number, n: number) => number, Yf: (e: number, n: number) => number) {
   const g = spsBinGrid;
   if (!binGridUsable(g)) return;
   const corners = binGridCorners(g);
@@ -3667,22 +3755,22 @@ function drawBinGridOverlay(ctx: CanvasRenderingContext2D, X: (e: number) => num
   // Faint interior inline/crossline guides under the outline.
   ctx.strokeStyle = 'rgba(168,85,247,0.18)'; ctx.lineWidth = 1;
   for (const [a, b] of binGridGuides(g)) {
-    ctx.beginPath(); ctx.moveTo(X(a.e), Yf(a.n)); ctx.lineTo(X(b.e), Yf(b.n)); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(X(a.e, a.n), Yf(a.e, a.n)); ctx.lineTo(X(b.e, b.n), Yf(b.e, b.n)); ctx.stroke();
   }
   // Outline (closed rotated rectangle).
   ctx.strokeStyle = '#a855f7'; ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(X(corners[0].e), Yf(corners[0].n));
-  for (let i = 1; i < corners.length; i++) ctx.lineTo(X(corners[i].e), Yf(corners[i].n));
+  ctx.moveTo(X(corners[0].e, corners[0].n), Yf(corners[0].e, corners[0].n));
+  for (let i = 1; i < corners.length; i++) ctx.lineTo(X(corners[i].e, corners[i].n), Yf(corners[i].e, corners[i].n));
   ctx.closePath(); ctx.stroke();
   // Origin marker + inline-axis tick (shows the rotation direction).
-  const ox = X(g.originE), oy = Yf(g.originN);
+  const ox = X(g.originE, g.originN), oy = Yf(g.originE, g.originN);
   ctx.fillStyle = '#a855f7'; ctx.shadowColor = '#a855f7'; ctx.shadowBlur = 7;
   ctx.beginPath(); ctx.arc(ox, oy, 4, 0, Math.PI * 2); ctx.fill();
   ctx.shadowBlur = 0;
   // Inline-axis arrow from the origin toward corner[1].
   ctx.strokeStyle = '#c084fc'; ctx.lineWidth = 1.5;
-  ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(X(corners[1].e), Yf(corners[1].n)); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(X(corners[1].e, corners[1].n), Yf(corners[1].e, corners[1].n)); ctx.stroke();
   // Label.
   ctx.fillStyle = '#c084fc'; ctx.font = '10px Consolas, monospace';
   const az = ((g.inlineAzimuth % 360) + 360) % 360;
@@ -3764,7 +3852,7 @@ function setView(v: 'grid' | 'map') {
   $('viewMap').classList.toggle('on', v === 'map');
   ($('spsCanvas') as HTMLElement).style.display = v === 'grid' ? 'block' : 'none';
   $('spsMap').style.display = v === 'map' ? 'block' : 'none';
-  setRotateCtlEnabled(v === 'map'); // rotation only applies to the real map
+  setRotateCtlEnabled(!!spsSummary); // both views honour the shared bearing
   if (spsSummary) void refreshSps();
 }
 
@@ -3775,11 +3863,22 @@ function gridFit() {
   const W = cv.clientWidth || 900, H = cv.clientHeight || 500;
   const { minX, maxX, minY, maxY } = spsGeom.bbox;
   if (!isFinite(minX)) { gridView.sc = 1; gridView.ox = W / 2; gridView.oy = H / 2; gridView.init = true; return; }
-  const dx = Math.max(1e-9, maxX - minX), dy = Math.max(1e-9, maxY - minY);
+  // Fit the ROTATED extent, not the axis-aligned bbox: drawSurveyGrid turns the
+  // geometry about the bbox centre, so an elongated survey near 45–90° has a
+  // rotated footprint wider/taller than (maxX−minX)/(maxY−minY). Rotate the four
+  // bbox corners through the same rotWorld() and fit that span, so a rotated
+  // survey never overflows the canvas. (At bearing 0 this reduces to the bbox.)
+  let rMinX = Infinity, rMaxX = -Infinity, rMinY = Infinity, rMaxY = -Infinity;
+  for (const [cx, cy] of [[minX, minY], [maxX, minY], [minX, maxY], [maxX, maxY]] as const) {
+    const r = rotWorld(cx, cy);
+    if (r.e < rMinX) rMinX = r.e; if (r.e > rMaxX) rMaxX = r.e;
+    if (r.n < rMinY) rMinY = r.n; if (r.n > rMaxY) rMaxY = r.n;
+  }
+  const dx = Math.max(1e-9, rMaxX - rMinX), dy = Math.max(1e-9, rMaxY - rMinY);
   const sc = Math.min((W - 80) / dx, (H - 56) / dy) * 0.96;
   gridView.sc = sc;
-  gridView.ox = W / 2 - (sc * (minX + maxX)) / 2;
-  gridView.oy = H / 2 + (sc * (minY + maxY)) / 2;
+  gridView.ox = W / 2 - (sc * (rMinX + rMaxX)) / 2;
+  gridView.oy = H / 2 + (sc * (rMinY + rMaxY)) / 2;
   gridView.init = true;
 }
 
@@ -3805,29 +3904,44 @@ function drawSurveyGrid() {
   if (!gridView.init) gridFit();
   const { sc, ox, oy } = gridView;
   const geo = spsGeom.geo;
+  // World→pixel projection. When the survey grid is rotated (shared bearing), the
+  // plotted geometry is turned about the bbox centre in world space first, then
+  // projected — so points, lines, the spider, the fold heatmap and the bin-grid
+  // overlay all rotate coherently through this one projector. Hit-testing
+  // (pickGridPoint) forward-projects candidate stations through the same rotWorld()
+  // and compares in pixel space, so no inverse is needed. Bearing 0 is the identity
+  // fast path.
+  const rotated = spsBearing !== 0;
   const X = (e: number) => ox + e * sc;
   const Yf = (n: number) => oy - n * sc;
+  const Xr = rotated ? (e: number, n: number) => { const r = rotWorld(e, n); return ox + r.e * sc; } : (e: number, _n: number) => ox + e * sc;
+  const Yr = rotated ? (e: number, n: number) => { const r = rotWorld(e, n); return oy - r.n * sc; } : (_e: number, n: number) => oy - n * sc;
   const showS = ($('spsShowS') as HTMLInputElement).checked;
   const showR = ($('spsShowR') as HTMLInputElement).checked;
 
-  // visible world extent → "nice" gridlines + axis labels
+  // visible world extent → "nice" gridlines + axis labels.
   const e0 = (0 - ox) / sc, e1 = (W - ox) / sc;
   const nTop = (oy - 0) / sc, nBot = (oy - H) / sc;
   const pr = geo ? 4 : 0;
   ctx.lineWidth = 1; ctx.font = '10px Consolas, monospace';
-  const sx = niceStep(e1 - e0, 8);
-  for (let e = Math.ceil(e0 / sx) * sx; e <= e1; e += sx) {
-    const x = X(e); if (x < 42 || x > W - 2) continue;
-    ctx.strokeStyle = 'rgba(33,69,100,0.45)';
-    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H - 16); ctx.stroke();
-    ctx.fillStyle = '#5e7186'; ctx.fillText(e.toFixed(pr), x + 2, H - 5);
-  }
-  const sy = niceStep(nTop - nBot, 6);
-  for (let n = Math.ceil(nBot / sy) * sy; n <= nTop; n += sy) {
-    const y = Yf(n); if (y < 2 || y > H - 16) continue;
-    ctx.strokeStyle = 'rgba(33,69,100,0.45)';
-    ctx.beginPath(); ctx.moveTo(42, y); ctx.lineTo(W, y); ctx.stroke();
-    ctx.fillStyle = '#5e7186'; ctx.fillText(n.toFixed(pr), 3, y - 2);
+  if (!rotated) {
+    // Rectilinear E/N gridlines + tick labels only make sense north-up. While the
+    // grid is rotated we drop them (the rotated frame + north arrow carry orientation)
+    // and the points stay the priority — see the rotated-frame block below.
+    const sx = niceStep(e1 - e0, 8);
+    for (let e = Math.ceil(e0 / sx) * sx; e <= e1; e += sx) {
+      const x = X(e); if (x < 42 || x > W - 2) continue;
+      ctx.strokeStyle = 'rgba(33,69,100,0.45)';
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H - 16); ctx.stroke();
+      ctx.fillStyle = '#5e7186'; ctx.fillText(e.toFixed(pr), x + 2, H - 5);
+    }
+    const sy = niceStep(nTop - nBot, 6);
+    for (let n = Math.ceil(nBot / sy) * sy; n <= nTop; n += sy) {
+      const y = Yf(n); if (y < 2 || y > H - 16) continue;
+      ctx.strokeStyle = 'rgba(33,69,100,0.45)';
+      ctx.beginPath(); ctx.moveTo(42, y); ctx.lineTo(W, y); ctx.stroke();
+      ctx.fillStyle = '#5e7186'; ctx.fillText(n.toFixed(pr), 3, y - 2);
+    }
   }
 
   // FOLD / coverage heatmap, drawn UNDER everything else (grid view + projected
@@ -3839,28 +3953,37 @@ function drawSurveyGrid() {
     const f = spsFold;
     ctx.save();
     ctx.globalAlpha = 0.6;
-    // Visible world rectangle → bin index range (cull cells outside it).
-    const ix0 = Math.max(0, Math.floor((e0 - f.originX) / f.binX));
-    const ix1 = Math.min(f.nx - 1, Math.ceil((e1 - f.originX) / f.binX));
-    const iy0 = Math.max(0, Math.floor((nBot - f.originY) / f.binY));
-    const iy1 = Math.min(f.ny - 1, Math.ceil((nTop - f.originY) / f.binY));
+    // Visible world rectangle → bin index range (cull cells outside it). The cull
+    // box is the axis-aligned viewport, which is only valid north-up; while rotated
+    // we draw the full grid (no cull) so rotated-edge cells aren't wrongly dropped.
+    const ix0 = rotated ? 0 : Math.max(0, Math.floor((e0 - f.originX) / f.binX));
+    const ix1 = rotated ? f.nx - 1 : Math.min(f.nx - 1, Math.ceil((e1 - f.originX) / f.binX));
+    const iy0 = rotated ? 0 : Math.max(0, Math.floor((nBot - f.originY) / f.binY));
+    const iy1 = rotated ? f.ny - 1 : Math.min(f.ny - 1, Math.ceil((nTop - f.originY) / f.binY));
     const inv = 1 / f.maxFold;
     for (let iy = iy0; iy <= iy1; iy++) {
       const rowBase = iy * f.nx;
-      // Cell rows go bottom-up in world N; in canvas the rect spans from the
-      // top edge Yf(originY+(iy+1)*binY) down to Yf(originY+iy*binY).
-      const yTop = Yf(f.originY + (iy + 1) * f.binY);
-      const yBot = Yf(f.originY + iy * f.binY);
-      const rh = yBot - yTop;
+      const nLo = f.originY + iy * f.binY, nHi = f.originY + (iy + 1) * f.binY;
+      // Axis-aligned canvas rect when north-up; a rotated quad (4 corners through
+      // the rotating projector) once the grid is turned, so cells track the points.
+      const yTop = Yf(nHi), yBot = Yf(nLo), rh = yBot - yTop;
       for (let ix = ix0; ix <= ix1; ix++) {
         const v = f.fold[rowBase + ix];
         if (v <= 0) continue;
         // Map fold/maxFold (0..1) onto viridis, whose input is -1..1.
         const [r, g2, b] = colorViridis(v * inv * 2 - 1);
         ctx.fillStyle = `rgb(${r},${g2},${b})`;
-        const xL = X(f.originX + ix * f.binX);
-        const xR = X(f.originX + (ix + 1) * f.binX);
-        ctx.fillRect(xL, yTop, xR - xL, rh);
+        const eLo = f.originX + ix * f.binX, eHi = f.originX + (ix + 1) * f.binX;
+        if (!rotated) {
+          ctx.fillRect(X(eLo), yTop, X(eHi) - X(eLo), rh);
+        } else {
+          ctx.beginPath();
+          ctx.moveTo(Xr(eLo, nLo), Yr(eLo, nLo));
+          ctx.lineTo(Xr(eHi, nLo), Yr(eHi, nLo));
+          ctx.lineTo(Xr(eHi, nHi), Yr(eHi, nHi));
+          ctx.lineTo(Xr(eLo, nHi), Yr(eLo, nHi));
+          ctx.closePath(); ctx.fill();
+        }
       }
     }
     ctx.restore();
@@ -3878,7 +4001,8 @@ function drawSurveyGrid() {
       ctx.strokeStyle = col; ctx.lineWidth = lw; ctx.beginPath();
       for (let i = 0; i < sp.sx.length; i++) {
         if (only >= 0 ? sp.shot[i] !== only : (hiGid >= 0 && sp.shot[i] === hiGid)) continue;
-        const ax = X(sp.sx[i]), ay = Yf(sp.sy[i]), bx = X(sp.rx[i]), by = Yf(sp.ry[i]);
+        const ax = Xr(sp.sx[i], sp.sy[i]), ay = Yr(sp.sx[i], sp.sy[i]);
+        const bx = Xr(sp.rx[i], sp.ry[i]), by = Yr(sp.rx[i], sp.ry[i]);
         if (!inView(ax, ay) && !inView(bx, by)) continue;
         ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
       }
@@ -3897,7 +4021,7 @@ function drawSurveyGrid() {
     for (let i = 0; i < g.x.length; i++) {
       const e = g.x[i], n = g.y[i];
       if (!isFinite(e) || !isFinite(n)) { cur = -1; continue; }
-      const x = X(e), y = Yf(n);
+      const x = Xr(e, n), y = Yr(e, n);
       if (g.line[i] !== cur) { ctx.moveTo(x, y); cur = g.line[i]; } else ctx.lineTo(x, y);
     }
     ctx.stroke();
@@ -3905,7 +4029,7 @@ function drawSurveyGrid() {
     for (let i = 0; i < g.x.length; i++) {
       const e = g.x[i], n = g.y[i];
       if (!isFinite(e) || !isFinite(n)) continue;
-      ctx.beginPath(); ctx.arc(X(e), Yf(n), 1.8, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(Xr(e, n), Yr(e, n), 1.8, 0, Math.PI * 2); ctx.fill();
     }
     ctx.shadowBlur = 0;
   };
@@ -3915,12 +4039,12 @@ function drawSurveyGrid() {
   // P6/11 bin-grid QC overlay (origin · rotation · outline · guides), drawn OVER
   // the S/R points using the same X()/Yf() so it tracks pan/zoom. Projected-E/N
   // grid space only — the grid corners are in projected coordinates.
-  if (spsShowBinGrid() && !geo) drawBinGridOverlay(ctx, X, Yf);
+  if (spsShowBinGrid() && !geo) drawBinGridOverlay(ctx, Xr, Yr);
 
   // Highlight ring for a clicked / jumped-to point (drawn in the current geometry
   // space, so it tracks pan/zoom). A double ring stands out over either layer.
   if (gridHighlight && isFinite(gridHighlight.x) && isFinite(gridHighlight.y)) {
-    const hx = X(gridHighlight.x), hy = Yf(gridHighlight.y);
+    const hx = Xr(gridHighlight.x, gridHighlight.y), hy = Yr(gridHighlight.x, gridHighlight.y);
     ctx.strokeStyle = '#ffe04a'; ctx.lineWidth = 2; ctx.shadowColor = '#ffe04a'; ctx.shadowBlur = 8;
     ctx.beginPath(); ctx.arc(hx, hy, 9, 0, Math.PI * 2); ctx.stroke();
     ctx.shadowBlur = 0; ctx.lineWidth = 1;
@@ -3945,15 +4069,26 @@ function drawSurveyGrid() {
     ctx.fillText('Fold/coverage: Survey-grid view only', 52, ly + 20);
   }
 
-  // north arrow (north-up)
-  ctx.fillStyle = '#9fb0c4'; ctx.font = 'bold 12px Consolas, monospace';
-  ctx.fillText('N', W - 22, 24);
-  ctx.strokeStyle = '#9fb0c4'; ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  ctx.moveTo(W - 18, 28); ctx.lineTo(W - 18, 40);
-  ctx.moveTo(W - 18, 28); ctx.lineTo(W - 21, 33);
-  ctx.moveTo(W - 18, 28); ctx.lineTo(W - 15, 33);
-  ctx.stroke();
+  // North arrow — turns with the shared bearing so it always points to map-north
+  // on the rotated canvas (clockwise bearing ⇒ arrow swings clockwise). Drawn in a
+  // local frame about a fixed top-right anchor; the "N" glyph rides the arrow tip.
+  {
+    const ax = W - 22, ay = 32; // anchor (arrow base)
+    ctx.save();
+    ctx.translate(ax, ay);
+    ctx.rotate((spsBearing * Math.PI) / 180); // clockwise on screen
+    ctx.strokeStyle = '#9fb0c4'; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(0, 9); ctx.lineTo(0, -9);   // shaft (up = north)
+    ctx.moveTo(0, -9); ctx.lineTo(-3, -4);  // arrowhead
+    ctx.moveTo(0, -9); ctx.lineTo(3, -4);
+    ctx.stroke();
+    ctx.fillStyle = '#9fb0c4'; ctx.font = 'bold 12px Consolas, monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('N', 0, -16);
+    ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+    ctx.restore();
+  }
 
   drawScaleBar(ctx, W, H, sc, geo, (nTop + nBot) / 2);
 }
@@ -4063,10 +4198,13 @@ function pickGridPoint(e: MouseEvent): { g: SpsLines; i: number } | null {
   const px = e.clientX - r.left, py = e.clientY - r.top;
   const { sc, ox, oy } = gridView;
   let best = 144, bi = -1, bg: SpsLines | null = null;
+  // Same rotating projection the draw path uses, so picking is correct at any
+  // bearing (rotate world E/N about the pivot, then project to pixels).
   const scan = (g: SpsLines, on: boolean) => {
     if (!on) return;
     for (let i = 0; i < g.x.length; i++) {
-      const x = ox + g.x[i] * sc, y = oy - g.y[i] * sc;
+      const r = rotWorld(g.x[i], g.y[i]);
+      const x = ox + r.e * sc, y = oy - r.n * sc;
       const d = (x - px) ** 2 + (y - py) ** 2;
       if (d < best) { best = d; bi = i; bg = g; }
     }
@@ -4114,12 +4252,15 @@ function ensureMap() {
   // maxZoom 24 with per-source maxNativeZoom lets the basemap keep zooming PAST the
   // tile providers' native levels (upscaled) for sub-meter survey detail.
   const dark = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png', { maxZoom: 24, maxNativeZoom: 20, attribution: '© OpenStreetMap, © CARTO' });
+  // Light counterpart of the CARTO dark basemap (Positron 'light_all'); same URL
+  // pattern + zoom caps so it upscales past native levels identically.
+  const light = L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png', { maxZoom: 24, maxNativeZoom: 20, attribution: '© OpenStreetMap, © CARTO' });
   const sat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 24, maxNativeZoom: 21, attribution: 'Esri World Imagery' });
   const streets = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 24, maxNativeZoom: 19, attribution: '© OpenStreetMap' });
   // rotate:true enables the leaflet-rotate panes/bearing API; we drive bearing
   // from our own toolbar slider, so suppress the plugin's built-in control.
   leafletMap = L.map('spsMap', { layers: [dark], preferCanvas: true, maxZoom: 24, zoomSnap: 0.5, rotate: true, rotateControl: false });
-  L.control.layers({ Dark: dark, Satellite: sat, Streets: streets }).addTo(leafletMap);
+  L.control.layers({ Dark: dark, Light: light, Satellite: sat, Streets: streets }).addTo(leafletMap);
   leafletMap.setView([32, 35], 6);
   // Re-apply any bearing already chosen in the toolbar before the map existed.
   applyMapBearing();
@@ -4144,8 +4285,9 @@ function applyMapBearing() {
   if (typeof leafletMap.setBearing === 'function') leafletMap.setBearing(spsBearing);
 }
 
-/** Enable/disable + dim the rotation control. Rotation only makes sense in the
- *  real-map view, so it's disabled on the survey grid. */
+/** Enable/disable + dim the rotation control. Both the survey-grid canvas and the
+ *  real map now honour the bearing, so the control is enabled whenever a survey is
+ *  loaded (either view). It's only disabled before any geometry exists. */
 function setRotateCtlEnabled(on: boolean) {
   const grp = $opt('spsRotateCtl');
   if (grp) grp.style.opacity = on ? '1' : '0.45';
@@ -4167,13 +4309,48 @@ function syncBearingUI() {
   if (lbl) lbl.textContent = `${rounded}°`;
 }
 
-/** Set the map bearing from a user input, guarding NaN/out-of-range, then sync
- *  the live map + toolbar UI. The single entry point for all rotation changes. */
+/** Set the shared bearing from a user input, guarding NaN/out-of-range, then sync
+ *  the live map + toolbar UI AND repaint the survey-grid canvas (both views share
+ *  this one bearing). The single entry point for all rotation changes. */
 function setMapBearing(v: number) {
   spsBearing = normBearing(v);
   applyMapBearing();
   syncBearingUI();
+  // The offline grid honours the same bearing; refit + repaint it when it's the
+  // live view so the rotation-aware auto-fit keeps a rotated survey inside the
+  // canvas (gridFit() fits the rotated extent), then switching views stays coherent.
+  if (spsView === 'grid' && spsGeom) { gridFit(); drawSurveyGrid(); }
 }
+
+// ── Survey-grid rotation (shares spsBearing with the real map) ──
+// We rotate the plotted geometry about the survey-grid centre in WORLD (E/N) space
+// BEFORE the pixel projection, so points, lines, the X-ref spider, the fold
+// heatmap and the bin-grid overlay all rotate coherently through the same X()/Yf().
+// A clockwise bearing turns map-north clockwise on screen, matching the real map.
+
+/** Survey-grid rotation pivot: the bbox centre in world E/N. NaN-safe (falls back
+ *  to the origin so a degenerate bbox can never push NaN into the projection). */
+function gridPivot(): { cx: number; cy: number } {
+  const b = spsGeom?.bbox;
+  if (!b || !isFinite(b.minX) || !isFinite(b.maxX) || !isFinite(b.minY) || !isFinite(b.maxY)) {
+    return { cx: 0, cy: 0 };
+  }
+  return { cx: (b.minX + b.maxX) / 2, cy: (b.minY + b.maxY) / 2 };
+}
+
+/** Rotate a world (e,n) point clockwise (screen sense) about the grid pivot by the
+ *  current bearing. Returns the original point when the bearing is 0 (fast path).
+ *  In world space, a clockwise on-screen turn (canvas Y-down) is a CCW maths turn. */
+function rotWorld(e: number, n: number): { e: number; n: number } {
+  if (spsBearing === 0) return { e, n };
+  const { cx, cy } = gridPivot();
+  const t = (spsBearing * Math.PI) / 180; // clockwise-on-screen bearing
+  const c = Math.cos(t), s = Math.sin(t);
+  const dx = e - cx, dy = n - cy;
+  // Screen-clockwise about a Y-up world axis ⇒ rotate world by -t in maths terms.
+  return { e: cx + dx * c + dy * s, n: cy - dx * s + dy * c };
+}
+
 
 function updateMap() {
   if (!spsGeom || !spsGeom.geo) return;
@@ -4422,6 +4599,10 @@ function renderSpsHeaders() {
   renderSpsHdrCrs();
   renderSpsHdrAdmin();
   renderSpsHdrRaw();
+  // Always open on the View tab. The active sub-tab persists across close/reopen
+  // via DOM classes, and spsHdrStampCrs() can leave CRS active, so without this a
+  // reopened modal could land on a stale CRS/Raw/Admin panel and look empty/broken.
+  spsHdrTab('view');
 }
 
 /** VIEW tab: grouped, EDITABLE table — one row per H-code per section.
@@ -4482,10 +4663,23 @@ function renderSpsHdrView() {
       input.className = 'ctl sps-hdr-vin';
       input.value = value;
       input.placeholder = '—';
-      input.title = differs ? `Values differ across files: ${distinct.join(' | ')}` : (g.desc[code] || '');
-      // Edits propagate to every Raw-draft record sharing this code (the same
-      // draft + apply mechanism the Raw tab uses), so Apply picks them up.
-      input.addEventListener('input', () => { setStructuredHdrVal(code, input.value); });
+      if (differs) {
+        // Several genuinely-different values share this code across the loaded
+        // files. Editing here would have to pick ONE value and overwrite every
+        // sibling, silently destroying the others — so block the collapsed field
+        // and point the user at the Raw tab, which lists each record individually.
+        input.readOnly = true;
+        input.classList.add('sps-hdr-vin-ro');
+        input.title = `Values differ across files: ${distinct.join(' | ')} — edit individual records on the Raw tab`;
+      } else {
+        // Single distinct value ⇒ a clean edit. Target ONLY the draft record(s)
+        // carrying this exact loaded value (code+origVal), never every sibling
+        // sharing the code, so a same-code record with a different value is left
+        // untouched. The edit flows into the Raw draft so Apply picks it up.
+        const origVal = value;
+        input.title = g.desc[code] || '';
+        input.addEventListener('input', () => { setStructuredHdrVal(code, origVal, input.value); });
+      }
       vWrap.appendChild(input);
       if (differs) {
         const hint = document.createElement('span');
@@ -4501,17 +4695,42 @@ function renderSpsHdrView() {
   }
 }
 
-/** Write a structured-view edit for `code` into the Raw draft so Apply emits it.
- *  Updates every existing draft record carrying this code to the new value
- *  (collapsing siblings); if none exists yet, appends a new draft record. */
-function setStructuredHdrVal(code: string, val: string) {
+/** Write a structured-view edit into the Raw draft so Apply emits it.
+ *  Targets only the draft record(s) whose loaded identity matches code+origVal
+ *  (NOT every sibling sharing the code), so a same-code record carrying a
+ *  different value is never silently rewritten. If no such record exists yet
+ *  (a freshly-added code), it updates a same-code record or appends a new one.
+ *  Does NOT repaint the whole Raw list (that would destroy any mid-edit Raw
+ *  input on every keystroke); it patches the affected Raw input in place if the
+ *  Raw tab is currently mounted. */
+function setStructuredHdrVal(code: string, origVal: string, val: string) {
   let hit = false;
   for (const rec of spsHdrRawDraft) {
-    if (rec.code === code) { rec.val = val; hit = true; }
+    // Prefer the exact loaded identity (code + original value). A record whose
+    // origVal is null (newly added) or whose value already moved to `val` (the
+    // user is editing the same field again) is matched on code as a fallback.
+    const idMatch = rec.code === code && (rec.origVal === origVal || rec.val === origVal || rec.val === val);
+    if (idMatch) { rec.val = val; hit = true; }
   }
   if (!hit) spsHdrRawDraft.push({ code, val, desc: '', orig: false, origCode: null, origVal: null });
-  // Keep the Raw tab in sync if it's already painted.
-  paintSpsHdrRaw();
+  syncRawInputsFromDraft();
+}
+
+/** Patch the Raw-tab inputs' values from the current draft WITHOUT rebuilding the
+ *  DOM (so a mid-edit Raw input is never destroyed). No-op when the Raw list isn't
+ *  painted or its row count no longer matches the draft (then a structural repaint
+ *  is required and happens on the next tab switch / explicit paint). */
+function syncRawInputsFromDraft() {
+  const host = $opt('spsHdrRawList');
+  if (!host) return;
+  const rows = host.querySelectorAll('.sps-hdr-raw-row');
+  if (rows.length !== spsHdrRawDraft.length) return;
+  rows.forEach((row, i) => {
+    const valEl = row.querySelector('.rawval') as HTMLInputElement | null;
+    if (valEl && document.activeElement !== valEl && valEl.value !== spsHdrRawDraft[i].val) {
+      valEl.value = spsHdrRawDraft[i].val;
+    }
+  });
 }
 
 /** CRS tab: prefill the form from the parsed projection (or show the stamp-CRS prompt). */
@@ -5223,7 +5442,12 @@ function syncHeatPlaceholders(axis: AxisRangeHandle | null, view: SpecRange, ext
 function applyHeatAxis(axis: AxisRangeHandle | null, view: SpecRange, redraw: () => void) {
   if (!axis) return;
   const v = axis.value();
-  view.x0 = v.xMin; view.x1 = v.xMax; view.y0 = v.yMin; view.y1 = v.yMax;
+  // Per-axis independence: a null pair means that axis was NOT edited (the boxes
+  // only report dirty edges, and wheel/button zoom writes view fields without
+  // marking the boxes dirty). Overwriting an unedited axis with null would wipe a
+  // live zoom on the OTHER axis, so only write the axis pair that is present.
+  if (v.xMin !== null && v.xMax !== null) { view.x0 = v.xMin; view.x1 = v.xMax; }
+  if (v.yMin !== null && v.yMax !== null) { view.y0 = v.yMin; view.y1 = v.yMax; }
   redraw();
 }
 
@@ -7588,7 +7812,7 @@ function init() {
   $opt('spsRotateNum')?.addEventListener('input', (e) => setMapBearing(parseFloat((e.target as HTMLInputElement).value)));
   $opt('spsRotateReset')?.addEventListener('click', () => setMapBearing(0));
   syncBearingUI();
-  setRotateCtlEnabled(spsView === 'map'); // disabled on the default grid view
+  setRotateCtlEnabled(!!spsSummary); // enabled once a survey is loaded (either view)
   gridInteractions();
   $opt('spsInspClose')?.addEventListener('click', clearInspector);
   $('spsQcBtn').addEventListener('click', () => void runQC());

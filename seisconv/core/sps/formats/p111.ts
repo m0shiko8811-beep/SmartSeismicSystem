@@ -130,13 +130,24 @@ function projectionFromHeaders(
 function encodeLon(deg: number): string {
   const w = deg < 0;
   const a = Math.abs(deg);
-  const d = Math.floor(a);
-  const m = Math.floor((a - d) * 60);
-  const s = ((a - d) * 60 - m) * 60;
+  let d = Math.floor(a);
+  let m = Math.floor((a - d) * 60);
+  let s = ((a - d) * 60 - m) * 60;
+  ({ d, m, s } = carryDMS(d, m, s)); // round seconds to 3dp and carry any 60s overflow
   const dd = String(d).padStart(3, '0');
   const mm = String(m).padStart(2, '0');
   const ss = padSec(s);
   return `${dd}${mm}${ss}${w ? 'W' : 'E'};`;
+}
+
+/** Round seconds to 3 decimals and carry a resulting 60.000 up into minutes/degrees,
+ *  so the encoded SS field is always < 60 (s=59.9997 ⇒ 00 sec + 1 minute, not "60.000"
+ *  which spsParseDMS reads as +1 arc-minute, breaking the round-trip). */
+function carryDMS(d: number, m: number, s: number): { d: number; m: number; s: number } {
+  s = Math.round(s * 1000) / 1000;
+  if (s >= 60) { s -= 60; m += 1; }
+  if (m >= 60) { m -= 60; d += 1; }
+  return { d, m, s };
 }
 
 /** Two-digit-integer, 3-decimal seconds field ("SS.sss") for the DMS tokens the
@@ -154,9 +165,10 @@ function padSec(s: number): string {
 function encodeLat(deg: number): string {
   const sgn = deg < 0;
   const a = Math.abs(deg);
-  const d = Math.floor(a);
-  const m = Math.floor((a - d) * 60);
-  const s = ((a - d) * 60 - m) * 60;
+  let d = Math.floor(a);
+  let m = Math.floor((a - d) * 60);
+  let s = ((a - d) * 60 - m) * 60;
+  ({ d, m, s } = carryDMS(d, m, s)); // round seconds to 3dp and carry any 60s overflow
   const dd = String(d).padStart(3, '0');
   const mm = String(m).padStart(2, '0');
   const ss = padSec(s);

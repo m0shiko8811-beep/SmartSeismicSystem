@@ -26,8 +26,17 @@ export function computeSemblance(traces: Trace[], siUs: number, velMin: number, 
   // check below) a short trace simply contributes no sample beyond its own end.
   let nT = 0;
   for (const tr of traces) if (tr.nSamples > nT) nT = tr.nSamples;
+  // Guard the velocity scan: a non-finite / zero / negative velStep from the UI
+  // (e.g. numVal('velStep')||50 lets -10 through) would make the scan loop never
+  // advance → spin forever / exhaust memory. Clamp to a positive step and cap the
+  // velocity count BEFORE allocating, so a hostile/garbage input can't DoS the worker.
+  const step = Number.isFinite(velStep) && velStep > 0 ? velStep : 50;
+  const lo = Number.isFinite(velMin) ? velMin : 0;
+  const hi = Number.isFinite(velMax) ? velMax : lo;
+  const MAX_VELS = 4096;
+  const nVCap = Math.max(1, Math.min(Math.floor((hi - lo) / step) + 1, MAX_VELS));
   const vels: number[] = [];
-  for (let v = velMin; v <= velMax; v += velStep) vels.push(v);
+  for (let i = 0; i < nVCap; i++) vels.push(lo + i * step);
   const nV = vels.length;
 
   // Offsets from headers, else synthetic (midpoint-centered, 25 m spacing).
@@ -76,5 +85,9 @@ export function computeSemblance(traces: Trace[], siUs: number, velMin: number, 
     }
   }
 
-  return { semb, vels, nT, dt, velMin, velMax, siUs, hasOffsets: hasOff, offNote: hasOff ? 'using header offsets' : 'synthetic offsets (25m spacing)' };
+  // Report the ACTUAL scanned velocity range (after clamping/capping) so the
+  // renderer's axis matches the rows in `semb`, not the raw (possibly garbage) input.
+  const scannedMin = vels[0];
+  const scannedMax = vels[vels.length - 1];
+  return { semb, vels, nT, dt, velMin: scannedMin, velMax: scannedMax, siUs, hasOffsets: hasOff, offNote: hasOff ? 'using header offsets' : 'synthetic offsets (25m spacing)' };
 }

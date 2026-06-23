@@ -274,8 +274,15 @@ export function parseCoordCsv(text: string): SPSData {
           });
           continue; // header consumed; data starts next line
         }
-        // No header → assume a positional layout: line,point,easting,northing,elevation.
-        colMap = ['lineName', 'point', 'easting', 'northing', 'elevation'];
+        // No header → positional layout, chosen by COLUMN COUNT of this first data
+        // row. A 2-column E,N file must map to easting,northing — the old fixed
+        // line,point,easting,northing,elevation map put E,N into lineName/point,
+        // leaving easting/northing undefined → NaN → every row silently skipped.
+        const n = cells.length;
+        colMap =
+          n <= 2 ? ['easting', 'northing']
+          : n === 3 ? ['easting', 'northing', 'elevation']
+          : ['lineName', 'point', 'easting', 'northing', 'elevation'];
         // fall through and parse THIS line as data
       }
 
@@ -326,6 +333,12 @@ export function parseCoordCsv(text: string): SPSData {
 
     out.layout = 'coordcsv';
     if (out.skipped > 0) out.errors.unshift(`${out.skipped} record(s) skipped (coord parse failed)`);
+    // Surface a clear, actionable error when the file had rows but produced no
+    // points (e.g. an unexpected column layout the positional fallback misread),
+    // rather than returning a silently-empty survey with only a skipped count.
+    if (out.sources.length + out.receivers.length === 0 && out.skipped > 0) {
+      out.errors.unshift('coordcsv: no points parsed — check the column layout (expected easting,northing[,elevation] or line,point,easting,northing,elevation)');
+    }
   } catch (e) {
     // A parser must NEVER throw — surface the failure and return what we have.
     out.errors.push(`coordcsv: internal error — ${(e as Error).message}`);

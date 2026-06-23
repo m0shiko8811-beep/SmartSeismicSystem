@@ -715,7 +715,7 @@ table.olog-grid tr.olog-rowsel td{background:var(--teal-tint-2);}
 .axrange .axlbl{font-size:11px;font-weight:600;color:var(--ink-3);white-space:nowrap;}
 .axrange .axin{width:52px;background:var(--input-bg);color:var(--ink);border:1px solid var(--hair);border-radius:7px;padding:4px 5px;font-family:var(--mono);font-size:11px;}
 .axrange .axin:focus{outline:none;border-color:var(--teal);box-shadow:0 0 0 3px rgba(15,179,171,.16);}
-/* a pair with only one edge filled never applies (needs both min+max); flag it so the lone value isn't silently ignored */
+/* an edited axis whose edges don't yet form a valid range (min>=max, or an edge cleared) can't apply; flag it so the user sees their value isn't live yet */
 .axrange .axin.axin-incomplete{border-color:var(--amber);background:var(--amber-tint);}
 .axrange .axin.axin-incomplete:focus{box-shadow:0 0 0 3px var(--amber-tint);}
 .axrange .axsep{color:var(--ink-3);font-size:11px;}
@@ -780,7 +780,7 @@ table.olog-grid tr.olog-rowsel td{background:var(--teal-tint-2);}
 .sps-hdr-body{display:flex;flex-direction:column;gap:12px;}
 .sps-hdr-warn{background:rgba(214,158,46,.12);border:1px solid rgba(214,158,46,.5);color:var(--ink);border-radius:9px;padding:8px 12px;font-size:12px;line-height:1.45;}
 .sps-hdr-scope{display:flex;align-items:center;gap:12px;flex-wrap:wrap;}
-.sps-hdr-tabs{align-self:flex-start;}
+.sps-hdr-tabs{align-self:flex-start;flex:none;}
 .sps-htab{display:block;}
 .sps-hdr-hint,.sps-hdr-note{font-size:11.5px;color:var(--ink-3);line-height:1.5;margin:0 0 4px;}
 .sps-hdr-note{margin-top:8px;background:var(--surface);border:1px solid var(--hair-soft);border-radius:8px;padding:8px 10px;}
@@ -788,12 +788,13 @@ table.olog-grid tr.olog-rowsel td{background:var(--teal-tint-2);}
 .sps-hdr-groups{display:flex;flex-direction:column;gap:14px;}
 .sps-hdr-grp{border:1px solid var(--hair-soft);border-radius:10px;overflow:hidden;}
 .sps-hdr-grp h4{font-size:11px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;color:var(--ink-3);background:var(--surface);padding:7px 12px;margin:0;border-bottom:1px solid var(--hair-soft);}
-.sps-hdr-grp .row{display:grid;grid-template-columns:62px 1fr 1.2fr;gap:12px;align-items:baseline;padding:6px 12px;font-size:12px;border-bottom:1px solid var(--hair-soft);}
+.sps-hdr-grp .row{display:grid;grid-template-columns:62px 1fr 1.2fr;gap:12px;align-items:center;padding:6px 12px;font-size:12px;border-bottom:1px solid var(--hair-soft);}
 .sps-hdr-grp .row:last-child{border-bottom:none;}
 .sps-hdr-grp .row .c{font-family:var(--mono);color:var(--teal-deep);font-weight:600;}
 .sps-hdr-grp .row .d{color:var(--ink-3);}
 .sps-hdr-grp .row .v{font-family:var(--mono);color:var(--ink);word-break:break-word;display:flex;align-items:center;gap:8px;min-width:0;}
 .sps-hdr-grp .row .v .sps-hdr-vin{flex:1 1 auto;min-width:0;font-family:var(--mono);font-size:12px;padding:4px 8px;}
+.sps-hdr-grp .row .v .sps-hdr-vin-ro{opacity:.7;cursor:not-allowed;background:var(--surface);}
 .sps-hdr-grp .row .v .sps-hdr-differs{flex:none;font-family:inherit;font-size:10px;font-weight:700;letter-spacing:.3px;color:var(--amber);text-transform:uppercase;cursor:help;}
 .sps-hdr-empty{font-size:12px;color:var(--ink-3);padding:10px 2px;}
 /* CRS + Admin forms */
@@ -1377,10 +1378,11 @@ table.olog-grid tr.olog-rowsel td{background:var(--teal-tint-2);}
           <label class="ctl-lbl" id="spsShowBinGridLbl" title="Overlay the loaded P6/11 acquisition bin grid (origin, rotation, outline)"><input type="checkbox" id="spsShowBinGrid"> Bin grid</label>
           <label class="ctl-lbl">Bin <input type="number" id="spsBinSize" class="numin" value="25" min="1" step="1"> m</label>
           <span class="seg"><button class="segbtn on" id="viewGrid">Survey grid</button><button class="segbtn" id="viewMap">Real map</button></span>
-          <!-- Map rotation (real-map view): slider + numeric box + readout drive
-               the bearing; Reset snaps back to North (0°). All inputs guarded in
-               app.ts (empty/NaN ⇒ 0). Only affects the Leaflet map. -->
-          <span class="axrange" id="spsRotateCtl" title="Rotate the real map (bearing, clockwise from North); empty/invalid resets to North">
+          <!-- Rotation (both views): slider + numeric box + readout drive a single
+               shared bearing; Reset snaps back to North (0°). All inputs guarded in
+               app.ts (empty/NaN ⇒ 0). Rotates the real map AND the survey-grid canvas
+               about the survey centre, so switching views keeps the same rotation. -->
+          <span class="axrange" id="spsRotateCtl" title="Rotate the view (bearing, clockwise from North) — applies to both the survey grid and the real map; empty/invalid resets to North">
             <span class="axlbl">Rotate</span>
             <input type="range" id="spsRotate" class="rotslider" min="0" max="360" step="1" value="0" aria-label="Map bearing">
             <input type="number" id="spsRotateNum" class="axin" min="0" max="360" step="1" value="0" aria-label="Map bearing (degrees)">

@@ -21,6 +21,10 @@ let currentSPSFiles: { name: string; text: string; type: 'S' | 'R' | 'X' | 'mixe
 // A P6/11 bin grid loaded alongside (or instead of) the point survey. Held
 // separately from currentSPS since it is a grid, not a list of S/R points.
 let currentBinGrid: BinGrid | null = null;
+// Identity (name + raw text) of the bin grid currently held in currentBinGrid, so a
+// reload of the SAME .p611 skips re-reading + re-parsing the multi-MB grid. Bin grids
+// are never added to currentSPSFiles, so they bypass that file dedup otherwise.
+let currentBinGridSig: string | null = null;
 
 interface Req {
   id: number;
@@ -479,6 +483,7 @@ port.on('message', (req: Req) => {
       currentSPS = null;
       currentSPSFiles = [];
       currentBinGrid = null;
+      currentBinGridSig = null;
       port.postMessage({ id, ok: true });
       return;
     }
@@ -491,6 +496,7 @@ port.on('message', (req: Req) => {
       currentSPS = null;
       currentSPSFiles = [];
       currentBinGrid = null;
+      currentBinGridSig = null;
       port.postMessage({ id, ok: true });
       return;
     }
@@ -538,11 +544,28 @@ port.on('message', (req: Req) => {
         const name = basename(p);
         const fmt = detectPositioningFormat(name, text);
         if (!fmtsSeen.includes(fmt)) fmtsSeen.push(fmt);
+        // Bin-grid dedup BEFORE the (multi-MB) parse: a P6/11 grid is never tracked
+        // in currentSPSFiles, so without this an identical .p611 would be re-read AND
+        // re-parsed on every Load. 'p611' always resolves to a bin grid. Skip the
+        // parse when name+text is unchanged.
+        if (fmt === 'p611') {
+          const sig = name + '␟' + text;
+          if (sig === currentBinGridSig && currentBinGrid) { lastGrid = currentBinGrid; continue; }
+          const parsedGrid = parsePositioning(fmt, text);
+          if (parsedGrid.kind === 'bingrid') {
+            // Bin grids are not point files: store the latest one and skip the
+            // currentSPSFiles point-list (reproject/header-edit don't apply to it).
+            currentBinGrid = parsedGrid.grid;
+            currentBinGridSig = sig;
+            lastGrid = parsedGrid.grid;
+          }
+          continue;
+        }
         const parsed = parsePositioning(fmt, text);
         if (parsed.kind === 'bingrid') {
-          // Bin grids are not point files: store the latest one and skip the
-          // currentSPSFiles point-list (reproject/header-edit don't apply to it).
+          // Defensive: detect said non-grid but parse resolved to a grid anyway.
           currentBinGrid = parsed.grid;
+          currentBinGridSig = name + '␟' + text;
           lastGrid = parsed.grid;
           continue;
         }

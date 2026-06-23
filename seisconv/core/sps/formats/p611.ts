@@ -44,6 +44,11 @@ const MAX_LINES = 2_000_000;
 const MAX_LINE_LEN = 4096;
 /** Cap on the audit `raw` array so a hostile file can't pin O(file) lines in memory. */
 const MAX_RAW = 4096;
+/** Aggregate byte cap on the retained audit `raw` text. The line-count cap alone
+ *  (MAX_RAW lines × MAX_LINE_LEN each) admits ~16 MB, which then crosses the
+ *  worker→renderer structured-clone boundary on every binGrid() call. Stop pushing
+ *  once the retained text exceeds this small budget so the cloned BinGrid stays small. */
+const MAX_RAW_BYTES = 256 * 1024;
 /** Hard cap on the total source length we will scan, so the up-front newline split
  *  cannot allocate O(file) strings from an attacker-controlled newline count. A
  *  conformant P6/11 header is tiny; this still admits very large real files. */
@@ -275,6 +280,7 @@ export function parseP611(text: string): BinGrid {
     // Scan newline-delimited lines with an index loop (no full split) up to the
     // line cap, so neither the line array nor the per-line work is unbounded.
     let pos = 0;
+    let rawBytes = 0; // running size of retained g.raw text (aggregate byte budget)
     for (let li = 0; li < MAX_LINES && pos <= src.length; li++) {
       let nl = src.indexOf('\n', pos);
       if (nl < 0) nl = src.length;
@@ -286,7 +292,10 @@ export function parseP611(text: string): BinGrid {
       const trimmed = line.trim();
       if (!trimmed) continue;
 
-      if (g.raw.length < MAX_RAW) g.raw.push(trimmed);
+      if (g.raw.length < MAX_RAW && rawBytes + trimmed.length <= MAX_RAW_BYTES) {
+        g.raw.push(trimmed);
+        rawBytes += trimmed.length;
+      }
 
       const fs = fields(line);
       if (!fs.length) continue;

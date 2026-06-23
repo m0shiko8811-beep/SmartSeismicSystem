@@ -9,6 +9,7 @@ import { app, BrowserWindow, dialog, ipcMain, Menu } from 'electron';
 import { writeFile, readFile, readdir, stat } from 'node:fs/promises';
 import { Worker } from 'node:worker_threads';
 import * as dgram from 'node:dgram';
+import * as dns from 'node:dns';
 import * as path from 'node:path';
 import JSZip from 'jszip';
 
@@ -164,9 +165,11 @@ const NTP_UNIX_EPOCH_DIFF = 2208988800; // seconds between 1900-01-01 and 1970-0
 // over UDP/123 (an SSRF the sandboxed renderer itself could never perform). We
 // only block obviously-internal LITERALS (loopback, RFC-1918, link-local,
 // unique-local IPv6); public hostnames like pool.ntp.org are resolved normally.
-function isInternalNtpHost(host: string): boolean {
-  const h = host.trim().toLowerCase().replace(/^\[|\]$/g, '');
-  if (h === 'localhost' || h === '' || h.endsWith('.localhost')) return true;
+/** Is an IP LITERAL (v4 or v6) an internal/loopback/link-local/private address?
+ *  Used both for the user-supplied host string AND for the DNS-resolved address,
+ *  so a public hostname that resolves to an internal IP (DNS-rebinding) is caught. */
+function isInternalIp(ip: string): boolean {
+  const h = ip.trim().toLowerCase().replace(/^\[|\]$/g, '');
   // IPv4 literal?
   const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
   if (m) {
@@ -182,14 +185,22 @@ function isInternalNtpHost(host: string): boolean {
     return false;
   }
   // IPv6 literal: block loopback (::1), unspecified (::), unique-local (fc00::/7),
-  // and link-local (fe80::/10). Heuristic prefix check is sufficient here.
+  // link-local (fe80::/10), and IPv4-mapped (::ffff:a.b.c.d → re-check the v4 tail).
   if (h.includes(':')) {
     if (h === '::1' || h === '::') return true;
     if (/^f[cd]/.test(h)) return true; // fc00::/7 unique-local
     if (/^fe[89ab]/.test(h)) return true; // fe80::/10 link-local
+    const mapped = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(h);
+    if (mapped) return isInternalIp(mapped[1]);
     return false;
   }
   return false;
+}
+
+function isInternalNtpHost(host: string): boolean {
+  const h = host.trim().toLowerCase().replace(/^\[|\]$/g, '');
+  if (h === 'localhost' || h === '' || h.endsWith('.localhost')) return true;
+  return isInternalIp(h);
 }
 
 function sntpQuery(server: string): Promise<{ ok: boolean; offsetMs?: number; serverTimeMs?: number; error?: string }> {
@@ -220,8 +231,25 @@ function sntpQuery(server: string): Promise<{ ok: boolean; offsetMs?: number; se
     // Client request packet: first byte 0x1B = LI 0, VN 4, Mode 3 (client); rest zero.
     const packet = Buffer.alloc(48);
     packet[0] = 0x1b;
-    socket.send(packet, 0, packet.length, 123, server, (err) => {
-      if (err) finish({ ok: false, error: (err as Error).message });
+
+    // Resolve the hostname OURSELVES and re-check every resolved address against the
+    // private/loopback/link-local table BEFORE sending. The literal-only
+    // isInternalNtpHost check can't catch a public hostname that resolves to an
+    // internal IP (DNS-rebinding), which would otherwise let the main process
+    // probe internal hosts over UDP/123. We then send to the vetted literal IP (not
+    // the hostname) so the OS can't re-resolve to a different address (no TOCTOU).
+    dns.lookup(server, { all: true }, (err, addresses) => {
+      if (done) return;
+      if (err || !addresses.length) { finish({ ok: false, error: 'NTP DNS lookup failed' }); return; }
+      if (addresses.some((a) => isInternalIp(a.address))) {
+        finish({ ok: false, error: 'NTP server resolved to an internal address (blocked)' });
+        return;
+      }
+      // Prefer an IPv4 result (the socket is udp4); fall back to the first address.
+      const target = (addresses.find((a) => a.family === 4) ?? addresses[0]).address;
+      socket.send(packet, 0, packet.length, 123, target, (sendErr) => {
+        if (sendErr) finish({ ok: false, error: (sendErr as Error).message });
+      });
     });
   });
 }
