@@ -691,6 +691,19 @@ table.olog-grid tr.olog-rowsel td{background:var(--teal-tint-2);}
 .ctl-lbl{font-size:12px;color:var(--ink-2);display:flex;align-items:center;gap:6px;}
 .numin{width:62px;background:var(--input-bg);color:var(--ink);border:1px solid var(--hair);border-radius:8px;padding:5px 7px;font-family:var(--mono);font-size:12px;}
 .numin:focus{outline:none;border-color:var(--teal);box-shadow:0 0 0 3px rgba(15,179,171,.16);}
+/* manual axis-range control group (built by axisRangeControls() in app.ts) */
+.axrange{display:inline-flex;align-items:center;gap:5px;background:var(--surface);border:1px solid var(--hair);border-radius:10px;padding:3px 7px;}
+.axrange .axlbl{font-size:11px;font-weight:600;color:var(--ink-3);white-space:nowrap;}
+.axrange .axin{width:52px;background:var(--input-bg);color:var(--ink);border:1px solid var(--hair);border-radius:7px;padding:4px 5px;font-family:var(--mono);font-size:11px;}
+.axrange .axin:focus{outline:none;border-color:var(--teal);box-shadow:0 0 0 3px rgba(15,179,171,.16);}
+/* a pair with only one edge filled never applies (needs both min+max); flag it so the lone value isn't silently ignored */
+.axrange .axin.axin-incomplete{border-color:var(--amber);background:var(--amber-tint);}
+.axrange .axin.axin-incomplete:focus{box-shadow:0 0 0 3px var(--amber-tint);}
+.axrange .axsep{color:var(--ink-3);font-size:11px;}
+.axrange .axauto{border:none;background:transparent;font-family:inherit;font-size:11px;font-weight:600;color:var(--ink-3);padding:4px 8px;border-radius:7px;cursor:pointer;}
+.axrange .axauto:hover{background:var(--card);color:var(--teal-deep);}
+/* map-rotation slider lives inside an .axrange group (SPS toolbar) */
+.axrange .rotslider{width:96px;accent-color:var(--teal);cursor:pointer;}
 .slider{accent-color:var(--teal);}
 .slider.sm{width:100px;flex:none;}
 
@@ -1255,6 +1268,7 @@ table.olog-grid tr.olog-rowsel td{background:var(--teal-tint-2);}
             <button class="segbtn" id="traceZoomFit" title="Fit / reset time zoom">Fit</button>
             <button class="segbtn" id="traceZoomIn" title="Zoom in (time)">+</button>
           </span>
+          <span id="traceAxisRange" title="Type an exact axis window; blank/invalid reverts that axis to auto-fit"></span>
           <button class="btn sm" id="traceToWb" title="Add the current trace to the Trace Workbench">Add to Workbench</button>
           <span class="trace-label" id="traceLabel">Open a file to inspect traces</span>
         </div>
@@ -1307,6 +1321,7 @@ table.olog-grid tr.olog-rowsel td{background:var(--teal-tint-2);}
             <button class="segbtn" id="secZoomFit" title="Fit / reset data zoom">Fit</button>
             <button class="segbtn" id="secZoomIn" title="Zoom in (data)">+</button>
           </span>
+          <span id="secAxisRange" title="Type an exact axis window; blank/invalid reverts that axis to auto-fit"></span>
           <button class="btn sm" id="secToWb" title="Toggle, then click a trace on the section to add it to the Trace Workbench">+ Workbench</button>
           <span class="trace-label" id="secLabel">Open a file to view the section</span>
         </div>
@@ -1325,6 +1340,16 @@ table.olog-grid tr.olog-rowsel td{background:var(--teal-tint-2);}
           <label class="ctl-lbl" id="spsShowBinGridLbl" title="Overlay the loaded P6/11 acquisition bin grid (origin, rotation, outline)"><input type="checkbox" id="spsShowBinGrid"> Bin grid</label>
           <label class="ctl-lbl">Bin <input type="number" id="spsBinSize" class="numin" value="25" min="1" step="1"> m</label>
           <span class="seg"><button class="segbtn on" id="viewGrid">Survey grid</button><button class="segbtn" id="viewMap">Real map</button></span>
+          <!-- Map rotation (real-map view): slider + numeric box + readout drive
+               the bearing; Reset snaps back to North (0°). All inputs guarded in
+               app.ts (empty/NaN ⇒ 0). Only affects the Leaflet map. -->
+          <span class="axrange" id="spsRotateCtl" title="Rotate the real map (bearing, clockwise from North); empty/invalid resets to North">
+            <span class="axlbl">Rotate</span>
+            <input type="range" id="spsRotate" class="rotslider" min="0" max="360" step="1" value="0" aria-label="Map bearing">
+            <input type="number" id="spsRotateNum" class="axin" min="0" max="360" step="1" value="0" aria-label="Map bearing (degrees)">
+            <span class="axlbl" id="spsRotateVal">0°</span>
+            <button class="btn sm" id="spsRotateReset" title="Reset bearing to North (0°)">N</button>
+          </span>
           <button class="btn sm" id="spsHeadersBtn" title="View / edit the SPS H-record header block (CRS, datum, admin, raw records)">Headers…</button>
           <span class="sps-stats" id="spsStats"></span>
           <span class="trace-label" id="spsLabel">Load S/R/X files to plot the survey</span>
@@ -1375,6 +1400,12 @@ table.olog-grid tr.olog-rowsel td{background:var(--teal-tint-2);}
           <label class="ctl-lbl">Step <input type="number" id="velStep" class="numin" value="50"></label>
           <button class="btn sm" id="velComputeBtn">Compute semblance</button>
           <button class="btn sm" id="velExportBtn">Export picks CSV…</button>
+          <span class="seg" title="Zoom the panel (wheel over the canvas, double-click to fit)">
+            <button class="segbtn" id="velZoomOut" title="Zoom out">&minus;</button>
+            <button class="segbtn" id="velZoomFit" title="Fit / reset zoom">Fit</button>
+            <button class="segbtn" id="velZoomIn" title="Zoom in">+</button>
+          </span>
+          <span id="velAxisRange" title="Type an exact axis window; blank/invalid reverts that axis to auto-fit"></span>
           <span class="trace-label" id="velLabel">Open a file, then compute</span>
         </div>
         <canvas id="velCanvas" class="canvas"></canvas>
@@ -1400,6 +1431,12 @@ table.olog-grid tr.olog-rowsel td{background:var(--teal-tint-2);}
             <label class="ctl-lbl" title="First trace of the averaging window (blank = start)">From <input type="number" id="specTr0" class="numin" min="0" step="1" placeholder="0"></label>
             <label class="ctl-lbl" title="End trace, exclusive (blank = end)">To <input type="number" id="specTr1" class="numin" min="0" step="1" placeholder="end"></label>
             <button class="btn sm" id="specAvgCompute">Recompute</button>
+            <span class="seg" title="Zoom the spectrum (wheel over the canvas)">
+              <button class="segbtn" id="specAvgZoomOut" title="Zoom out">&minus;</button>
+              <button class="segbtn" id="specAvgZoomFit" title="Fit / reset zoom">Fit</button>
+              <button class="segbtn" id="specAvgZoomIn" title="Zoom in">+</button>
+            </span>
+            <span id="specAvgAxis" title="Type an exact freq/amplitude window; blank/invalid reverts that axis to auto-fit"></span>
           </span>
 
           <!-- SPECTROGRAM controls -->
@@ -1408,11 +1445,23 @@ table.olog-grid tr.olog-rowsel td{background:var(--teal-tint-2);}
             <label class="ctl-lbl">Trace # <input type="number" id="specTraceIdx" class="numin" value="0" min="0" step="1"></label>
             <button class="btn sm" id="specNext" title="Next trace">Next ›</button>
             <label class="ctl-lbl" title="STFT window length (samples); hop = winLen/2">Window <input type="number" id="specWin" class="numin" value="128" min="8" step="8"></label>
+            <span class="seg" title="Zoom the spectrogram (wheel over the canvas)">
+              <button class="segbtn" id="specGramZoomOut" title="Zoom out">&minus;</button>
+              <button class="segbtn" id="specGramZoomFit" title="Fit / reset zoom">Fit</button>
+              <button class="segbtn" id="specGramZoomIn" title="Zoom in">+</button>
+            </span>
+            <span id="specGramAxis" title="Type an exact freq/time window; blank/invalid reverts that axis to auto-fit"></span>
           </span>
 
           <!-- F-K controls -->
           <span id="specCtlsFk" class="hidden" style="display:inline-flex;align-items:center;gap:8px;">
             <button class="btn sm" id="specFkCompute">Recompute</button>
+            <span class="seg" title="Zoom the f-k panel (wheel over the canvas)">
+              <button class="segbtn" id="specFkZoomOut" title="Zoom out">&minus;</button>
+              <button class="segbtn" id="specFkZoomFit" title="Fit / reset zoom">Fit</button>
+              <button class="segbtn" id="specFkZoomIn" title="Zoom in">+</button>
+            </span>
+            <span id="specFkAxis" title="Type an exact wavenumber/freq window; blank/invalid reverts that axis to auto-fit"></span>
           </span>
 
           <span class="trace-label" id="specLabel">Open a seismic file to analyse its spectrum.</span>
@@ -1437,6 +1486,7 @@ table.olog-grid tr.olog-rowsel td{background:var(--teal-tint-2);}
             <button class="segbtn" id="wbZoomFit" title="Fit / reset time zoom">Fit</button>
             <button class="segbtn" id="wbZoomIn" title="Zoom in (time)">+</button>
           </span>
+          <span id="wbAxisRange" title="Type an exact time/amplitude window; blank/invalid reverts that axis to auto-fit"></span>
           <span class="trace-label" id="wbLabel">Pick traces to compare</span>
         </div>
         <div class="status" id="wbStatus" style="margin:2px 0 8px;"></div>

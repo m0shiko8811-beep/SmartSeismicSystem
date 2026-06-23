@@ -14,6 +14,9 @@ import { buildOds } from '../../core/export/ods';
 import JSZip from 'jszip';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
+// Adds map rotation (setBearing/getBearing) by augmenting the global L. Imported
+// for side effects only; see leaflet-rotate-init.ts for the ordering rationale.
+import './leaflet-rotate-init';
 
 type Summary = {
   path: string;
@@ -348,6 +351,13 @@ let traceMode: 'wave' | 'spectrum' = 'wave';
 // zoom/pan is renderer-only (no worker fetch). `fullS` caches the trace length
 // for clamping; init=false ⇒ "fit whole trace" (reset on every new trace).
 const traceView = { s0: 0, s1: 0, fullS: 0, init: false };
+// Manual amplitude (X-axis) override for the Trace Inspector waveform. null ⇒
+// auto-normalize per the visible window (the default); when set, the wiggle maps
+// [ampMin,ampMax] (raw sample units) across the plot width instead. Guarded so a
+// blank/invalid box reverts to auto — never feeds NaN to the canvas.
+let traceAmpRange: { min: number; max: number } | null = null;
+// Manual X (time) / Y (amplitude) range control group for the Trace Inspector.
+let traceAxisRange: AxisRangeHandle | null = null;
 let outFormat = 'segy1';
 let lastSection: SectionData | null = null;
 // Section data-zoom view-state: the visible window in FULL-data indices
@@ -356,6 +366,8 @@ let lastSection: SectionData | null = null;
 // caches the record extent for clamping; init=false ⇒ "fit whole record".
 const secView = { t0: 0, t1: 0, s0: 0, s1: 0, fullT: 0, fullS: 0, init: false };
 let secFetchPending = false; // coalesce rapid wheel/drag re-fetches
+// Manual X/Y range control group for the File Viewer (built once in init).
+let secAxisRange: AxisRangeHandle | null = null;
 // File Viewer "click-to-add" mode: when on, a (non-drag) click on the section
 // canvas sends the trace under the cursor to the Trace Workbench (#secToWb toggle).
 let secToWb = false;
@@ -391,6 +403,13 @@ let gridHighlight: { x: number; y: number } | null = null;
 let mapHighlight: L.CircleMarker | null = null;
 let velResult: SemblanceData | null = null;
 let velPicks: VelPick[] = [];
+// Velocity manual X (velocity, m/s) / Y (time, ms) zoom window. null on an axis ⇒
+// that axis auto-derives from the semblance payload (vels array / nT·dt). When set,
+// drawVelocity + onVelClick map only that visible sub-range so picks stay accurate.
+// Guarded (finite, lo<hi) before it is ever written — never feeds NaN to the canvas.
+const velView: { v0: number | null; v1: number | null; t0: number | null; t1: number | null } =
+  { v0: null, v1: null, t0: null, t1: null };
+let velAxisRange: AxisRangeHandle | null = null;
 
 // ── Spectrum-analysis tab state ──
 // Which of the three displays is showing, plus the most-recent payload for each
@@ -409,6 +428,24 @@ let specBusy = false;
 // compute's `finally` re-dispatches refreshSpectrum() to paint the new selection
 // instead of leaving the canvas on the previous image.
 let specRerunPending = false;
+// ── Spectrum manual range + zoom state ──
+// Each of the three spectrum views derives its axes straight from the payload
+// arrays, so a manual window / wheel-zoom needs its OWN range state threaded into
+// the draw fns. Each axis bound is null ⇒ auto (derive from the payload extent);
+// a finite value ⇒ that edge is pinned. The boxes write these directly; the wheel
+// zoom seeds null edges from the current auto extent, then narrows/widens within
+// the data. All four guards (finite, lo<hi) are applied before any write, so the
+// draw fns only ever see auto-or-ordered ranges (never NaN).
+//   Avg:  X = frequency (Hz),    Y = amplitude (linear units OR dB, per specDb)
+//   Gram: X = frequency (Hz),    Y = time (s)
+//   F-K:  X = wavenumber (kx),   Y = frequency (Hz)
+type SpecRange = { x0: number | null; x1: number | null; y0: number | null; y1: number | null };
+const specAvgView: SpecRange = { x0: null, x1: null, y0: null, y1: null };
+const specGramView: SpecRange = { x0: null, x1: null, y0: null, y1: null };
+const specFkView: SpecRange = { x0: null, x1: null, y0: null, y1: null };
+let specAvgAxis: AxisRangeHandle | null = null;
+let specGramAxis: AxisRangeHandle | null = null;
+let specFkAxis: AxisRangeHandle | null = null;
 
 // ── Trace Workbench state ──
 // A collection of traces pulled from arbitrary files (or the open file), drawn
@@ -429,6 +466,13 @@ let wbTraces: WbTrace[] = [];
 let wbNextId = 1;
 let wbMode: 'side' | 'overlay' = 'side';
 const wbView = { s0: 0, s1: 0, fullS: 0, init: false };
+// Workbench manual X (time, ms — shared with the wbView sample window) / Y
+// (amplitude, normalized fraction of the per-trace/shared swing) range boxes.
+// X writes the shared wbView (like the inspector); Y pins the wiggle's amplitude
+// mapping to ±wbAmp instead of the auto ±1 full-swing. null ⇒ auto. Guarded so a
+// blank/invalid box reverts that axis to auto (never feeds NaN to the canvas).
+let wbAmp: { min: number; max: number } | null = null;
+let wbAxisRange: AxisRangeHandle | null = null;
 // Distinct, theme-friendly colours cycled across collected traces.
 const WB_COLORS = ['#34dbd0', '#ffb454', '#7aa2ff', '#ff6e9c', '#9be564', '#c792ea', '#f78c6c', '#56d4ff'];
 
@@ -689,6 +733,15 @@ function applyOpenedFile(s: Summary) {
   specTraceIdx = 0;
   velResult = null;
   velPicks = [];
+  // Reset the Velocity + Spectrum manual-range view-state AND clear their boxes
+  // here, regardless of whether those panels are currently visible. The payloads
+  // above are keyed to the previous file, so without this the axis boxes keep
+  // showing the OLD file's typed values (and velView/spec*View keep its window)
+  // until the user re-computes/refreshes. Mirrors how lastSection/secView reset.
+  velView.v0 = velView.v1 = velView.t0 = velView.t1 = null;
+  velAxisRange?.clear();
+  for (const view of [specAvgView, specGramView, specFkView]) { view.x0 = view.x1 = view.y0 = view.y1 = null; }
+  specAvgAxis?.clear(); specGramAxis?.clear(); specFkAxis?.clear();
   renderInfo();
   showSingleLoaded();      // banner + light up the single-file wizard
   updateNamePreview();
@@ -1254,6 +1307,8 @@ async function refreshTrace() {
   try {
     lastTrace = await api.getTrace(traceIndex);
     traceFit(lastTrace); // reset the time-axis zoom window to the whole trace
+    traceAmpRange = null; // a new trace starts on auto amplitude…
+    traceAxisRange?.clear(); // …and clears any stale manual X/Y boxes
     ($('traceSlider') as HTMLInputElement).max = String(summary.traceCount - 1);
     ($('traceSlider') as HTMLInputElement).value = String(traceIndex);
     renderTrace();
@@ -1440,6 +1495,7 @@ function renderTrace() {
     $('traceLabel').textContent = `Trace ${t.index + 1} / ${summary.traceCount}  ·  spectrum 0–${ny.toFixed(0)} Hz`;
   } else {
     drawTrace(cv, t);
+    syncTraceAxisPlaceholders(); // reflect the live time/amplitude window in the boxes
     $('traceLabel').textContent = `Trace ${t.index + 1} / ${summary.traceCount}  ·  ${t.nSamples} samples`;
   }
   // Header table tracks the active trace regardless of plot mode.
@@ -1479,12 +1535,30 @@ function drawTrace(cv: HTMLCanvasElement, t: TraceData) {
   // Renormalize over the VISIBLE window so zoom shows local detail at full swing.
   const nf = normFactorPercentile(t.samples.subarray(s0, s1), 0.95) || 1;
 
+  // X (amplitude) axis: auto-normalized about the centre axis, OR a manual raw
+  // [ampMin,ampMax] window stretched across the plot width. The manual range is
+  // pre-guarded (finite, min<max) by the control helper, so xOfAmp never returns
+  // NaN; we still clamp to the plot rect so an out-of-range sample can't draw off
+  // the canvas. `amp0x` is the x-pixel of amplitude 0 (the wiggle's baseline).
+  const useAmp = traceAmpRange !== null;
+  const aMin = traceAmpRange ? traceAmpRange.min : 0;
+  const aSpan = traceAmpRange ? (traceAmpRange.max - traceAmpRange.min) : 1;
+  const xOfAmp = (raw: number) => {
+    if (useAmp) {
+      const f = Math.max(0, Math.min(1, (raw - aMin) / aSpan));
+      return ML + f * pw;
+    }
+    const v = Math.max(-1, Math.min(1, raw / nf));
+    return cx + v * (pw / 2 - 2);
+  };
+  const amp0x = Math.max(ML, Math.min(ML + pw, xOfAmp(0)));
+
   ctx.strokeStyle = '#214564';
   ctx.lineWidth = 1;
   ctx.strokeRect(ML, MT, pw, ph);
   ctx.beginPath();
-  ctx.moveTo(cx, MT);
-  ctx.lineTo(cx, MT + ph);
+  ctx.moveTo(amp0x, MT);
+  ctx.lineTo(amp0x, MT + ph);
   ctx.strokeStyle = '#264a68';
   ctx.stroke();
 
@@ -1493,8 +1567,7 @@ function drawTrace(cv: HTMLCanvasElement, t: TraceData) {
   ctx.lineWidth = 1;
   const denom = span > 1 ? span - 1 : 1; // map sample i∈[s0,s1) → y over the plot height
   for (let i = s0; i < s1; i++) {
-    const v = Math.max(-1, Math.min(1, t.samples[i] / nf));
-    const x = cx + v * (pw / 2 - 2);
+    const x = xOfAmp(t.samples[i]);
     const y = MT + ((i - s0) / denom) * ph;
     if (i === s0) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);
@@ -1529,7 +1602,19 @@ type SpectrumLike = { freqs: Float32Array; amp: Float32Array; nyquist: number };
  * (20·log10(amp/peak)); `opts.label` is an optional caption drawn top-right.
  * Marks the peak frequency and the −6 dB (half-amplitude) bandwidth.
  */
-function drawSpectrum(cv: HTMLCanvasElement, sp: SpectrumLike, opts: { dB?: boolean; label?: string } = {}) {
+function drawSpectrum(
+  cv: HTMLCanvasElement,
+  sp: SpectrumLike,
+  opts: {
+    dB?: boolean;
+    label?: string;
+    // Optional manual axis window (Spectrum tab's Average view). Each edge null ⇒
+    // auto (X = 0..nyquist; Y = data peak / FLOOR_DB..0 in dB). Y values are in the
+    // CURRENTLY displayed unit (linear amplitude, or dB) so the boxes match the axis.
+    fMin?: number | null; fMax?: number | null;
+    aMin?: number | null; aMax?: number | null;
+  } = {},
+) {
   const dpr = window.devicePixelRatio || 1;
   const W = cv.clientWidth || 800, H = cv.clientHeight || 460;
   cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
@@ -1555,21 +1640,33 @@ function drawSpectrum(cv: HTMLCanvasElement, sp: SpectrumLike, opts: { dB?: bool
   // Plot value: linear amplitude, or dB relative to the peak (floored at FLOOR_DB).
   const FLOOR_DB = -60;
   const toPlot = (a: number) => (dB ? Math.max(FLOOR_DB, 20 * Math.log10((a > 0 ? a : 1e-12) / amax)) : a);
-  const vmax = dB ? 0 : amax;
-  const vmin = dB ? FLOOR_DB : 0;
-  const Xf = (f: number) => ML + (f / fmax) * pw;
+  // X (frequency) window: auto 0..nyquist, or the manual edges when supplied.
+  // Guarded so an invalid/degenerate pair silently falls back to the auto extent.
+  let fLo = (typeof opts.fMin === 'number' && Number.isFinite(opts.fMin)) ? opts.fMin : 0;
+  let fHi = (typeof opts.fMax === 'number' && Number.isFinite(opts.fMax)) ? opts.fMax : fmax;
+  if (!(fHi > fLo)) { fLo = 0; fHi = fmax; }
+  const fSpan = fHi - fLo || 1;
+  // Y (amplitude) window: auto FLOOR_DB..0 (dB) or 0..peak (linear), or manual
+  // edges (already in the displayed unit). Same finite + lo<hi guard.
+  let vmin = dB ? FLOOR_DB : 0;
+  let vmax = dB ? 0 : amax;
+  const haveA = typeof opts.aMin === 'number' && Number.isFinite(opts.aMin) &&
+    typeof opts.aMax === 'number' && Number.isFinite(opts.aMax) && (opts.aMax as number) > (opts.aMin as number);
+  if (haveA) { vmin = opts.aMin as number; vmax = opts.aMax as number; }
+  const Xf = (f: number) => ML + ((f - fLo) / fSpan) * pw;
   const Yf = (a: number) => { const y = MT + ph - ((toPlot(a) - vmin) / (vmax - vmin)) * ph; return y < MT ? MT : y > MT + ph ? MT + ph : y; };
 
-  // frequency gridlines + labels
+  // frequency gridlines + labels (over the visible [fLo,fHi] window)
   ctx.font = '10px Consolas, monospace'; ctx.lineWidth = 1;
-  const fStep = niceStep(fmax, 8);
-  for (let f = 0; f <= fmax + 1e-6; f += fStep) {
-    const x = Xf(f); if (x > W - MR + 1) break;
+  const fStep = niceStep(fSpan, 8);
+  const fStart = Math.ceil(fLo / fStep) * fStep;
+  for (let f = fStart; f <= fHi + 1e-6; f += fStep) {
+    const x = Xf(f); if (x < ML - 0.5 || x > ML + pw + 0.5) continue;
     ctx.strokeStyle = 'rgba(33,69,100,0.45)';
     ctx.beginPath(); ctx.moveTo(x, MT); ctx.lineTo(x, MT + ph); ctx.stroke();
     ctx.fillStyle = '#5e7186'; ctx.fillText(f.toFixed(0), x + 2, H - 8);
   }
-  // amplitude gridlines + labels (dB or linear)
+  // amplitude gridlines + labels (dB or linear), over the visible [vmin,vmax]
   for (let g = 0; g <= 4; g++) {
     const y = MT + (ph * g) / 4;
     ctx.strokeStyle = 'rgba(33,69,100,0.45)';
@@ -1577,6 +1674,11 @@ function drawSpectrum(cv: HTMLCanvasElement, sp: SpectrumLike, opts: { dB?: bool
     const v = vmax - ((vmax - vmin) * g) / 4;
     ctx.fillStyle = '#5e7186'; ctx.fillText(dB ? v.toFixed(0) : v.toPrecision(2), 4, y + 3);
   }
+
+  // Clip the curve + markers to the plot rect so a windowed X/Y never paints
+  // outside the axes (the gridlines/labels above are already bounded).
+  ctx.save();
+  ctx.beginPath(); ctx.rect(ML, MT, pw, ph); ctx.clip();
 
   // filled spectrum curve
   ctx.beginPath();
@@ -1601,23 +1703,24 @@ function drawSpectrum(cv: HTMLCanvasElement, sp: SpectrumLike, opts: { dB?: bool
   let lo = pk, hi = pk;
   while (lo > 0 && sp.amp[lo] >= halfA) lo--;
   while (hi < sp.amp.length - 1 && sp.amp[hi] >= halfA) hi++;
-  const fLo = sp.freqs[lo], fHi = sp.freqs[hi];
-  if (fHi > fLo) {
+  const bandLo = sp.freqs[lo], bandHi = sp.freqs[hi];
+  if (bandHi > bandLo) {
     ctx.fillStyle = 'rgba(255,180,84,0.10)';
-    ctx.fillRect(Xf(fLo), MT, Xf(fHi) - Xf(fLo), ph);
+    ctx.fillRect(Xf(bandLo), MT, Xf(bandHi) - Xf(bandLo), ph);
     ctx.strokeStyle = 'rgba(255,180,84,0.7)'; ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
-    for (const f of [fLo, fHi]) { ctx.beginPath(); ctx.moveTo(Xf(f), MT); ctx.lineTo(Xf(f), MT + ph); ctx.stroke(); }
+    for (const f of [bandLo, bandHi]) { ctx.beginPath(); ctx.moveTo(Xf(f), MT); ctx.lineTo(Xf(f), MT + ph); ctx.stroke(); }
     ctx.setLineDash([]);
   }
 
   // peak marker
   const pkx = Xf(sp.freqs[pk]), pky = Yf(sp.amp[pk]);
   ctx.fillStyle = '#1fc8c0'; ctx.beginPath(); ctx.arc(pkx, pky, 3, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
   ctx.fillStyle = '#c8d2e0'; ctx.font = '11px "Segoe UI", sans-serif';
   ctx.fillText(`peak ${sp.freqs[pk].toFixed(1)} Hz`, Math.min(pkx + 6, W - 92), Math.max(pky - 6, MT + 12));
-  if (fHi > fLo) {
+  if (bandHi > bandLo) {
     ctx.fillStyle = '#ffb454';
-    ctx.fillText(`−6 dB band ${fLo.toFixed(1)}–${fHi.toFixed(1)} Hz`, ML + 4, MT + ph - 6);
+    ctx.fillText(`−6 dB band ${bandLo.toFixed(1)}–${bandHi.toFixed(1)} Hz`, ML + 4, MT + ph - 6);
   }
 
   // axis title + caption
@@ -1628,6 +1731,130 @@ function drawSpectrum(cv: HTMLCanvasElement, sp: SpectrumLike, opts: { dB?: bool
     ctx.fillStyle = '#9fb0c4'; ctx.font = '11px "Segoe UI", sans-serif'; ctx.textAlign = 'right';
     ctx.fillText(opts.label, W - MR, MT - 6); ctx.textAlign = 'left';
   }
+}
+
+// ── Manual axis-range controls (reusable across viewers) ──
+// A compact toolbar group of four numeric inputs (X-min / X-max / Y-min / Y-max)
+// plus an "Auto" button that clears them and reverts to the viewer's auto-fit.
+// The controls COMPLEMENT the existing wheel/drag zoom: typing an exact window
+// and zooming both write the same view-state, so they stay consistent. Each axis
+// is independent — leaving an axis blank (or typing an invalid pair) keeps THAT
+// axis on auto while the other can still be overridden.
+//
+// The helper is purely about the UI: it parses + guards the inputs and hands the
+// caller a clean {xMin,xMax,yMin,yMax} (each number-or-null) on every change, then
+// the caller maps those displayed units into its own view-state and redraws. It
+// owns no view-state itself, so it works for both the index-windowed viewers
+// (Section/Trace) and any future payload-derived viewer.
+
+/** One parsed axis override: a finite [min,max) with min<max, or null for auto. */
+type AxisRange = { min: number; max: number } | null;
+/** The four-axis override set handed to a viewer on every change. */
+type AxisRangeValue = { xMin: number | null; xMax: number | null; yMin: number | null; yMax: number | null };
+
+interface AxisRangeOptions {
+  /** Axis captions shown before each pair, e.g. 'Trace #', 'Time (ms)', 'Amp'. */
+  xLabel: string;
+  yLabel: string;
+  /** Called whenever a value is committed (Enter / blur) or "Auto" is pressed. */
+  onChange: (v: AxisRangeValue) => void;
+  /** Per-input `step` attribute (default 'any'); use '1' for integer axes. */
+  xStep?: string;
+  yStep?: string;
+}
+
+/** A live handle returned by axisRangeControls(): read the current overrides or
+ *  push fresh auto-fit bounds into the (empty) boxes as placeholders. */
+interface AxisRangeHandle {
+  /** Current parsed overrides (each axis null when blank / invalid). */
+  value(): AxisRangeValue;
+  /** Show the live auto-fit extent as input placeholders (only when blank), so
+   *  the user sees the current range without it counting as an override. */
+  setPlaceholders(xMin: number, xMax: number, yMin: number, yMax: number): void;
+  /** Clear all four boxes and revert to auto (does NOT fire onChange). */
+  clear(): void;
+}
+
+/** Parse one min/max input pair into an AxisRange, applying the guard rules:
+ *  empty, NaN, or min>=max ⇒ null (that axis stays auto; never feeds NaN to a draw). */
+function parseAxisPair(lo: HTMLInputElement, hi: HTMLInputElement): AxisRange {
+  const a = lo.value.trim(), b = hi.value.trim();
+  if (a === '' || b === '') return null;
+  const min = Number(a), max = Number(b);
+  if (!Number.isFinite(min) || !Number.isFinite(max) || min >= max) return null;
+  return { min, max };
+}
+
+/** Build the reusable X/Y manual-range control group inside `host` and return a
+ *  handle. All numeric guarding lives here so callers only ever see finite,
+ *  ordered ranges (or null = auto). */
+function axisRangeControls(host: HTMLElement, opts: AxisRangeOptions): AxisRangeHandle {
+  host.classList.add('axrange');
+  const mk = (ph: string, step: string) => {
+    const el = document.createElement('input');
+    el.type = 'number';
+    el.className = 'axin';
+    el.placeholder = ph;
+    el.step = step;
+    el.setAttribute('aria-label', ph);
+    return el;
+  };
+  const xStep = opts.xStep ?? 'any', yStep = opts.yStep ?? 'any';
+  const xLab = document.createElement('span'); xLab.className = 'axlbl'; xLab.textContent = opts.xLabel;
+  const xLo = mk('min', xStep), xHi = mk('max', xStep);
+  const yLab = document.createElement('span'); yLab.className = 'axlbl'; yLab.textContent = opts.yLabel;
+  const yLo = mk('min', yStep), yHi = mk('max', yStep);
+  const sep1 = document.createElement('span'); sep1.className = 'axsep'; sep1.textContent = '–';
+  const sep2 = document.createElement('span'); sep2.className = 'axsep'; sep2.textContent = '–';
+  const auto = document.createElement('button');
+  auto.type = 'button'; auto.className = 'axauto'; auto.textContent = 'Auto';
+  auto.title = 'Clear the manual ranges and revert to auto-fit';
+  host.append(xLab, xLo, sep1, xHi, yLab, yLo, sep2, yHi, auto);
+
+  const read = (): AxisRangeValue => {
+    const x = parseAxisPair(xLo, xHi), y = parseAxisPair(yLo, yHi);
+    return {
+      xMin: x ? x.min : null, xMax: x ? x.max : null,
+      yMin: y ? y.min : null, yMax: y ? y.max : null,
+    };
+  };
+  // A pair needs BOTH edges to take effect (parseAxisPair returns null otherwise),
+  // so a lone value is silently discarded. Flag such an incomplete pair on both
+  // its boxes so the user gets feedback that their typed value was not applied,
+  // instead of the axis quietly staying auto. Pure visual; no draw/NaN impact.
+  const flagIncomplete = () => {
+    const mark = (lo: HTMLInputElement, hi: HTMLInputElement) => {
+      const a = lo.value.trim() !== '', b = hi.value.trim() !== '';
+      const incomplete = a !== b; // exactly one edge filled
+      lo.classList.toggle('axin-incomplete', incomplete);
+      hi.classList.toggle('axin-incomplete', incomplete);
+    };
+    mark(xLo, xHi); mark(yLo, yHi);
+  };
+  const fire = () => { flagIncomplete(); opts.onChange(read()); };
+  for (const el of [xLo, xHi, yLo, yHi]) {
+    el.addEventListener('change', fire);
+    el.addEventListener('input', flagIncomplete); // live feedback while typing
+    el.addEventListener('keydown', (e) => { if ((e as KeyboardEvent).key === 'Enter') { e.preventDefault(); fire(); } });
+  }
+  const clearBoxes = () => {
+    xLo.value = xHi.value = yLo.value = yHi.value = '';
+    for (const el of [xLo, xHi, yLo, yHi]) el.classList.remove('axin-incomplete');
+  };
+  auto.addEventListener('click', () => { clearBoxes(); fire(); });
+
+  return {
+    value: read,
+    setPlaceholders(xMin, xMax, yMin, yMax) {
+      // Only as placeholders, and only while the box is blank, so showing the
+      // current extent never silently becomes an override.
+      const put = (el: HTMLInputElement, v: number) => {
+        if (el.value.trim() === '') el.placeholder = Number.isFinite(v) ? String(Math.round(v * 100) / 100) : el.placeholder;
+      };
+      put(xLo, xMin); put(xHi, xMax); put(yLo, yMin); put(yHi, yMax);
+    },
+    clear: clearBoxes,
+  };
 }
 
 // ── File Viewer (section) ──
@@ -1692,6 +1919,7 @@ async function fetchSectionWindow() {
       secView.s0 = sec.sampStart; secView.s1 = sec.sampEnd;
       secView.fullT = sec.fullTraces; secView.fullS = sec.fullSamples;
       drawSection($('secCanvas') as HTMLCanvasElement, sec);
+      syncSecAxisPlaceholders(); // reflect the actual window in the manual-range boxes
       const zoomed = sec.traceStart > 0 || sec.traceEnd < sec.fullTraces || sec.sampStart > 0 || sec.sampEnd < sec.fullSamples;
       $('secLabel').textContent =
         `${sec.numTraces} traces (step ${sec.traceStep}) · ${sec.colLen} samples` +
@@ -1710,6 +1938,7 @@ async function refreshSection() {
   if (!summary || summary.traceCount === 0) return;
   $('secLabel').textContent = 'Rendering…';
   secFit(); // open / AGC toggle / re-open ⇒ start fitted to the whole record
+  secAxisRange?.clear(); // new file / re-fit ⇒ clear any stale manual X/Y boxes
   await fetchSectionWindow();
 }
 
@@ -1877,6 +2106,44 @@ async function secAddTraceFromClick(cv: HTMLCanvasElement, e: MouseEvent) {
 }
 
 /** Attach wheel-zoom / drag-pan / double-click-fit / click-to-add to the section canvas (once). */
+/** Apply the File Viewer's manual X (trace index) / Y (time, ms) overrides onto
+ *  secView, then re-fetch the window. Any axis left auto keeps its current bounds
+ *  (so X-only or Y-only overrides are honoured). Each axis is guarded by the
+ *  control helper (finite, min<max), and we additionally derive sample indices
+ *  from the ms boxes via the file's sample interval — never feeding NaN to the
+ *  view-state or the canvas. */
+function applySecAxisRange() {
+  if (!summary || summary.traceCount === 0 || !secAxisRange) return;
+  if (!secView.init) secFit();
+  const v = secAxisRange.value();
+  // X axis = trace index (direct).
+  if (v.xMin !== null && v.xMax !== null) {
+    secView.t0 = v.xMin;
+    secView.t1 = v.xMax;
+  }
+  // Y axis = time in ms → sample index: sample = ms * 1000 / sampleInt_µs.
+  const siUs = summary.sampleInt || lastSection?.sampleInt || 0;
+  if (v.yMin !== null && v.yMax !== null && siUs > 0) {
+    const s0 = (v.yMin * 1000) / siUs;
+    const s1 = (v.yMax * 1000) / siUs;
+    if (Number.isFinite(s0) && Number.isFinite(s1) && s1 > s0) {
+      secView.s0 = s0;
+      secView.s1 = s1;
+    }
+  }
+  void fetchSectionWindow(); // secClamp() inside re-orders/limits to the record
+}
+
+/** Show the current visible window as placeholders in the manual-range boxes so
+ *  the user always sees the live extent (blank boxes still mean "auto"). */
+function syncSecAxisPlaceholders() {
+  if (!secAxisRange || !lastSection) return;
+  const siUs = summary?.sampleInt ?? lastSection.sampleInt ?? 0;
+  const y0 = (lastSection.sampStart * siUs) / 1000;
+  const y1 = (lastSection.sampEnd * siUs) / 1000;
+  secAxisRange.setPlaceholders(lastSection.traceStart, lastSection.traceEnd, y0, y1);
+}
+
 function sectionInteractions() {
   const cv = $('secCanvas') as HTMLCanvasElement;
   let dragging = false, lx = 0, ly = 0;
@@ -1920,12 +2187,21 @@ function sectionInteractions() {
   });
   cv.addEventListener('dblclick', () => {
     if ($('panel-section').style.display === 'none' || !summary) return;
-    secFit(); void fetchSectionWindow();
+    secAxisRange?.clear(); secFit(); void fetchSectionWindow();
   });
   // Toolbar buttons (added in index.html alongside the section controls).
   $opt('secZoomIn')?.addEventListener('click', () => secZoomButton(1 / 1.4));
   $opt('secZoomOut')?.addEventListener('click', () => secZoomButton(1.4));
-  $opt('secZoomFit')?.addEventListener('click', () => { secFit(); void fetchSectionWindow(); });
+  $opt('secZoomFit')?.addEventListener('click', () => { secAxisRange?.clear(); secFit(); void fetchSectionWindow(); });
+  // Manual X (trace index) / Y (time, ms) range boxes — complement wheel/drag zoom.
+  const axHost = $opt('secAxisRange');
+  if (axHost) {
+    secAxisRange = axisRangeControls(axHost, {
+      xLabel: 'Trace #', yLabel: 'Time ms',
+      xStep: '1', yStep: 'any',
+      onChange: () => applySecAxisRange(),
+    });
+  }
   // "+ Workbench" toggle: arm/disarm click-to-add on the section canvas.
   const wbToggle = $opt('secToWb') as HTMLButtonElement | null;
   wbToggle?.addEventListener('click', () => {
@@ -2005,6 +2281,47 @@ function traceZoomButton(factor: number) {
   renderTrace();
 }
 
+/** Apply the Trace Inspector's manual X (time, ms) / Y (amplitude) overrides.
+ *  X writes the sample window the existing zoom uses (ms→sample via sampleInt);
+ *  Y sets the raw-amplitude window the wiggle stretches across. Each axis left
+ *  blank stays auto. Every value is pre-guarded (finite, min<max) by the control
+ *  helper, and we re-validate the derived sample window before writing it. */
+function applyTraceAxisRange() {
+  if (!lastTrace || !traceAxisRange) return;
+  const t = lastTrace;
+  if (!traceView.init || traceView.fullS !== t.nSamples) traceFit(t);
+  const v = traceAxisRange.value();
+  // X axis = time in ms → sample index: sample = ms * 1000 / sampleInt_µs.
+  if (v.xMin !== null && v.xMax !== null && t.sampleInt > 0) {
+    const s0 = (v.xMin * 1000) / t.sampleInt;
+    const s1 = (v.xMax * 1000) / t.sampleInt;
+    if (Number.isFinite(s0) && Number.isFinite(s1) && s1 > s0) {
+      traceView.s0 = s0;
+      traceView.s1 = s1;
+      traceClamp();
+    }
+  } else {
+    // X reverted to auto ⇒ fit the whole trace's time axis.
+    traceFit(t);
+  }
+  // Y axis = amplitude (raw sample units); null ⇒ auto-normalized.
+  traceAmpRange = (v.yMin !== null && v.yMax !== null) ? { min: v.yMin, max: v.yMax } : null;
+  renderTrace();
+}
+
+/** Reflect the current visible time window + the auto amplitude swing as
+ *  placeholders in the trace's manual-range boxes (blank still means auto). */
+function syncTraceAxisPlaceholders() {
+  if (!traceAxisRange || !lastTrace) return;
+  const t = lastTrace;
+  const msPerSample = t.sampleInt / 1000;
+  const s0 = traceView.init ? traceView.s0 : 0;
+  const s1 = traceView.init ? traceView.s1 : t.nSamples;
+  // Auto amplitude swing is the ±95th-percentile normalization factor.
+  const nf = normFactorPercentile(t.samples.subarray(s0, Math.max(s0 + 1, s1)), 0.95) || 1;
+  traceAxisRange.setPlaceholders(s0 * msPerSample, s1 * msPerSample, -nf, nf);
+}
+
 /** Attach wheel-zoom / drag-pan / double-click-fit to the trace canvas (once).
  *  Guarded on the trace panel being visible and a waveform being shown. */
 function traceInteractions() {
@@ -2038,14 +2355,22 @@ function traceInteractions() {
   });
   cv.addEventListener('dblclick', () => {
     if (!active()) return;
-    traceFit(lastTrace!); renderTrace();
+    traceAxisRange?.clear(); traceAmpRange = null; traceFit(lastTrace!); renderTrace();
   });
   // Toolbar buttons (added in index.html alongside the Waveform/Spectrum toggle).
   $opt('traceZoomIn')?.addEventListener('click', () => traceZoomButton(1 / 1.4));
   $opt('traceZoomOut')?.addEventListener('click', () => traceZoomButton(1.4));
   $opt('traceZoomFit')?.addEventListener('click', () => {
-    if (lastTrace) { traceFit(lastTrace); renderTrace(); }
+    if (lastTrace) { traceAxisRange?.clear(); traceAmpRange = null; traceFit(lastTrace); renderTrace(); }
   });
+  // Manual X (time, ms) / Y (amplitude) range boxes — complement wheel/drag zoom.
+  const axHost = $opt('traceAxisRange');
+  if (axHost) {
+    traceAxisRange = axisRangeControls(axHost, {
+      xLabel: 'Time ms', yLabel: 'Amp',
+      onChange: () => applyTraceAxisRange(),
+    });
+  }
 }
 
 // ── Trace Workbench ──
@@ -2161,6 +2486,8 @@ function wbRemove(id: number) {
 function wbClear() {
   wbTraces = [];
   wbView.init = false;
+  wbAmp = null;
+  wbAxisRange?.clear();
   wbSelA = -1;
   wbSelB = -1;
   renderWorkbenchList();
@@ -2212,18 +2539,27 @@ function renderWorkbenchList() {
 /** Draw one trace's wiggle in a vertical band centred at `cx`, half-width `hw`,
  *  over the shared time window [s0,s1) — reuses drawTrace's centre-axis mapping.
  *  `nf` is the normalization factor (per-trace in side mode, shared in overlay). */
-function wbDrawWiggle(ctx: CanvasRenderingContext2D, t: WbTrace, cx: number, hw: number, MT: number, ph: number, s0: number, s1: number, nf: number, color: string) {
+function wbDrawWiggle(ctx: CanvasRenderingContext2D, t: WbTrace, cx: number, hw: number, MT: number, ph: number, s0: number, s1: number, nf: number, color: string, amp: { min: number; max: number } | null = null) {
   const span = s1 - s0;
   if (span < 1) return;
   const denom = span > 1 ? span - 1 : 1;
   const lo = Math.max(0, s0), hi = Math.min(t.nSamples, s1);
+  // Amplitude → x. Default: auto, centred at cx with ±(hw-2) full-swing. Manual:
+  // map the raw [min,max] window across the column band [cx-hw, cx+hw] (left=min),
+  // clamped so an out-of-window sample can't draw outside the column. The manual
+  // pair is pre-guarded finite + min<max, so aSpan>0 — never a NaN x.
+  const useAmp = amp !== null;
+  const aMin = amp ? amp.min : 0;
+  const aSpan = amp ? (amp.max - amp.min) : 1;
+  const xOf = (raw: number) =>
+    useAmp ? (cx - hw) + Math.max(0, Math.min(1, (raw - aMin) / aSpan)) * (2 * hw)
+           : cx + Math.max(-1, Math.min(1, raw / nf)) * (hw - 2);
   ctx.beginPath();
   ctx.strokeStyle = color;
   ctx.lineWidth = 1;
   let started = false;
   for (let i = lo; i < hi; i++) {
-    const v = Math.max(-1, Math.min(1, t.samples[i] / nf));
-    const x = cx + v * (hw - 2);
+    const x = xOf(t.samples[i]);
     const y = MT + ((i - s0) / denom) * ph;
     if (!started) { ctx.moveTo(x, y); started = true; }
     else ctx.lineTo(x, y);
@@ -2304,7 +2640,7 @@ function drawWorkbench() {
       ctx.beginPath(); ctx.moveTo(cx, MT); ctx.lineTo(cx, MT + ph); ctx.stroke();
       const lo = Math.max(0, s0), hi = Math.min(t.nSamples, s1);
       const nf = (hi > lo ? normFactorPercentile(t.samples.subarray(lo, hi), 0.95) : 0) || 1;
-      wbDrawWiggle(ctx, t, cx, hw, MT, ph, s0, s1, nf, t.color);
+      wbDrawWiggle(ctx, t, cx, hw, MT, ph, s0, s1, nf, t.color, wbAmp);
       // per-column label
       ctx.fillStyle = t.color;
       ctx.font = '10px Consolas, monospace';
@@ -2328,7 +2664,7 @@ function drawWorkbench() {
       if (f > nf) nf = f;
     }
     if (nf <= 0) nf = 1;
-    for (const t of wbTraces) wbDrawWiggle(ctx, t, cx, pw / 2, MT, ph, s0, s1, nf, t.color);
+    for (const t of wbTraces) wbDrawWiggle(ctx, t, cx, pw / 2, MT, ph, s0, s1, nf, t.color, wbAmp);
   }
 
   // Legend (source · trace #) top-right, one row per colour.
@@ -2348,6 +2684,50 @@ function drawWorkbench() {
   // status label
   const lab = $opt('wbLabel');
   if (lab) lab.textContent = `${wbTraces.length} trace${wbTraces.length === 1 ? '' : 's'} · ${wbMode === 'side' ? 'side-by-side' : 'overlay'} · ${s0}–${s1} samples`;
+  syncWbAxisPlaceholders();
+}
+
+/** Reflect the workbench's visible time window + the manual/auto amplitude swing
+ *  as placeholders in its X/Y range boxes (blank still means auto). */
+function syncWbAxisPlaceholders() {
+  if (!wbAxisRange || !wbTraces.length) return;
+  const si = wbTraces[0].sampleInt || 0;
+  const msPerSample = si / 1000;
+  const s0 = wbView.init ? wbView.s0 : 0;
+  const s1 = wbView.init ? wbView.s1 : wbMaxSamples();
+  // Auto amplitude swing: max ±95th-percentile over the visible window across traces.
+  let nf = 0;
+  for (const t of wbTraces) {
+    const lo = Math.max(0, s0), hi = Math.min(t.nSamples, s1);
+    if (hi <= lo) continue;
+    const f = normFactorPercentile(t.samples.subarray(lo, hi), 0.95);
+    if (f > nf) nf = f;
+  }
+  if (!(nf > 0)) nf = 1;
+  wbAxisRange.setPlaceholders(s0 * msPerSample, s1 * msPerSample, wbAmp ? wbAmp.min : -nf, wbAmp ? wbAmp.max : nf);
+}
+
+/** Apply the workbench manual X (time, ms) / Y (amplitude) boxes. X writes the
+ *  shared wbView sample window (like the inspector); Y pins the wiggle amplitude
+ *  to ±wbAmp. Each axis: a valid pair pins it; blank/invalid reverts to auto. */
+function applyWbAxisRange() {
+  if (!wbAxisRange || !wbTraces.length) return;
+  if (!wbView.init || wbView.fullS !== wbMaxSamples()) wbFit();
+  const si = wbTraces[0].sampleInt || 0;
+  const v = wbAxisRange.value();
+  // X = time (ms) → sample index: sample = ms * 1000 / sampleInt_µs.
+  if (v.xMin !== null && v.xMax !== null && si > 0) {
+    const s0 = (v.xMin * 1000) / si;
+    const s1 = (v.xMax * 1000) / si;
+    if (Number.isFinite(s0) && Number.isFinite(s1) && s1 > s0) {
+      wbView.s0 = s0; wbView.s1 = s1; wbClamp();
+    }
+  } else {
+    wbFit(); // X reverted to auto ⇒ fit the whole time extent
+  }
+  // Y = amplitude (raw units); null ⇒ auto per-trace/shared normalization.
+  wbAmp = (v.yMin !== null && v.yMax !== null) ? { min: v.yMin, max: v.yMax } : null;
+  drawWorkbench();
 }
 
 // ── Trace Workbench · ANALYSIS (cross-correlation + difference + stats) ──
@@ -2641,7 +3021,7 @@ function workbenchInteractions() {
   });
   cv.addEventListener('dblclick', () => {
     if (!active()) return;
-    wbFit(); drawWorkbench();
+    wbAxisRange?.clear(); wbAmp = null; wbFit(); drawWorkbench();
   });
   $opt('wbPickBtn')?.addEventListener('click', () => void wbPickAndAdd());
   $opt('wbAddOpenBtn')?.addEventListener('click', wbAddOpenTrace);
@@ -2650,7 +3030,15 @@ function workbenchInteractions() {
   $opt('wbModeOverlay')?.addEventListener('click', () => wbSetMode('overlay'));
   $opt('wbZoomIn')?.addEventListener('click', () => wbZoomButton(1 / 1.4));
   $opt('wbZoomOut')?.addEventListener('click', () => wbZoomButton(1.4));
-  $opt('wbZoomFit')?.addEventListener('click', () => { wbFit(); drawWorkbench(); });
+  $opt('wbZoomFit')?.addEventListener('click', () => { wbAxisRange?.clear(); wbAmp = null; wbFit(); drawWorkbench(); });
+  // Manual X (time, ms) / Y (amplitude) range boxes — complement the shared zoom.
+  const axHost = $opt('wbAxisRange');
+  if (axHost) {
+    wbAxisRange = axisRangeControls(axHost, {
+      xLabel: 'Time ms', yLabel: 'Amp',
+      onChange: () => applyWbAxisRange(),
+    });
+  }
   // ANALYSIS A/B pickers → recompute on change.
   $opt('wbSelA')?.addEventListener('change', (e) => {
     wbSelA = parseInt((e.target as HTMLSelectElement).value, 10);
@@ -2902,6 +3290,7 @@ async function refreshSps() {
     $('viewMap').classList.remove('on');
     ($('spsCanvas') as HTMLElement).style.display = 'block';
     $('spsMap').style.display = 'none';
+    setRotateCtlEnabled(false); // back on the grid → rotation N/A
     $('spsLabel').textContent = 'Real map needs a projected CRS in the SPS header — showing Survey grid.';
   }
   const wantGeo = spsView === 'map';
@@ -3161,6 +3550,7 @@ function setView(v: 'grid' | 'map') {
   $('viewMap').classList.toggle('on', v === 'map');
   ($('spsCanvas') as HTMLElement).style.display = v === 'grid' ? 'block' : 'none';
   $('spsMap').style.display = v === 'map' ? 'block' : 'none';
+  setRotateCtlEnabled(v === 'map'); // rotation only applies to the real map
   if (spsSummary) void refreshSps();
 }
 
@@ -3512,9 +3902,63 @@ function ensureMap() {
   const dark = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png', { maxZoom: 24, maxNativeZoom: 20, attribution: '© OpenStreetMap, © CARTO' });
   const sat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 24, maxNativeZoom: 21, attribution: 'Esri World Imagery' });
   const streets = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 24, maxNativeZoom: 19, attribution: '© OpenStreetMap' });
-  leafletMap = L.map('spsMap', { layers: [dark], preferCanvas: true, maxZoom: 24, zoomSnap: 0.5 });
+  // rotate:true enables the leaflet-rotate panes/bearing API; we drive bearing
+  // from our own toolbar slider, so suppress the plugin's built-in control.
+  leafletMap = L.map('spsMap', { layers: [dark], preferCanvas: true, maxZoom: 24, zoomSnap: 0.5, rotate: true, rotateControl: false });
   L.control.layers({ Dark: dark, Satellite: sat, Streets: streets }).addTo(leafletMap);
   leafletMap.setView([32, 35], 6);
+  // Re-apply any bearing already chosen in the toolbar before the map existed.
+  applyMapBearing();
+}
+
+// Current map bearing in degrees (clockwise). Mirrors the toolbar slider; kept
+// in renderer state so it survives map teardown/rebuild and view switches.
+let spsBearing = 0;
+
+/** Clamp/normalise a bearing input to [0,360); NaN/empty ⇒ 0 (North). */
+function normBearing(v: number): number {
+  if (!isFinite(v)) return 0;
+  let d = v % 360;
+  if (d < 0) d += 360;
+  return d;
+}
+
+/** Push the current spsBearing into the live map (no-op if the map isn't up). */
+function applyMapBearing() {
+  if (!leafletMap) return;
+  // setBearing exists once leaflet-rotate has augmented L.Map; guard defensively.
+  if (typeof leafletMap.setBearing === 'function') leafletMap.setBearing(spsBearing);
+}
+
+/** Enable/disable + dim the rotation control. Rotation only makes sense in the
+ *  real-map view, so it's disabled on the survey grid. */
+function setRotateCtlEnabled(on: boolean) {
+  const grp = $opt('spsRotateCtl');
+  if (grp) grp.style.opacity = on ? '1' : '0.45';
+  for (const id of ['spsRotate', 'spsRotateNum', 'spsRotateReset']) {
+    const el = $opt(id) as (HTMLInputElement | HTMLButtonElement) | null;
+    if (el) el.disabled = !on;
+  }
+}
+
+/** Sync the rotation slider + numeric readout to spsBearing (called on changes
+ *  and at init). Optional elems so init can't throw if markup is absent. */
+function syncBearingUI() {
+  const sl = $opt('spsRotate') as HTMLInputElement | null;
+  const num = $opt('spsRotateNum') as HTMLInputElement | null;
+  const lbl = $opt('spsRotateVal');
+  const rounded = Math.round(spsBearing);
+  if (sl && document.activeElement !== sl) sl.value = String(rounded);
+  if (num && document.activeElement !== num) num.value = String(rounded);
+  if (lbl) lbl.textContent = `${rounded}°`;
+}
+
+/** Set the map bearing from a user input, guarding NaN/out-of-range, then sync
+ *  the live map + toolbar UI. The single entry point for all rotation changes. */
+function setMapBearing(v: number) {
+  spsBearing = normBearing(v);
+  applyMapBearing();
+  syncBearingUI();
 }
 
 function updateMap() {
@@ -4097,7 +4541,7 @@ async function computeVelocity() {
   try {
     velResult = await api.semblance({ velMin: numVal('velMin') || 1000, velMax: numVal('velMax') || 5000, velStep: numVal('velStep') || 50 });
     $('velLabel').textContent = `${velResult.vels.length} velocities · ${velResult.offNote}`;
-    drawVelocity();
+    velFit(); // new scan ⇒ auto-fit (clears any stale manual window) + draw
     updateHeaderClear();   // semblance result now present → enable header Clear
   } catch (e) {
     $('velLabel').textContent = 'Failed: ' + errMsg(e);
@@ -4136,30 +4580,139 @@ function drawVelocity() {
     }
   }
   octx.putImageData(img, 0, 0);
-  ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(off, ML, MT, pw, ph);
 
-  const velMin = vels[0];
-  const velMax = vels[nV - 1];
-  // Span guarded ≥1 so a single-velocity scan (velMin === velMax → length-1 vels)
-  // doesn't divide by zero → NaN x (markers vanish / picks can't be hit-tested).
-  const velSpan = Math.max(1, velMax - velMin);
-  const totalMs = nT * dt * 1000;
+  const m = velMapping();
+  if (!m) return;
+  const { vLo, vHi, tLo, tHi, dataVLo, dataVHi, dataTHi } = m;
+  // Crop the offscreen image (nV wide = velocity, nT tall = time) to the visible
+  // [vLo,vHi]×[tLo,tHi] window, stretching it to fill the plot. Source fractions:
+  // X across vels dataVLo..dataVHi; Y down time 0..dataTHi.
+  const vDataSpan = Math.max(1, dataVHi - dataVLo);
+  const tDataSpan = dataTHi || 1;
+  const sx0 = (vLo - dataVLo) / vDataSpan, sx1 = (vHi - dataVLo) / vDataSpan;
+  const sy0 = tLo / tDataSpan, sy1 = tHi / tDataSpan;
+  const cl = (v: number) => Math.max(0, Math.min(1, Number.isFinite(v) ? v : 0));
+  let sx = cl(sx0) * nV, sw = (cl(sx1) - cl(sx0)) * nV;
+  let sy = cl(sy0) * nT, sh = (cl(sy1) - cl(sy0)) * nT;
+  if (!(sw >= 1)) { sw = 1; sx = Math.min(sx, nV - 1); }
+  if (!(sh >= 1)) { sh = 1; sy = Math.min(sy, nT - 1); }
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(off, sx, sy, sw, sh, ML, MT, pw, ph);
+
+  // Pick markers — map (v,tMs) through the SAME visible window as the click test.
+  const vSpan = Math.max(1, vHi - vLo);
+  const tSpan = Math.max(1, tHi - tLo);
+  ctx.save();
+  ctx.beginPath(); ctx.rect(ML, MT, pw, ph); ctx.clip();
   ctx.strokeStyle = '#ff5d6c';
   ctx.lineWidth = 1.5;
   for (const p of velPicks) {
-    const x = ML + ((p.v - velMin) / velSpan) * pw;
-    const y = MT + (p.tMs / totalMs) * ph;
+    const x = ML + ((p.v - vLo) / vSpan) * pw;
+    const y = MT + ((p.tMs - tLo) / tSpan) * ph;
     ctx.beginPath();
     ctx.arc(x, y, 4, 0, Math.PI * 2);
     ctx.stroke();
   }
+  ctx.restore();
   ctx.fillStyle = '#7e93ac';
   ctx.font = '10px Consolas, monospace';
-  ctx.fillText(`${velMin}–${velMax} m/s  (click to pick)`, ML, H - 8);
+  ctx.fillText(`${Math.round(vLo)}–${Math.round(vHi)} m/s  (click to pick)`, ML, H - 8);
   for (let k = 0; k <= 4; k++) {
     const y = MT + (ph * k) / 4;
-    ctx.fillText(((totalMs * k) / 4).toFixed(0) + ' ms', 4, y + 3);
+    const tAt = tLo + (tSpan * k) / 4;
+    ctx.fillText(tAt.toFixed(0) + ' ms', 4, y + 3);
+  }
+  syncVelAxisPlaceholders();
+}
+
+/** Resolve the velocity panel's visible window: the manual X (velocity, m/s) / Y
+ *  (time, ms) boxes when valid, else the full semblance extent. Returns both the
+ *  visible [vLo,vHi]×[tLo,tHi] AND the full data extent (for the blit crop), all
+ *  ordered + clamped. null when there's no result. Shared by draw + click so picks
+ *  always land on the right (v,t) regardless of the active range. */
+function velMapping(): {
+  vLo: number; vHi: number; tLo: number; tHi: number;
+  dataVLo: number; dataVHi: number; dataTHi: number;
+} | null {
+  if (!velResult) return null;
+  const { vels, nT, dt } = velResult;
+  const dataVLo = vels[0];
+  const dataVHi = vels[vels.length - 1];
+  const dataTHi = nT * dt * 1000;
+  const wv = heatAxisWindow(velView.v0, velView.v1, dataVLo, dataVHi);
+  const wt = heatAxisWindow(velView.t0, velView.t1, 0, dataTHi);
+  return { vLo: wv.lo, vHi: wv.hi, tLo: wt.lo, tHi: wt.hi, dataVLo, dataVHi, dataTHi };
+}
+
+/** Push the velocity panel's effective window into its boxes as placeholders. */
+function syncVelAxisPlaceholders() {
+  if (!velAxisRange) return;
+  const m = velMapping();
+  if (!m) return;
+  velAxisRange.setPlaceholders(m.vLo, m.vHi, m.tLo, m.tHi);
+}
+
+/** Apply the velocity manual X (velocity) / Y (time) boxes into velView, redraw.
+ *  Each axis: a valid pair pins it; blank/invalid reverts that axis to auto. */
+function applyVelAxisRange() {
+  if (!velAxisRange) return;
+  const v = velAxisRange.value();
+  velView.v0 = v.xMin; velView.v1 = v.xMax;
+  velView.t0 = v.yMin; velView.t1 = v.yMax;
+  drawVelocity();
+}
+
+/** Wheel-zoom the velocity panel toward the cursor (X = velocity, Y = time). Seeds
+ *  null edges from the data extent, narrows/widens by `factor` (<1 = in), clamps
+ *  in-extent. Reuses the heatmap zoom math on a SpecRange view so picks stay valid. */
+function velZoomAt(fx: number, fy: number, factor: number) {
+  if (!velResult) return;
+  const { vels, nT, dt } = velResult;
+  const ext: HeatExtent = { xLo: vels[0], xHi: vels[vels.length - 1], yLo: 0, yHi: nT * dt * 1000 };
+  // Bridge velView (v0/v1/t0/t1) ↔ a SpecRange so heatZoomAt can drive it.
+  const view: SpecRange = { x0: velView.v0, x1: velView.v1, y0: velView.t0, y1: velView.t1 };
+  heatZoomAt(view, ext, fx, fy, factor, false); // time axis runs down (not yUp)
+  velView.v0 = view.x0; velView.v1 = view.x1; velView.t0 = view.y0; velView.t1 = view.y1;
+  drawVelocity();
+}
+
+/** Toolbar +/- zoom (centred) for the velocity panel. */
+function velZoomButton(factor: number) { if (velResult) velZoomAt(0.5, 0.5, factor); }
+
+/** Reset the velocity panel to auto-fit (clear boxes + range state). */
+function velFit() {
+  velView.v0 = velView.v1 = velView.t0 = velView.t1 = null;
+  velAxisRange?.clear();
+  drawVelocity();
+}
+
+/** Wire the velocity panel's wheel-zoom + zoom buttons + manual X/Y range boxes
+ *  (called once from init). Click-to-pick stays on its own handler. */
+function velInteractions() {
+  const cv = $('velCanvas') as HTMLCanvasElement;
+  cv.addEventListener('wheel', (e) => {
+    if ($('panel-vel').style.display === 'none' || !velResult) return;
+    e.preventDefault();
+    const r = cv.getBoundingClientRect();
+    const { ML, MR, MT, MB } = velGeom(cv);
+    const W = cv.clientWidth || 900, H = cv.clientHeight || 460;
+    const pw = W - ML - MR, ph = H - MT - MB;
+    if (pw <= 0 || ph <= 0) return;
+    const fx = (e.clientX - r.left - ML) / pw, fy = (e.clientY - r.top - MT) / ph;
+    if (fx < 0 || fx > 1 || fy < 0 || fy > 1) return;
+    velZoomAt(fx, fy, e.deltaY < 0 ? 1 / 1.15 : 1.15);
+  }, { passive: false });
+  cv.addEventListener('dblclick', () => { if (velResult) velFit(); });
+  $opt('velZoomIn')?.addEventListener('click', () => velZoomButton(1 / 1.4));
+  $opt('velZoomOut')?.addEventListener('click', () => velZoomButton(1.4));
+  $opt('velZoomFit')?.addEventListener('click', () => velFit());
+  const axHost = $opt('velAxisRange');
+  if (axHost) {
+    velAxisRange = axisRangeControls(axHost, {
+      xLabel: 'Vel m/s', yLabel: 'Time ms',
+      xStep: '1', yStep: 'any',
+      onChange: () => applyVelAxisRange(),
+    });
   }
 }
 
@@ -4175,18 +4728,18 @@ function onVelClick(e: MouseEvent) {
   const px = e.clientX - rect.left;
   const py = e.clientY - rect.top;
   if (px < ML || px > ML + pw || py < MT || py > MT + ph) return;
-  const { vels, nT, dt } = velResult;
-  const velMin = vels[0];
-  const velMax = vels[vels.length - 1];
-  // Guard the span (≥1) so a single-velocity scan doesn't collapse every click to
-  // velMin and produce a NaN near-test (picks would stack and be undeletable).
-  const velSpan = Math.max(1, velMax - velMin);
-  const totalMs = nT * dt * 1000;
-  const v = Math.round(velMin + ((px - ML) / pw) * velSpan);
-  const tMs = Math.round(((py - MT) / ph) * totalMs);
+  const m = velMapping();
+  if (!m) return;
+  const { vLo, vHi, tLo, tHi } = m;
+  // Map the click through the SAME visible window the draw used, so a pick lands
+  // on the v,t under the cursor even when a manual range is zoomed in.
+  const vSpan = Math.max(1, vHi - vLo);
+  const tSpan = Math.max(1, tHi - tLo);
+  const v = Math.round(vLo + ((px - ML) / pw) * vSpan);
+  const tMs = Math.round(tLo + ((py - MT) / ph) * tSpan);
   const near = velPicks.findIndex((p) => {
-    const x = ML + ((p.v - velMin) / velSpan) * pw;
-    const y = MT + (p.tMs / totalMs) * ph;
+    const x = ML + ((p.v - vLo) / vSpan) * pw;
+    const y = MT + ((p.tMs - tLo) / tSpan) * ph;
     return Math.hypot(px - x, py - y) < 12;
   });
   if (near >= 0) velPicks.splice(near, 1);
@@ -4221,6 +4774,8 @@ function renderVelPicks() {
 function clearVelocity() {
   velResult = null;
   velPicks = [];
+  velView.v0 = velView.v1 = velView.t0 = velView.t1 = null;
+  velAxisRange?.clear();
   renderVelPicks();
   drawVelocity();
   $('velLabel').textContent = 'Open a file, then compute a velocity scan.';
@@ -4294,7 +4849,7 @@ async function refreshSpecAvg() {
   $('specLabel').textContent = 'Computing average spectrum…';
   try {
     specAvg = await api.avgSpectrum(opts);
-    drawSpecAvg();
+    specAvgFit(); // new data ⇒ auto-fit (clears any stale manual window) + draw
     $('specLabel').textContent = specAvg.log || `Average over ${specAvg.nTraces} traces.`;
     updateHeaderClear();
   } catch (e) {
@@ -4302,12 +4857,151 @@ async function refreshSpecAvg() {
   } finally { specBusy = false; if (specRerunPending) { specRerunPending = false; void refreshSpectrum(); } }
 }
 
+/** Auto-fit extent of the Average view in DISPLAYED units (X = frequency Hz,
+ *  Y = amplitude — linear peak, or dB FLOOR..0 per specDb). Used to seed the
+ *  wheel-zoom from a null edge and to populate the box placeholders. */
+function specAvgAutoExtent(): { f0: number; f1: number; a0: number; a1: number } {
+  const sp = specAvg;
+  if (!sp) return { f0: 0, f1: 1, a0: 0, a1: 1 };
+  const f1 = sp.nyquist || 1;
+  if (specDb) return { f0: 0, f1, a0: -60, a1: 0 };
+  let amax = 0;
+  for (let k = 1; k < sp.amp.length; k++) if (sp.amp[k] > amax) amax = sp.amp[k];
+  if (!(amax > 0)) amax = 1;
+  return { f0: 0, f1, a0: 0, a1: amax };
+}
+
 /** Repaint the cached average spectrum (no fetch) — used on dB toggle / resize. */
 function drawSpecAvg() {
   const cv = $('specCanvas') as HTMLCanvasElement;
   if (!specAvg) { drawSpecEmpty(); return; }
-  drawSpectrum(cv, specAvg, { dB: specDb, label: `mean of ${specAvg.nTraces} traces${specAvg.decimated ? ' (decimated)' : ''}` });
+  drawSpectrum(cv, specAvg, {
+    dB: specDb,
+    label: `mean of ${specAvg.nTraces} traces${specAvg.decimated ? ' (decimated)' : ''}`,
+    fMin: specAvgView.x0, fMax: specAvgView.x1,
+    aMin: specAvgView.y0, aMax: specAvgView.y1,
+  });
+  syncSpecAvgPlaceholders();
 }
+
+/** Reflect the Average view's effective window (manual edges or the live auto
+ *  extent) as the box placeholders, so blank boxes still show the current range. */
+function syncSpecAvgPlaceholders() {
+  if (!specAvgAxis || !specAvg) return;
+  const e = specAvgAutoExtent();
+  specAvgAxis.setPlaceholders(
+    specAvgView.x0 ?? e.f0, specAvgView.x1 ?? e.f1,
+    specAvgView.y0 ?? e.a0, specAvgView.y1 ?? e.a1,
+  );
+}
+
+/** Apply the Average view's manual X/Y boxes into specAvgView, then repaint.
+ *  Each axis: a valid pair pins it; blank/invalid reverts that axis to auto. */
+function applySpecAvgAxis() {
+  if (!specAvgAxis) return;
+  const v = specAvgAxis.value();
+  specAvgView.x0 = v.xMin; specAvgView.x1 = v.xMax;
+  specAvgView.y0 = v.yMin; specAvgView.y1 = v.yMax;
+  if (specAvg) drawSpecAvg();
+}
+
+/** Wheel-zoom the Average view toward the cursor on the chosen axis pair. The
+ *  null (auto) edges are first seeded from the live extent, then the window is
+ *  narrowed/widened by `factor` (<1 = zoom in) and clamped so it never inverts
+ *  or exceeds the data. Writes specAvgView (the same state the boxes drive). */
+function specAvgZoomAt(fx: number, fy: number, factor: number) {
+  if (!specAvg) return;
+  const e = specAvgAutoExtent();
+  // Current window (seed any auto edge from the extent).
+  let x0 = specAvgView.x0 ?? e.f0, x1 = specAvgView.x1 ?? e.f1;
+  let y0 = specAvgView.y0 ?? e.a0, y1 = specAvgView.y1 ?? e.a1;
+  // X about the cursor.
+  const ax = x0 + fx * (x1 - x0), wx = (x1 - x0) * factor;
+  x0 = ax - fx * wx; x1 = ax + (1 - fx) * wx;
+  // Y about the cursor (fy=0 at top = a1 / high amplitude).
+  const ay = y1 - fy * (y1 - y0), wy = (y1 - y0) * factor;
+  y1 = ay + fy * wy; y0 = ay - (1 - fy) * wy;
+  // Clamp to the data extent + a minimum span so we never zoom to zero width.
+  const minX = Math.max(1e-6, (e.f1 - e.f0) * 1e-3);
+  const minY = Math.max(1e-9, (e.a1 - e.a0) * 1e-3);
+  x0 = Math.max(e.f0, x0); x1 = Math.min(e.f1, x1); if (x1 - x0 < minX) { x1 = Math.min(e.f1, x0 + minX); x0 = x1 - minX; }
+  y0 = Math.max(e.a0, y0); y1 = Math.min(e.a1, y1); if (y1 - y0 < minY) { y1 = Math.min(e.a1, y0 + minY); y0 = y1 - minY; }
+  specAvgView.x0 = x0; specAvgView.x1 = x1; specAvgView.y0 = y0; specAvgView.y1 = y1;
+  drawSpecAvg();
+}
+
+/** Reset the Average view to auto-fit (clear boxes + view state). */
+function specAvgFit() {
+  specAvgView.x0 = specAvgView.x1 = specAvgView.y0 = specAvgView.y1 = null;
+  specAvgAxis?.clear();
+  if (specAvg) drawSpecAvg();
+}
+
+// ── Heatmap (Spectrogram + F-K) range / zoom: both share a {x0,x1,y0,y1} view
+//    over a payload extent {x:[xLo,xHi], y:[yLo,yHi]}. These generic helpers drive
+//    both, so the box-apply / wheel-zoom / fit logic lives in one guarded place. ──
+type HeatExtent = { xLo: number; xHi: number; yLo: number; yHi: number };
+
+/** Push the heatmap's effective window (manual edges or live extent) into its
+ *  boxes as placeholders (blank boxes still mean auto). */
+function syncHeatPlaceholders(axis: AxisRangeHandle | null, view: SpecRange, ext: HeatExtent) {
+  axis?.setPlaceholders(view.x0 ?? ext.xLo, view.x1 ?? ext.xHi, view.y0 ?? ext.yLo, view.y1 ?? ext.yHi);
+}
+
+/** Apply a heatmap view's manual X/Y boxes into its range state (each axis null ⇒
+ *  auto), then repaint via `redraw`. */
+function applyHeatAxis(axis: AxisRangeHandle | null, view: SpecRange, redraw: () => void) {
+  if (!axis) return;
+  const v = axis.value();
+  view.x0 = v.xMin; view.x1 = v.xMax; view.y0 = v.yMin; view.y1 = v.yMax;
+  redraw();
+}
+
+/** Wheel-zoom a heatmap view toward the cursor (fx,fy in 0..1 over the plot, fy=0
+ *  at the top). `yUp` flips Y so fy=0 maps to the HIGH edge (F-K's freq-up axis).
+ *  Seeds auto edges from the extent, narrows/widens by `factor`, clamps in-extent
+ *  with a minimum span. Writes the same state the boxes drive. */
+function heatZoomAt(view: SpecRange, ext: HeatExtent, fx: number, fy: number, factor: number, yUp: boolean) {
+  let x0 = view.x0 ?? ext.xLo, x1 = view.x1 ?? ext.xHi;
+  let y0 = view.y0 ?? ext.yLo, y1 = view.y1 ?? ext.yHi;
+  const ax = x0 + fx * (x1 - x0), wx = (x1 - x0) * factor;
+  x0 = ax - fx * wx; x1 = ax + (1 - fx) * wx;
+  // For yUp, fy=0 (top) anchors the high edge; otherwise fy=0 anchors the low edge.
+  const fyTop = yUp ? (1 - fy) : fy;
+  const ay = y0 + fyTop * (y1 - y0), wy = (y1 - y0) * factor;
+  y0 = ay - fyTop * wy; y1 = ay + (1 - fyTop) * wy;
+  const minX = Math.max(1e-9, (ext.xHi - ext.xLo) * 1e-3);
+  const minY = Math.max(1e-9, (ext.yHi - ext.yLo) * 1e-3);
+  x0 = Math.max(ext.xLo, x0); x1 = Math.min(ext.xHi, x1); if (x1 - x0 < minX) { x1 = Math.min(ext.xHi, x0 + minX); x0 = x1 - minX; }
+  y0 = Math.max(ext.yLo, y0); y1 = Math.min(ext.yHi, y1); if (y1 - y0 < minY) { y1 = Math.min(ext.yHi, y0 + minY); y0 = y1 - minY; }
+  view.x0 = x0; view.x1 = x1; view.y0 = y0; view.y1 = y1;
+}
+
+/** Clear a heatmap view + its boxes (auto-fit), then repaint. */
+function heatFit(axis: AxisRangeHandle | null, view: SpecRange, redraw: () => void) {
+  view.x0 = view.x1 = view.y0 = view.y1 = null;
+  axis?.clear();
+  redraw();
+}
+
+/** Live data extent of the spectrogram (X = freq 0..fMax, Y = time 0..tMax). */
+function specGramExtent(): HeatExtent {
+  const g = specGram;
+  const fMax = g && g.freqs.length ? g.freqs[g.freqs.length - 1] : 1;
+  const tMax = g && g.times.length ? g.times[g.times.length - 1] : 1;
+  return { xLo: 0, xHi: fMax || 1, yLo: 0, yHi: tMax || 1 };
+}
+function syncSpecGramPlaceholders() { if (specGram) syncHeatPlaceholders(specGramAxis, specGramView, specGramExtent()); }
+
+/** Live data extent of the F-K panel (X = kx kMin..kMax, Y = freq 0..fMax). */
+function specFkExtent(): HeatExtent {
+  const fk = specFk;
+  const kMin = fk && fk.kAxis.length ? fk.kAxis[0] : -0.5;
+  const kMax = fk && fk.kAxis.length ? fk.kAxis[fk.kAxis.length - 1] : 0.5;
+  const fMax = fk && fk.fAxis.length ? fk.fAxis[fk.fAxis.length - 1] : 1;
+  return { xLo: kMin, xHi: kMax, yLo: 0, yHi: fMax || 1 };
+}
+function syncSpecFkPlaceholders() { if (specFk) syncHeatPlaceholders(specFkAxis, specFkView, specFkExtent()); }
 
 /** SPECTROGRAM: fetch the STFT of the current trace, draw a time×frequency
  *  heatmap (cloning drawVelocity's offscreen-ImageData approach). */
@@ -4321,7 +5015,7 @@ async function refreshSpecGram() {
   $('specLabel').textContent = 'Computing spectrogram…';
   try {
     specGram = await api.spectrogram({ index: specTraceIdx, winLen });
-    drawSpecGram();
+    heatFit(specGramAxis, specGramView, () => drawSpecGram()); // new data ⇒ auto-fit + draw
     const ny = specGram.siUs > 0 ? 1e6 / specGram.siUs / 2 : 0;
     $('specLabel').textContent = `Trace ${specTraceIdx + 1} / ${summary.traceCount} · ${specGram.nFrames} frames × ${specGram.nBins} bins · 0–${ny.toFixed(0)} Hz`;
     const idIn = $opt('specTraceIdx') as HTMLInputElement | null; if (idIn) idIn.value = String(specTraceIdx);
@@ -4351,15 +5045,24 @@ function drawSpecGram() {
     }
   }
   octx.putImageData(img, 0, 0);
-  ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(off, plot.x, plot.y, plot.w, plot.h);
-  ctx.strokeStyle = '#214564'; ctx.lineWidth = 1; ctx.strokeRect(plot.x, plot.y, plot.w, plot.h);
-
-  // Axes: x = frequency (Hz) across, y = time (s) down.
+  // Data extent: X = frequency 0..fMax (left→right), Y = time 0..tMax (top→bottom).
   const fMax = freqs.length ? freqs[freqs.length - 1] : 0;
   const tMax = times.length ? times[times.length - 1] : 0;
-  drawHeatAxes(ctx, plot, { xLabel: 'Frequency (Hz) →', xMax: fMax, yLabel: 'Time (s) ↓', yMax: tMax });
+  // Visible window from the manual X (freq) / Y (time) boxes (or full extent).
+  const wx = heatAxisWindow(specGramView.x0, specGramView.x1, 0, fMax);
+  const wy = heatAxisWindow(specGramView.y0, specGramView.y1, 0, tMax);
+  // Crop the offscreen image to the window: X 0..fMax → 0..1; Y 0..tMax (top→bottom) → 0..1.
+  const fSpan = fMax || 1, tSpan = tMax || 1;
+  blitHeatCrop(ctx, off, plot, { sx0: wx.lo / fSpan, sx1: wx.hi / fSpan, sy0: wy.lo / tSpan, sy1: wy.hi / tSpan });
+  ctx.strokeStyle = '#214564'; ctx.lineWidth = 1; ctx.strokeRect(plot.x, plot.y, plot.w, plot.h);
+
+  // Axes labelled over the visible window.
+  drawHeatAxesXY(ctx, plot, {
+    xLabel: 'Frequency (Hz) →', xMin: wx.lo, xMax: wx.hi,
+    yLabel: 'Time (s) ↓', yMin: wy.lo, yMax: wy.hi, yUp: false,
+  });
   drawColorbar(ctx, plot, W, 'magnitude');
+  syncSpecGramPlaceholders();
 }
 
 /** F-K spectrum: fetch + draw a wavenumber(kx)×frequency(f) heatmap (kx centred
@@ -4370,7 +5073,7 @@ async function refreshSpecFk() {
   $('specLabel').textContent = 'Computing f-k spectrum…';
   try {
     specFk = await api.fk({});
-    drawSpecFk();
+    heatFit(specFkAxis, specFkView, () => drawSpecFk()); // new data ⇒ auto-fit + draw
     $('specLabel').textContent = specFk.log || `f-k grid ${specFk.nF}×${specFk.nKx}.`;
   } catch (e) {
     $('specLabel').textContent = 'Failed: ' + errMsg(e);
@@ -4402,30 +5105,83 @@ function drawSpecFk() {
     }
   }
   octx.putImageData(img, 0, 0);
-  ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(off, plot.x, plot.y, plot.w, plot.h);
-  ctx.strokeStyle = '#214564'; ctx.lineWidth = 1; ctx.strokeRect(plot.x, plot.y, plot.w, plot.h);
-
-  // Axes: x = wavenumber kx (centred at 0), y = frequency (Hz, 0 at bottom).
+  // Data extent: X = wavenumber kMin..kMax (left→right), Y = frequency 0..fMax
+  // (0 at the BOTTOM, since image rows were flipped above).
   const kMin = kAxis.length ? kAxis[0] : -0.5;
   const kMax = kAxis.length ? kAxis[kAxis.length - 1] : 0.5;
   const fMax = fAxis.length ? fAxis[fAxis.length - 1] : 0;
-  // kx = 0 centre line.
-  const kZeroX = plot.x + ((0 - kMin) / (kMax - kMin || 1)) * plot.w;
-  drawHeatAxesXY(ctx, plot, {
-    xLabel: 'Wavenumber kx (cyc/trace) →', xMin: kMin, xMax: kMax,
-    yLabel: 'Frequency (Hz) ↑', yMin: 0, yMax: fMax, yUp: true,
+  // Visible window from the manual X (kx) / Y (freq) boxes (or full extent).
+  const wx = heatAxisWindow(specFkView.x0, specFkView.x1, kMin, kMax);
+  const wy = heatAxisWindow(specFkView.y0, specFkView.y1, 0, fMax);
+  // Crop the offscreen image. X: kMin..kMax → 0..1 across columns. Y: the image is
+  // freq-flipped (row 0 = fMax at top, row last = 0 at bottom), so a [yLo,yHi]
+  // freq window maps to source fractions sy0=(fMax-yHi)/fMax (top), sy1=(fMax-yLo)/fMax.
+  const kSpan = kMax - kMin || 1, fSpan = fMax || 1;
+  blitHeatCrop(ctx, off, plot, {
+    sx0: (wx.lo - kMin) / kSpan, sx1: (wx.hi - kMin) / kSpan,
+    sy0: (fMax - wy.hi) / fSpan, sy1: (fMax - wy.lo) / fSpan,
   });
-  ctx.strokeStyle = 'rgba(255,180,84,0.5)'; ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
-  ctx.beginPath(); ctx.moveTo(kZeroX, plot.y); ctx.lineTo(kZeroX, plot.y + plot.h); ctx.stroke();
-  ctx.setLineDash([]);
+  ctx.strokeStyle = '#214564'; ctx.lineWidth = 1; ctx.strokeRect(plot.x, plot.y, plot.w, plot.h);
+
+  // Axes labelled over the visible window.
+  drawHeatAxesXY(ctx, plot, {
+    xLabel: 'Wavenumber kx (cyc/trace) →', xMin: wx.lo, xMax: wx.hi,
+    yLabel: 'Frequency (Hz) ↑', yMin: wy.lo, yMax: wy.hi, yUp: true,
+  });
+  // kx = 0 centre line — only when 0 falls inside the visible kx window.
+  if (wx.lo < 0 && wx.hi > 0) {
+    const kZeroX = plot.x + ((0 - wx.lo) / (wx.hi - wx.lo)) * plot.w;
+    ctx.strokeStyle = 'rgba(255,180,84,0.5)'; ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
+    ctx.beginPath(); ctx.moveTo(kZeroX, plot.y); ctx.lineTo(kZeroX, plot.y + plot.h); ctx.stroke();
+    ctx.setLineDash([]);
+  }
   drawColorbar(ctx, plot, W, 'log |F|');
 
   ctx.fillStyle = '#9fb0c4'; ctx.font = '10px "Segoe UI", sans-serif';
   ctx.fillText('Slope f/kx = apparent velocity · steep dips ↔ aliasing at the kx edges', plot.x + 4, plot.y + plot.h + 22);
+  syncSpecFkPlaceholders();
 }
 
 // ── Heatmap helpers (shared by the spectrogram + f-k panels) ──
+
+/** Resolve one heatmap axis to a visible [lo,hi] window: the manual edges when
+ *  both finite + ordered, else the full data extent [dLo,dHi]. Always returns an
+ *  ordered, in-extent pair (clamped) — never NaN — so the blit-crop + axis labels
+ *  stay valid even with a stale/garbage box (the helper already guards, this is a
+ *  belt-and-braces second line of defence). */
+function heatAxisWindow(manualLo: number | null, manualHi: number | null, dLo: number, dHi: number): { lo: number; hi: number } {
+  const span = dHi - dLo;
+  if (!(span > 0)) return { lo: dLo, hi: dLo + 1 }; // degenerate extent ⇒ unit window
+  let lo = (typeof manualLo === 'number' && Number.isFinite(manualLo)) ? manualLo : dLo;
+  let hi = (typeof manualHi === 'number' && Number.isFinite(manualHi)) ? manualHi : dHi;
+  if (!(hi > lo)) { lo = dLo; hi = dHi; }
+  // Clamp inside the data and keep a minimum span (0.1% of the extent).
+  const minW = span * 1e-3;
+  lo = Math.max(dLo, Math.min(lo, dHi - minW));
+  hi = Math.min(dHi, Math.max(hi, lo + minW));
+  return { lo, hi };
+}
+
+/** Blit a cropped sub-rectangle of the offscreen heatmap into the plot rect,
+ *  stretching the visible source window to fill the axes. `srcFrac` gives the
+ *  crop in 0..1 source fractions (sx0<sx1 left→right, sy0<sy1 top→bottom of the
+ *  OFFSCREEN image). All values are pre-clamped to [0,1] with a ≥1px source span
+ *  so drawImage never gets a zero/negative rect (which throws). */
+function blitHeatCrop(
+  ctx: CanvasRenderingContext2D,
+  off: HTMLCanvasElement,
+  plot: { x: number; y: number; w: number; h: number },
+  srcFrac: { sx0: number; sx1: number; sy0: number; sy1: number },
+) {
+  const cl = (v: number) => Math.max(0, Math.min(1, Number.isFinite(v) ? v : 0));
+  const sx0 = cl(srcFrac.sx0), sx1 = cl(srcFrac.sx1), sy0 = cl(srcFrac.sy0), sy1 = cl(srcFrac.sy1);
+  let sx = sx0 * off.width, sw = (sx1 - sx0) * off.width;
+  let sy = sy0 * off.height, sh = (sy1 - sy0) * off.height;
+  if (!(sw >= 1)) { sw = 1; sx = Math.min(sx, off.width - 1); }
+  if (!(sh >= 1)) { sh = 1; sy = Math.min(sy, off.height - 1); }
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(off, sx, sy, sw, sh, plot.x, plot.y, plot.w, plot.h);
+}
 
 /** DPR-correct size the spectrum canvas, paint the dark background, and return a
  *  drawing context + the inner plot rectangle (margins from SPEC_M). */
@@ -4524,6 +5280,58 @@ function repaintSpectrum() {
   else { if (specFk) drawSpecFk(); else drawSpecEmpty(); }
 }
 
+/** Cursor pixel → fractional position within the active spectrum view's plot
+ *  rect: {fx,fy} in 0..1 (fy=0 at top). Uses the Average view's margins for 'avg'
+ *  and SPEC_M for the two heatmaps. Returns null when off the plot rect. */
+function specPlotFrac(cv: HTMLCanvasElement, e: MouseEvent): { fx: number; fy: number } | null {
+  const r = cv.getBoundingClientRect();
+  const W = cv.clientWidth || 900, H = cv.clientHeight || 460;
+  // Avg view margins (drawSpectrum) vs heatmap margins (SPEC_M).
+  const m = specDisplay === 'avg'
+    ? { ML: 56, MR: 16, MT: 18, MB: 28 }
+    : SPEC_M;
+  const pw = W - m.ML - m.MR, ph = H - m.MT - m.MB;
+  if (pw <= 0 || ph <= 0) return null;
+  const fx = (e.clientX - r.left - m.ML) / pw;
+  const fy = (e.clientY - r.top - m.MT) / ph;
+  if (fx < 0 || fx > 1 || fy < 0 || fy > 1) return null;
+  return { fx, fy };
+}
+
+/** Wheel-zoom dispatcher: route a wheel event to the active spectrum view's zoom
+ *  (centred on the cursor). factor <1 = zoom in (wheel up). */
+function specWheelZoom(cv: HTMLCanvasElement, e: WheelEvent) {
+  const f = specPlotFrac(cv, e);
+  if (!f) return;
+  const factor = e.deltaY < 0 ? 1 / 1.15 : 1.15;
+  if (specDisplay === 'avg') {
+    if (!specAvg) return;
+    specAvgZoomAt(f.fx, f.fy, factor); // redraws inside
+  } else if (specDisplay === 'spectrogram') {
+    if (!specGram) return;
+    heatZoomAt(specGramView, specGramExtent(), f.fx, f.fy, factor, false);
+    drawSpecGram();
+  } else {
+    if (!specFk) return;
+    heatZoomAt(specFkView, specFkExtent(), f.fx, f.fy, factor, true); // F-K freq axis is up
+    drawSpecFk();
+  }
+}
+
+/** Toolbar +/- zoom for the active spectrum view (centred on the plot). */
+function specZoomButton(factor: number) {
+  if (specDisplay === 'avg') { if (specAvg) specAvgZoomAt(0.5, 0.5, factor); }
+  else if (specDisplay === 'spectrogram') { if (specGram) { heatZoomAt(specGramView, specGramExtent(), 0.5, 0.5, factor, false); drawSpecGram(); } }
+  else { if (specFk) { heatZoomAt(specFkView, specFkExtent(), 0.5, 0.5, factor, true); drawSpecFk(); } }
+}
+
+/** Fit/reset the active spectrum view to auto-fit. */
+function specZoomFit() {
+  if (specDisplay === 'avg') specAvgFit();
+  else if (specDisplay === 'spectrogram') heatFit(specGramAxis, specGramView, () => { if (specGram) drawSpecGram(); });
+  else heatFit(specFkAxis, specFkView, () => { if (specFk) drawSpecFk(); });
+}
+
 /** Step the spectrogram's trace index by ±1 (clamped) and re-fetch. */
 function specStepTrace(delta: number) {
   if (!summary) return;
@@ -4538,6 +5346,14 @@ function initSpectrum() {
   $opt('specDispGram')?.addEventListener('click', () => setSpecDisplay('spectrogram'));
   $opt('specDispFk')?.addEventListener('click', () => setSpecDisplay('fk'));
 
+  // Wheel-zoom over the shared canvas → the active view's range state.
+  const specCv = $('specCanvas') as HTMLCanvasElement;
+  specCv.addEventListener('wheel', (e) => {
+    if ($('panel-spectrum').style.display === 'none' || !summary || summary.traceCount === 0) return;
+    e.preventDefault();
+    specWheelZoom(specCv, e);
+  }, { passive: false });
+
   // ── Average-spectrum controls ──
   $opt('specDbLin')?.addEventListener('click', () => setSpecDb(false));
   $opt('specDbDb')?.addEventListener('click', () => setSpecDb(true));
@@ -4545,6 +5361,17 @@ function initSpectrum() {
   // Enter in either trace-range box recomputes the average.
   for (const id of ['specTr0', 'specTr1']) {
     $opt(id)?.addEventListener('keydown', (e) => { if ((e as KeyboardEvent).key === 'Enter') { e.preventDefault(); void refreshSpecAvg(); } });
+  }
+  // Average view: zoom buttons + manual X (freq) / Y (amp) range boxes.
+  $opt('specAvgZoomIn')?.addEventListener('click', () => specZoomButton(1 / 1.4));
+  $opt('specAvgZoomOut')?.addEventListener('click', () => specZoomButton(1.4));
+  $opt('specAvgZoomFit')?.addEventListener('click', () => specZoomFit());
+  const avgHost = $opt('specAvgAxis');
+  if (avgHost) {
+    specAvgAxis = axisRangeControls(avgHost, {
+      xLabel: 'Freq Hz', yLabel: 'Amp',
+      onChange: () => applySpecAvgAxis(),
+    });
   }
 
   // ── Spectrogram controls ──
@@ -4557,9 +5384,31 @@ function initSpectrum() {
     void refreshSpecGram();
   });
   $opt('specWin')?.addEventListener('change', () => void refreshSpecGram());
+  // Spectrogram view: zoom buttons + manual X (freq) / Y (time) range boxes.
+  $opt('specGramZoomIn')?.addEventListener('click', () => specZoomButton(1 / 1.4));
+  $opt('specGramZoomOut')?.addEventListener('click', () => specZoomButton(1.4));
+  $opt('specGramZoomFit')?.addEventListener('click', () => specZoomFit());
+  const gramHost = $opt('specGramAxis');
+  if (gramHost) {
+    specGramAxis = axisRangeControls(gramHost, {
+      xLabel: 'Freq Hz', yLabel: 'Time s',
+      onChange: () => applyHeatAxis(specGramAxis, specGramView, () => { if (specGram) drawSpecGram(); }),
+    });
+  }
 
   // ── F-K controls ──
   $opt('specFkCompute')?.addEventListener('click', () => void refreshSpecFk());
+  // F-K view: zoom buttons + manual X (wavenumber) / Y (freq) range boxes.
+  $opt('specFkZoomIn')?.addEventListener('click', () => specZoomButton(1 / 1.4));
+  $opt('specFkZoomOut')?.addEventListener('click', () => specZoomButton(1.4));
+  $opt('specFkZoomFit')?.addEventListener('click', () => specZoomFit());
+  const fkHost = $opt('specFkAxis');
+  if (fkHost) {
+    specFkAxis = axisRangeControls(fkHost, {
+      xLabel: 'kx', yLabel: 'Freq Hz',
+      onChange: () => applyHeatAxis(specFkAxis, specFkView, () => { if (specFk) drawSpecFk(); }),
+    });
+  }
 
   // Initial segmented + control-group state, and an empty placeholder.
   $opt('specDispAvg')?.classList.add('on');
@@ -4576,13 +5425,19 @@ function setSpecDb(dB: boolean) {
   specDb = dB;
   $opt('specDbLin')?.classList.toggle('on', !dB);
   $opt('specDbDb')?.classList.toggle('on', dB);
-  if (specDisplay === 'avg' && specAvg) drawSpecAvg();
+  // The amplitude axis unit changed (linear ↔ dB), so any manual amplitude window
+  // no longer matches the axis. Reset the Average view to auto-fit (clears all four
+  // boxes) so the redraw can't paint a stale dB value against a linear axis.
+  specAvgFit();
 }
 
 /** Clear the spectrum tab's cached payloads + repaint the empty placeholder. The
  *  open seismic file is left untouched. */
 function clearSpectrum() {
   specAvg = null; specGram = null; specFk = null;
+  // Drop any manual windows + box contents so a re-loaded file starts auto-fit.
+  for (const view of [specAvgView, specGramView, specFkView]) { view.x0 = view.x1 = view.y0 = view.y1 = null; }
+  specAvgAxis?.clear(); specGramAxis?.clear(); specFkAxis?.clear();
   drawSpecEmpty();
   $('specLabel').textContent = 'Open a seismic file to analyse its spectrum.';
   updateHeaderClear();
@@ -6456,6 +7311,14 @@ function init() {
   });
   $('viewGrid').addEventListener('click', () => setView('grid'));
   $('viewMap').addEventListener('click', () => setView('map'));
+  // Map rotation (real-map view only): slider + numeric box drive the bearing,
+  // the reset button snaps back to North (0°). All paths go through
+  // setMapBearing, which guards NaN/range and keeps map + UI in sync.
+  $opt('spsRotate')?.addEventListener('input', (e) => setMapBearing(parseFloat((e.target as HTMLInputElement).value)));
+  $opt('spsRotateNum')?.addEventListener('input', (e) => setMapBearing(parseFloat((e.target as HTMLInputElement).value)));
+  $opt('spsRotateReset')?.addEventListener('click', () => setMapBearing(0));
+  syncBearingUI();
+  setRotateCtlEnabled(spsView === 'map'); // disabled on the default grid view
   gridInteractions();
   $opt('spsInspClose')?.addEventListener('click', clearInspector);
   $('spsQcBtn').addEventListener('click', () => void runQC());
@@ -6478,6 +7341,7 @@ function init() {
   $('velComputeBtn').addEventListener('click', () => void computeVelocity());
   $('velExportBtn').addEventListener('click', () => void exportPicks());
   ($('velCanvas') as HTMLCanvasElement).addEventListener('click', onVelClick);
+  velInteractions();        // Velocity: wheel-zoom + zoom buttons + manual X/Y boxes
   initSpectrum();           // Spectrum tab: display selector + per-display controls
   workbenchInteractions(); // Trace Workbench: add/remove/clear + shared zoom/pan
   initObsLog();             // Observer Log: wizard + editable grid wiring
