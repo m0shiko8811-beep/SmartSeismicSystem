@@ -645,6 +645,25 @@ table.olog-grid tr.olog-rowsel td{background:var(--teal-tint-2);}
 .modal .mbody .fmt-tbl td:first-child{font-weight:700;color:var(--ink);}
 .modal .mbody .fmt-tbl td .mono{font-family:var(--mono);color:var(--teal-deep);}
 
+/* ---- Context-sensitive Help: two-pane body (nav + content) ---- */
+.modal .mbody.help-split{display:grid;grid-template-columns:178px 1fr;gap:0;padding:0;overflow:hidden;}
+.help-nav{border-right:1px solid var(--hair-soft);padding:12px 10px;overflow:auto;display:flex;flex-direction:column;gap:2px;background:var(--surface);}
+.help-nav .hn-item{
+  display:block;width:100%;text-align:left;border:1px solid transparent;border-radius:8px;
+  padding:7px 10px;font-size:12.5px;font-weight:600;color:var(--ink-2);background:transparent;cursor:pointer;
+}
+.help-nav .hn-item:hover{background:var(--card);color:var(--ink);}
+.help-nav .hn-item.on{background:var(--card);border-color:var(--teal);color:var(--teal-deep);font-weight:800;}
+.help-content{padding:18px 22px;overflow:auto;}
+.help-content h3{font-size:14px;font-weight:800;color:var(--ink);margin:0 0 6px;letter-spacing:.2px;}
+.help-content .hc-what{margin:0 0 12px;color:var(--ink-2);}
+.help-content h4{font-size:11px;font-weight:800;color:var(--ink-3);letter-spacing:.4px;text-transform:uppercase;margin:14px 0 6px;}
+.help-content ul{margin:6px 0 6px 18px;}
+.help-content li{margin:4px 0;}
+.help-content ol{margin:6px 0 6px 20px;}
+.help-content ol li{margin:5px 0;}
+.help-content .hc-ctl b{color:var(--ink);}
+
 /* utility: show/hide blocks driven by app.ts */
 .hidden{display:none !important;}
 
@@ -1766,56 +1785,11 @@ table.olog-grid tr.olog-rowsel td{background:var(--teal-tint-2);}
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
       </button>
     </div>
-    <div class="mbody">
-      <h3>What SeisConv does</h3>
-      <p>SeisConv reads common seismic exchange formats off the UI thread and converts them between formats, with built-in QC and quick visual checks. Use the icon rail on the left to move between tabs; press <span class="kbd" data-key="tabs">1–7</span> to jump directly to a tab.</p>
-
-      <h3>Converter tab</h3>
-      <p>Two modes, chosen from the cards at the top:</p>
-      <ul>
-        <li><b>Convert single file</b> — <span class="kbd" data-key="open">Open</span> a seismic file, review the <b>File summary</b> and <b>Header QC</b>, pick an output format chip, then <b>Convert &amp; Save…</b> to choose where the converted file goes.</li>
-        <li><b>Convert a folder (batch)</b> — <b>Pick folder…</b> to scan a directory for seismic files; choose an output <b>format</b>; <b>Pick destination…</b>; then <b>Convert files</b>. A live progress bar and per-file result list show what happened. Use <b>Cancel</b> to stop a running batch.</li>
-      </ul>
-      <p><b>Clear</b> resets the Converter — it forgets the open file and empties the panels.</p>
-
-      <h3>Trace Inspector</h3>
-      <p>Step through individual traces with <span class="kbd">‹ Prev</span> / <span class="kbd">Next ›</span> or the slider, and toggle between the <b>Waveform</b> and the <b>amplitude Spectrum</b> (FFT) of the selected trace.</p>
-
-      <h3>File Viewer</h3>
-      <p>Render the whole record as a section — <b>Variable Density</b>, <b>Wiggle</b>, <b>Variable Area</b>, or <b>VD + Wiggle</b> — with a choice of colormap, a <b>Gain</b> slider, and optional <b>AGC</b>.</p>
-
-      <h3>SPS</h3>
-      <p>Load <b>S / R / X</b> survey files (SPS, SEG-P1, IOGP P1/11, P6/11, or coord-CSV) to plot source/receiver geometry on a <b>Survey grid</b> (offline, pan/zoom/hover) or a <b>Real map</b> basemap. <b>Run QC</b> checks station intervals and offsets; you can <b>reproject</b> the survey to another EPSG CRS and export it.</p>
-
-      <h3>Velocity</h3>
-      <p>Compute an <b>NMO semblance</b> panel over a velocity range, then click the panel to pick a stacking-velocity function and export the picks as CSV.</p>
-
-      <h3>Observer Log</h3>
-      <p>A per-shot field log. A short <b>wizard</b> sets up the <b>project header</b>, the <b>columns</b> (toggle field groups or add custom columns), the <b>source type</b> (explosive / vibroseis / nodal), and the <b>rows</b> (seed one row per shot from a loaded SPS survey or seismic file, or start blank). Edit cells directly in the grid; add, insert, delete or reorder rows. <b>Reconfigure</b> reopens the wizard. <b>Clear</b> empties the log records.</p>
-
-      <h3>The 9 output formats</h3>
-      <table class="fmt-tbl">
-        <thead><tr><th>Format</th><th>Ext</th><th>Notes</th></tr></thead>
-        <tbody>
-          <tr><td>SEG-Y Rev 1</td><td><span class="mono">.sgy</span></td><td>Most common modern SEG-Y; IEEE/IBM floats, big-endian.</td></tr>
-          <tr><td>SEG-Y Rev 0</td><td><span class="mono">.sgy</span></td><td>Original SEG-Y for legacy tooling.</td></tr>
-          <tr><td>SEG-Y Rev 2</td><td><span class="mono">.sgy</span></td><td>Latest SEG-Y revision with extended headers.</td></tr>
-          <tr><td>Seismic Unix</td><td><span class="mono">.su</span></td><td>SU trace format (SEG-Y traces, no reel header).</td></tr>
-          <tr><td>SEG-2 / .dat</td><td><span class="mono">.dat</span></td><td>SEG-2 engineering format (e.g. Geode land recorders).</td></tr>
-          <tr><td>SEG-D Rev 1</td><td><span class="mono">.segd</span></td><td>Field acquisition format, revision 1.</td></tr>
-          <tr><td>SEG-D Rev 3</td><td><span class="mono">.segd</span></td><td>Field acquisition format, revision 3.</td></tr>
-          <tr><td>Tape Image</td><td><span class="mono">.tpimage</span></td><td>Raw tape-image container. Available in folder (batch) mode only.</td></tr>
-          <tr><td>CSV / ASCII</td><td><span class="mono">.csv</span></td><td>Plain numeric export for spreadsheets / scripts.</td></tr>
-        </tbody>
-      </table>
-
-      <h3>Keyboard</h3>
-      <ul>
-        <li><span class="kbd" data-key="open">Open</span> — open a single file</li>
-        <li><span class="kbd" data-key="batch">Batch</span> — jump to folder (batch) mode</li>
-        <li><span class="kbd" data-key="tabs">1–7</span> — switch tabs</li>
-        <li><span class="kbd" data-key="help">?</span> — this manual · <span class="kbd">Esc</span> closes it</li>
-      </ul>
+    <div class="mbody help-split">
+      <!-- Left nav (per-tab + General); buttons injected by app.ts renderManual() -->
+      <nav class="help-nav" id="manualNav" aria-label="Help topics"></nav>
+      <!-- Selected topic's content; injected by app.ts renderManual() -->
+      <div class="help-content" id="manualContent"></div>
     </div>
   </div>
 </div>

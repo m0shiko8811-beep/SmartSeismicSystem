@@ -300,8 +300,222 @@ function initZoom() {
   $opt('zoomPct')?.addEventListener('click', () => zoomReset());
 }
 
-// ── Help / Manual modal ──
-function openManual() { $opt('manualBack')?.classList.add('open'); }
+// ── Help / Manual modal (context-sensitive) ──
+// Per-topic help content, keyed by the same tab ids the app uses (TABS) plus a
+// shared 'general' section. `what` = one-line purpose; `controls` = the REAL
+// controls on that tab (label + what it does); `steps` = a short workflow.
+// Strings are trusted, hand-authored literals (safe to inject as innerHTML).
+type HelpTopic = { title: string; what: string; controls: string[]; steps: string[] };
+const MANUAL: Record<string, HelpTopic> = {
+  general: {
+    title: 'General',
+    what: 'Features that work everywhere in SeisConv, regardless of the active tab.',
+    controls: [
+      '<b>Open file…</b> (header) — open a single seismic file; it feeds the Converter and every viewer tab.',
+      '<b>Clear</b> (header) — clear the data for the current tab.',
+      '<b>Help</b> (header / left-rail bottom) — open this manual to the tab you are on.',
+      '<b>Icon rail</b> (left) — switch tabs; the active tab is highlighted.',
+      '<b>Theme toggle</b> — switch between light and dark UI.',
+      '<b>UI zoom</b> — make the whole interface bigger or smaller.',
+    ],
+    steps: [
+      'Open a seismic file from the header, or load files inside a tab.',
+      'Use the icon rail (or number keys) to move between tabs.',
+      'Press <span class="kbd" data-key="help">?</span> any time for help on the current tab; <span class="kbd">Esc</span> closes it.',
+    ],
+  },
+  conv: {
+    title: 'Converter',
+    what: 'Load seismic file(s) and convert them to another format.',
+    controls: [
+      '<b>Convert single file</b> / <b>Convert a folder (batch)</b> — pick the mode from the two cards at the top.',
+      '<b>Pick a seismic file…</b> — choose the file to convert (single mode).',
+      '<b>Format chips</b> — pick the output format (SEG-Y Rev 0/1/2, SU, SEG-2, SEG-D Rev 1/3, CSV; batch adds Tape Image).',
+      '<b>Output name</b> — template, date and extension preview; tokens {name} {fmt} {date} {n}.',
+      '<b>Convert &amp; Save…</b> / <b>Convert files</b> — run the conversion; <b>Cancel</b> stops a running batch.',
+      '<b>Clear</b> — forget the open file and empty the panels.',
+      '<b>File summary</b> &amp; <b>Header QC</b> — format, traces, samples, interval, byte order and QC flags for the loaded file.',
+      '<b>Pick folder…</b> / <b>Pick destination…</b> — source and output folders (batch mode).',
+    ],
+    steps: [
+      'Choose <b>single</b> or <b>folder (batch)</b> mode.',
+      'Open the file or pick the folder, then choose an output <b>format</b>.',
+      'Set the <b>output name</b> template if needed.',
+      'Click <b>Convert &amp; Save…</b> (or <b>Convert files</b>) and choose where the result goes.',
+    ],
+  },
+  trace: {
+    title: 'Trace Inspector',
+    what: 'Inspect one trace at a time as a waveform or amplitude spectrum.',
+    controls: [
+      '<b>‹ Prev</b> / <b>Next ›</b> and the <b>slider</b> — step through traces.',
+      '<b>Waveform</b> / <b>Spectrum</b> — show the time-domain wiggle or its amplitude spectrum (FFT).',
+      '<b>−</b> / <b>Fit</b> / <b>+</b> — zoom the time axis; or wheel-zoom, drag-pan, double-click to fit on the canvas.',
+      '<b>Axis range</b> — type an exact time / amplitude range instead of auto.',
+      '<b>Add to Workbench</b> — push the current trace to the Trace Workbench.',
+    ],
+    steps: [
+      'Open a seismic file.',
+      'Move through traces with <b>Prev</b>/<b>Next</b> or the slider.',
+      'Toggle <b>Waveform</b> / <b>Spectrum</b> and zoom as needed.',
+      'Optionally <b>Add to Workbench</b> to compare it later.',
+    ],
+  },
+  section: {
+    title: 'File Viewer',
+    what: 'Render the whole record as a section image.',
+    controls: [
+      '<b>[</b> / <b>]</b> — step to the previous / next file.',
+      '<b>Display mode</b> — Variable Density, Wiggle, Variable Area, or VD + Wiggle.',
+      '<b>Colormap</b> — Seismic, Gray, Amber or Viridis.',
+      '<b>Gain</b> slider and <b>AGC</b> checkbox — adjust amplitude scaling.',
+      '<b>−</b> / <b>Fit</b> / <b>+</b> and <b>Axis range</b> — zoom and set exact extents.',
+      '<b>+ Workbench</b> — then click a trace on the canvas to collect it.',
+    ],
+    steps: [
+      'Open a seismic file.',
+      'Pick a <b>display mode</b> and <b>colormap</b>.',
+      'Tune <b>Gain</b> / <b>AGC</b> and zoom in on detail.',
+      'Optionally click traces into the Workbench with <b>+ Workbench</b>.',
+    ],
+  },
+  sps: {
+    title: 'SPS',
+    what: 'Plot, QC and reproject survey geometry.',
+    controls: [
+      '<b>Load SPS files (S/R/X)…</b> / <b>Clear SPS</b> — load source/receiver/relation files (SPS, SEG-P1, IOGP P1/11, P6/11, coord-CSV).',
+      '<b>Sources</b> / <b>Receivers</b> / <b>X-ref spider</b> / <b>Fold/coverage</b> / <b>Bin grid</b> — overlay toggles; <b>Bin m</b> sets the bin size.',
+      '<b>Survey grid</b> / <b>Real map</b> — offline grid view or a Leaflet basemap; <b>rotation</b> slider with reset to <b>N</b>.',
+      '<b>Headers…</b> — inspect the raw file headers; click a point for the station inspector.',
+      '<b>Run QC</b> — check Src int, Rcv int, Tol and Max off; results shown below.',
+      '<b>Reproject</b> — pick an EPSG and <b>Export reprojected (ZIP)…</b>.',
+      '<b>Export</b> — KML, GeoJSON, CSV, P1/11, Coords CSV, QC report.',
+    ],
+    steps: [
+      'Click <b>Load SPS files (S/R/X)…</b> and pick your survey files.',
+      'Toggle overlays and switch between <b>Survey grid</b> and <b>Real map</b>.',
+      'Click a point to inspect it, then <b>Run QC</b>.',
+      'Reproject to another EPSG and <b>export</b> as needed.',
+    ],
+  },
+  vel: {
+    title: 'Velocity',
+    what: 'Compute an NMO semblance panel and pick a stacking-velocity function.',
+    controls: [
+      '<b>Vmin</b> / <b>Vmax</b> / <b>Step</b> — the velocity scan range and increment.',
+      '<b>Compute semblance</b> — build the semblance panel.',
+      '<b>Export picks CSV…</b> — save the picked velocity function.',
+      '<b>−</b> / <b>Fit</b> / <b>+</b> and <b>Axis range</b> — zoom the panel.',
+    ],
+    steps: [
+      'Open a seismic file.',
+      'Set <b>Vmin</b> / <b>Vmax</b> / <b>Step</b> and click <b>Compute semblance</b>.',
+      'Click the panel to add velocity picks.',
+      'Click <b>Export picks CSV…</b> to save them.',
+    ],
+  },
+  spectrum: {
+    title: 'Spectrum Analysis',
+    what: 'Frequency-domain QC of the loaded record.',
+    controls: [
+      '<b>Average spectrum</b> / <b>Spectrogram</b> / <b>F-K</b> — choose the display.',
+      'Average: <b>Linear</b>/<b>dB</b>, <b>From</b>/<b>To</b> trace window, <b>Recompute</b>.',
+      'Spectrogram: <b>Prev</b>/<b>Next</b>, <b>Trace #</b>, <b>Window</b> length.',
+      'F-K: <b>Recompute</b> to build the frequency–wavenumber panel.',
+      '<b>−</b> / <b>Fit</b> / <b>+</b> and axis controls — zoom each view.',
+    ],
+    steps: [
+      'Open a seismic file.',
+      'Choose <b>Average spectrum</b>, <b>Spectrogram</b> or <b>F-K</b>.',
+      'Set that view’s parameters and click <b>Recompute</b>.',
+      'Zoom in to inspect the result.',
+    ],
+  },
+  workbench: {
+    title: 'Trace Workbench',
+    what: 'Collect arbitrary traces from any file and compare them.',
+    controls: [
+      '<b>Pick file…</b>, <b>Trace #</b>, <b>Add open trace</b> — gather traces into the bench.',
+      '<b>Side-by-side</b> / <b>Overlay</b> — layout for the collected traces.',
+      '<b>−</b> / <b>Fit</b> / <b>+</b> and <b>Axis range</b> — zoom all traces in lock-step.',
+      '<b>A</b> / <b>B</b> selects — pick two traces for cross-correlation, difference and stats.',
+      '<b>Clear all</b> — empty the collected list.',
+      '<b>Export…</b> — save the collected set in a chosen format.',
+    ],
+    steps: [
+      'Add traces via <b>Pick file…</b> + <b>Add</b>, or push from Trace Inspector / File Viewer.',
+      'Compare with <b>Side-by-side</b> or <b>Overlay</b>.',
+      'Select <b>A</b> and <b>B</b> to analyse cross-correlation and difference.',
+      'Click <b>Export…</b> to save the collected traces.',
+    ],
+  },
+  obslog: {
+    title: 'Observer Log',
+    what: 'Build and maintain a per-shot field log.',
+    controls: [
+      '<b>Wizard</b> — project header, columns (field groups + custom columns), source type (Explosive / Vibroseis / Nodal), and rows (seed from data or start blank).',
+      '<b>Build log</b> — create the grid from the wizard settings.',
+      '<b>+ Add row</b>, <b>Columns…</b>, <b>Import sources from SPS</b>, <b>Reconfigure…</b> — edit the grid and its layout.',
+      '<b>Save log</b> / <b>Reload…</b> and <b>Templates</b> — persist, restore and reuse configurations.',
+      '<b>Time-source</b> — PC clock or NTP (with server, sync and offset).',
+      '<b>Export</b> — Excel, CSV, LibreOffice or a Report.',
+    ],
+    steps: [
+      'Run the <b>wizard</b>: header → columns → source type → rows.',
+      'Click <b>Build log</b> to create the grid.',
+      'Edit cells; add, insert, delete or reorder rows as needed.',
+      'Save or <b>export</b> to Excel / CSV / Report.',
+    ],
+  },
+};
+/** Render the in-modal nav + the selected topic's content. */
+function renderManual(key: string) {
+  const nav = $opt('manualNav');
+  const content = $opt('manualContent');
+  if (!nav || !content) return;
+  if (!MANUAL[key]) key = 'general';
+
+  // Order of topics in the nav: General first, then tabs in app order.
+  const order = ['general', ...TABS];
+
+  // Nav buttons (active topic highlighted).
+  nav.innerHTML = '';
+  for (const k of order) {
+    const t = MANUAL[k];
+    if (!t) continue;
+    const b = document.createElement('button');
+    b.className = 'hn-item' + (k === key ? ' on' : '');
+    b.type = 'button';
+    b.textContent = t.title;
+    b.addEventListener('click', () => renderManual(k));
+    nav.appendChild(b);
+  }
+
+  // Topic content.
+  const t = MANUAL[key];
+  content.innerHTML =
+    `<h3>${t.title}</h3>` +
+    `<p class="hc-what">${t.what}</p>` +
+    `<h4>Controls</h4><ul>${t.controls.map((c) => `<li class="hc-ctl">${c}</li>`).join('')}</ul>` +
+    `<h4>How to use it</h4><ol>${t.steps.map((s) => `<li>${s}</li>`).join('')}</ol>` +
+    (key === 'general'
+      ? `<h4>Keyboard</h4><ul>` +
+        `<li><span class="kbd" data-key="open">Open</span> — open a single file</li>` +
+        `<li><span class="kbd" data-key="batch">Batch</span> — folder (batch) mode</li>` +
+        `<li><span class="kbd" data-key="tabs">1–8</span> — switch tabs</li>` +
+        `<li><span class="kbd" data-key="help">?</span> — this manual · <span class="kbd">Esc</span> closes it</li>` +
+        `</ul>`
+      : '');
+  content.scrollTop = 0;
+  // Re-apply OS-aware key glyphs to any .kbd[data-key] we just injected.
+  applyKeyHints();
+}
+
+function openManual() {
+  // Always open to the currently active tab's help.
+  renderManual(activeTab);
+  $opt('manualBack')?.classList.add('open');
+}
 function closeManual() { $opt('manualBack')?.classList.remove('open'); }
 function manualOpen(): boolean { return !!$opt('manualBack')?.classList.contains('open'); }
 
